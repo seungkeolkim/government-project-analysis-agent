@@ -58,10 +58,11 @@ services:
     volumes:
       - ./data:/app/data
       - ./app:/app/app
-    # app.cli 모듈은 후속 subtask(CLI 구현) 에서 정의된다.
-    # 필요 시 `docker compose --profile scraper run --rm scraper <다른 인자>` 로 오버라이드 가능.
+    # 기본 실행: `python -m app.cli run` — 접수중 공고를 목록→상세→첨부 다운로드 순으로 처리.
+    # 필요 시 `docker compose --profile scraper run --rm scraper python -m app.cli run --max-pages 1 --dry-run`
+    # 처럼 인자를 오버라이드해 사용할 수 있다.
     command:
       - python
       - -m
       - app.cli
-      - scrape
+      - run
