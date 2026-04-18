@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ko">
+<head>
+    <meta charset="utf-8">
+    <title>{{ announcement.title }} - 공고 상세 (placeholder)</title>
+</head>
+<body>
+    {# 실제 HTML 마크업은 다음 subtask 에서 교체된다. 라우트 부팅 검증용 최소 placeholder. #}
+    <h1>{{ announcement.title }}</h1>
+    <p>기관: {{ announcement.agency or "(미상)" }} / 상태: {{ announcement.status.value }}</p>
+    <p>마감: {{ announcement.deadline_at or "(미상)" }}</p>
+    <h2>첨부파일 ({{ attachments|length }}건)</h2>
+    <ul>
+        {% for attachment in attachments %}
+        <li>
+            <a href="/attachments/{{ attachment.id }}/download">{{ attachment.original_filename }}</a>
+            ({{ attachment.file_ext }}{% if attachment.file_size %}, {{ attachment.file_size }} bytes{% endif %})
+        </li>
+        {% endfor %}
+    </ul>
+    <p><a href="/">목록으로</a></p>
+</body>
+</html>
