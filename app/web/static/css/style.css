@@ -1,0 +1,400 @@
+/*
+ * IRIS 공고 로컬 열람 페이지 스타일.
+ *
+ * 원칙:
+ *   - 외부 CDN/폰트 의존 금지 (오프라인·격리 환경 고려).
+ *   - 시스템 기본 폰트 스택만 사용 → 한글 UTF-8 렌더링은 OS 기본 폰트에 맡긴다.
+ *   - 간단한 리셋 + 테이블 중심 스타일만 제공. 반응형/모바일은 최소한만 고려.
+ */
+
+/* ---------- 리셋 ---------- */
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    /* 한글 렌더링에 유리한 시스템 폰트 스택. */
+    font-family:
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        "Apple SD Gothic Neo",
+        "Noto Sans KR",
+        "Malgun Gothic",
+        sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    color: #1f2937;
+    background-color: #f7f8fa;
+}
+
+a {
+    color: #1d4ed8;
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+code {
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    background: #eef2f6;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 0.9em;
+}
+
+/* ---------- 레이아웃 ---------- */
+.container {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 0 20px;
+}
+
+.site-header {
+    background: #ffffff;
+    border-bottom: 1px solid #e5e7eb;
+    padding: 20px 0 16px;
+}
+
+.site-title {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 700;
+}
+
+.site-title a {
+    color: #111827;
+}
+
+.site-subtitle {
+    margin: 4px 0 0;
+    font-size: 13px;
+    color: #6b7280;
+}
+
+.site-main {
+    padding: 24px 0 40px;
+}
+
+.site-footer {
+    padding: 16px 0 24px;
+    text-align: center;
+    color: #9ca3af;
+}
+
+/* ---------- 목록 필터 ---------- */
+.list-filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.filter-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.filter-label {
+    font-size: 13px;
+    color: #374151;
+    margin-right: 2px;
+}
+
+.filter-input {
+    padding: 6px 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    background: #ffffff;
+    font-size: 14px;
+    color: #111827;
+}
+
+.filter-input--search {
+    min-width: 220px;
+}
+
+.filter-submit {
+    padding: 6px 14px;
+    border: 1px solid #1d4ed8;
+    background: #1d4ed8;
+    color: #ffffff;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+}
+
+.filter-submit:hover {
+    background: #1e40af;
+}
+
+.filter-reset {
+    font-size: 13px;
+    color: #6b7280;
+    margin-left: 4px;
+}
+
+.list-summary {
+    margin: 0;
+    font-size: 13px;
+    color: #4b5563;
+}
+
+/* ---------- 공통 테이블 ---------- */
+.list-table-wrap {
+    overflow-x: auto;
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+}
+
+.list-table,
+.meta-table,
+.attachments-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #ffffff;
+}
+
+.list-table th,
+.list-table td,
+.attachments-table th,
+.attachments-table td {
+    padding: 10px 12px;
+    text-align: left;
+    border-bottom: 1px solid #e5e7eb;
+    vertical-align: middle;
+}
+
+.list-table th,
+.attachments-table th {
+    background: #f3f4f6;
+    font-weight: 600;
+    font-size: 13px;
+    color: #374151;
+}
+
+.list-table tr:last-child td,
+.attachments-table tr:last-child td {
+    border-bottom: none;
+}
+
+.list-table .col-title {
+    min-width: 280px;
+}
+
+.list-table .col-attachments,
+.list-table .col-status {
+    width: 90px;
+    text-align: center;
+}
+
+.list-table .col-deadline {
+    width: 160px;
+    white-space: nowrap;
+}
+
+.list-table .col-agency {
+    width: 180px;
+}
+
+.empty-row {
+    text-align: center;
+    color: #6b7280;
+    padding: 24px 12px;
+}
+
+/* ---------- 상태 배지 ---------- */
+.status-badge {
+    display: inline-block;
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-weight: 600;
+    border: 1px solid transparent;
+}
+
+.status-receiving {
+    /* 접수중 */
+    color: #065f46;
+    background: #d1fae5;
+    border-color: #6ee7b7;
+}
+
+.status-scheduled {
+    /* 접수예정 */
+    color: #92400e;
+    background: #fef3c7;
+    border-color: #fcd34d;
+}
+
+.status-closed {
+    /* 마감 */
+    color: #4b5563;
+    background: #e5e7eb;
+    border-color: #d1d5db;
+}
+
+/* ---------- 페이지네이션 ---------- */
+.pagination {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    margin-top: 20px;
+}
+
+.pagination-link {
+    padding: 6px 12px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    background: #ffffff;
+    color: #1d4ed8;
+    font-size: 14px;
+}
+
+.pagination-link--disabled {
+    color: #9ca3af;
+    background: #f3f4f6;
+    cursor: default;
+}
+
+.pagination-link--disabled:hover {
+    text-decoration: none;
+}
+
+.pagination-current {
+    font-size: 14px;
+    color: #374151;
+}
+
+/* ---------- 상세 페이지 ---------- */
+.breadcrumb {
+    margin: 0 0 12px;
+    font-size: 13px;
+}
+
+.detail-title {
+    font-size: 22px;
+    margin: 0 0 20px;
+    color: #111827;
+    line-height: 1.35;
+}
+
+.meta-table {
+    margin-bottom: 28px;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.meta-table th,
+.meta-table td {
+    padding: 10px 14px;
+    text-align: left;
+    border-bottom: 1px solid #e5e7eb;
+    vertical-align: top;
+}
+
+.meta-table tr:last-child th,
+.meta-table tr:last-child td {
+    border-bottom: none;
+}
+
+.meta-table th {
+    width: 160px;
+    background: #f9fafb;
+    color: #374151;
+    font-weight: 600;
+    font-size: 13px;
+}
+
+.attachments-title {
+    margin: 24px 0 12px;
+    font-size: 16px;
+    color: #111827;
+}
+
+.attachments-table {
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.attachments-table .col-ext {
+    width: 90px;
+}
+
+.attachments-table .col-size {
+    width: 120px;
+    white-space: nowrap;
+}
+
+.attachments-table .col-download {
+    width: 110px;
+}
+
+.ext-badge {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: #eef2f6;
+    color: #374151;
+}
+
+.ext-pdf {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.ext-hwp,
+.ext-hwpx {
+    background: #dbeafe;
+    color: #1e40af;
+}
+
+.ext-zip {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.download-link {
+    display: inline-block;
+    padding: 4px 10px;
+    border: 1px solid #1d4ed8;
+    border-radius: 4px;
+    color: #1d4ed8;
+    font-size: 13px;
+}
+
+.download-link:hover {
+    background: #1d4ed8;
+    color: #ffffff;
+    text-decoration: none;
+}
+
+.empty-attachments {
+    padding: 16px;
+    background: #f9fafb;
+    border: 1px dashed #d1d5db;
+    border-radius: 6px;
+    color: #6b7280;
+    text-align: center;
+}

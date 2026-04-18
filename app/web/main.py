@@ -12,9 +12,9 @@
     - GET /attachments/{id}/download     첨부파일 FileResponse
 
 템플릿:
-    `app/web/templates/` 하위의 Jinja2 템플릿을 사용한다.
-    본 subtask 에서는 부팅이 가능하도록 최소 placeholder 만 두고,
-    실제 HTML 디자인은 다음 subtask 에서 채운다.
+    `app/web/templates/` 하위의 Jinja2 템플릿(`base.html`/`list.html`/`detail.html`).
+    정적 리소스(CSS)는 `app/web/static/` 을 `/static` 경로로 마운트해 서빙한다.
+    외부 CDN 의존 없이 로컬/격리 환경에서도 그대로 동작하는 것을 목표로 한다.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
@@ -44,6 +45,10 @@ from app.db.session import SessionLocal
 
 # Jinja2 템플릿 루트. 패키지와 함께 배포되도록 `app/web/templates/` 에 둔다.
 TEMPLATES_DIR: Path = Path(__file__).resolve().parent / "templates"
+
+# 정적 리소스(CSS 등) 루트. 외부 CDN 없이 오프라인 환경에서도 서빙 가능하도록
+# 패키지 내부(`app/web/static/`)에 둔다. `/static` URL prefix 로 마운트된다.
+STATIC_DIR: Path = Path(__file__).resolve().parent / "static"
 
 # 페이지네이션 기본/상한값. 상한을 명시해 악의적 큰 page_size 로 DB 를 터뜨리지 못하게 한다.
 DEFAULT_PAGE_SIZE: int = 20
@@ -230,8 +235,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # SQLite 파일/다운로드 디렉터리 등 런타임 경로 보장.
     effective_settings.ensure_runtime_paths()
 
-    # 템플릿 디렉터리는 이 subtask 에서 최소 placeholder 만 가진다.
-    # 실제 HTML 은 다음 subtask 에서 교체된다.
+    # 템플릿 디렉터리 보장. 패키지 내부에 함께 배포되는 것이 원칙이므로
+    # 일반적으로 이미 존재하지만, 예기치 못한 삭제에도 부팅이 가능하도록 방어적으로 생성한다.
     TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
@@ -241,6 +246,15 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         version="0.1.0",
         docs_url="/docs",
         redoc_url=None,
+    )
+
+    # 정적 리소스(CSS) 마운트. 템플릿에서 `/static/css/style.css` 로 참조한다.
+    # 디렉터리가 없어도 부팅에 실패하지 않도록 마운트 직전에 생성만 보장한다.
+    STATIC_DIR.mkdir(parents=True, exist_ok=True)
+    fastapi_app.mount(
+        "/static",
+        StaticFiles(directory=str(STATIC_DIR)),
+        name="static",
     )
 
     # ──────────────────────────────────────────────────────────
@@ -281,7 +295,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         total_pages = ceil(total_count / page_size) if total_count > 0 else 1
 
         return templates.TemplateResponse(
-            "index.html",
+            "list.html",
             {
                 "request": request,
                 "announcements": announcement_items,
@@ -444,6 +458,7 @@ __all__ = [
     "create_app",
     "get_session",
     "TEMPLATES_DIR",
+    "STATIC_DIR",
     "DEFAULT_PAGE_SIZE",
     "MAX_PAGE_SIZE",
 ]
