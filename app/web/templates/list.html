@@ -1,0 +1,120 @@
+{#
+  공고 목록 페이지.
+
+  기능:
+    - 상태 필터 드롭다운 (전체/접수중/접수예정/마감)
+    - 제목·기관명 부분일치 검색창
+    - 테이블: 제목 · 기관 · 상태 · 마감일 · 첨부수
+    - 페이지네이션 (prev / next / 현재 페이지 표시)
+
+  입력 컨텍스트 (main.py `index_page` 가 주입):
+    - announcements: list[Announcement]
+    - total:         int  (전체 건수)
+    - page:          int  (1-based 현재 페이지)
+    - page_size:     int
+    - total_pages:   int
+    - status:        str  (선택된 상태 값 또는 빈 문자열)
+    - search:        str  (검색어 또는 빈 문자열)
+#}
+{% extends "base.html" %}
+
+{% block page_title %}IRIS 공고 목록{% endblock %}
+
+{% block content %}
+<section class="list-filters">
+    {# GET 폼 하나로 status/search 를 동시에 넘긴다. 페이지는 1 로 초기화되도록 hidden 을 걸지 않는다
+       (사용자가 필터/검색을 바꾸면 1 페이지부터 보여주는 것이 자연스럽다). #}
+    <form method="get" action="/" class="filter-form">
+        <label class="filter-label" for="filter-status">상태</label>
+        <select id="filter-status" name="status" class="filter-input">
+            <option value="" {% if not status %}selected{% endif %}>전체</option>
+            <option value="접수중" {% if status == "접수중" %}selected{% endif %}>접수중</option>
+            <option value="접수예정" {% if status == "접수예정" %}selected{% endif %}>접수예정</option>
+            <option value="마감" {% if status == "마감" %}selected{% endif %}>마감</option>
+        </select>
+
+        <label class="filter-label" for="filter-search">검색</label>
+        <input
+            id="filter-search"
+            class="filter-input filter-input--search"
+            type="search"
+            name="search"
+            value="{{ search }}"
+            placeholder="제목 또는 기관명"
+            autocomplete="off">
+
+        <button type="submit" class="filter-submit">적용</button>
+
+        {% if status or search %}
+        {# 필터/검색이 걸려 있을 때만 초기화 링크를 노출한다. #}
+        <a class="filter-reset" href="/">초기화</a>
+        {% endif %}
+    </form>
+
+    <p class="list-summary">총 {{ total }}건 · {{ page }} / {{ total_pages }} 페이지</p>
+</section>
+
+<section class="list-table-wrap">
+    <table class="list-table">
+        <thead>
+            <tr>
+                <th class="col-title">제목</th>
+                <th class="col-agency">기관</th>
+                <th class="col-status">상태</th>
+                <th class="col-deadline">마감일</th>
+                <th class="col-attachments">첨부수</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for announcement in announcements %}
+            <tr>
+                <td class="col-title">
+                    <a href="/announcements/{{ announcement.id }}">{{ announcement.title }}</a>
+                </td>
+                <td class="col-agency">{{ announcement.agency or "-" }}</td>
+                <td class="col-status">
+                    {# 상태별 클래스로 색상 구분. CSS 는 하드코드된 3개 값만 처리한다. #}
+                    <span class="status-badge status-{{ announcement.status.name | lower }}">
+                        {{ announcement.status.value }}
+                    </span>
+                </td>
+                <td class="col-deadline">
+                    {% if announcement.deadline_at %}
+                        {{ announcement.deadline_at.strftime("%Y-%m-%d %H:%M") }}
+                    {% else %}
+                        -
+                    {% endif %}
+                </td>
+                <td class="col-attachments">{{ announcement.attachments | length }}</td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="5" class="empty-row">조건에 맞는 공고가 없습니다.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+{% if total_pages > 1 %}
+<nav class="pagination" aria-label="페이지 이동">
+    {# 쿼리스트링 조합: 필터/검색 값을 보존한 채 페이지 번호만 바꿔 링크한다.
+       상태/검색이 비어 있으면 파라미터를 아예 붙이지 않아 URL 을 깔끔하게 유지한다. #}
+    {% set base_query %}{% if status %}&status={{ status }}{% endif %}{% if search %}&search={{ search }}{% endif %}{% endset %}
+
+    {% if page > 1 %}
+    <a class="pagination-link" href="/?page={{ page - 1 }}{{ base_query }}">← 이전</a>
+    {% else %}
+    <span class="pagination-link pagination-link--disabled">← 이전</span>
+    {% endif %}
+
+    <span class="pagination-current">{{ page }} / {{ total_pages }}</span>
+
+    {% if page < total_pages %}
+    <a class="pagination-link" href="/?page={{ page + 1 }}{{ base_query }}">다음 →</a>
+    {% else %}
+    <span class="pagination-link pagination-link--disabled">다음 →</span>
+    {% endif %}
+</nav>
+{% endif %}
+{% endblock %}

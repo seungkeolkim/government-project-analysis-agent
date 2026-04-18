@@ -1,0 +1,38 @@
+{#
+  공통 레이아웃 템플릿.
+
+  - 모든 페이지(list/detail) 가 상속하여 HTML 뼈대와 공통 헤더·푸터를 공유한다.
+  - 외부 CDN 없이 동작하도록 CSS 는 로컬 `/static/css/style.css` 만 링크한다
+    (오프라인·격리 환경 고려).
+  - charset 은 UTF-8 로 고정하여 한글 제목/파일명이 깨지지 않게 한다.
+  - 자식 템플릿은 `page_title` / `content` 두 블록을 오버라이드한다.
+#}
+<!doctype html>
+<html lang="ko">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block page_title %}IRIS 공고 열람{% endblock %}</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header class="site-header">
+        <div class="container">
+            <h1 class="site-title"><a href="/">IRIS 사업공고 로컬 열람</a></h1>
+            <p class="site-subtitle">IRIS 에서 수집한 공고와 첨부파일을 로컬에서 조회한다.</p>
+        </div>
+    </header>
+
+    <main class="site-main">
+        <div class="container">
+            {% block content %}{% endblock %}
+        </div>
+    </main>
+
+    <footer class="site-footer">
+        <div class="container">
+            <small>로컬 전용 · 외부 공개 금지</small>
+        </div>
+    </footer>
+</body>
+</html>
