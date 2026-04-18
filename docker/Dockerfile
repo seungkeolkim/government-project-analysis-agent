@@ -2,11 +2,13 @@
 #
 # - Playwright 공식 이미지를 베이스로 사용하여 Chromium 등 브라우저 의존성을
 #   OS 패키지 레벨에서 미리 포함한다. (pyproject 의 playwright>=1.44,<2.0 과 일치하는 태그)
+# - noble(Ubuntu 24.04) 변형을 사용해 Python 3.12 를 확보한다.
+#   jammy 변형은 Python 3.10 이라 pyproject 의 requires-python=">=3.11,<3.13" 과 충돌한다.
 # - 하나의 이미지로 웹 UI(app 서비스)와 스크래퍼 CLI(scraper 서비스)를 모두 실행한다.
 # - 실제 엔트리포인트(app.cli, app.web.main) 는 후속 subtask 에서 구현되며,
 #   본 subtask 에서는 CMD 가 경로만 정확히 가리키는 placeholder 상태다.
 
-FROM mcr.microsoft.com/playwright/python:v1.47.0-jammy
+FROM mcr.microsoft.com/playwright/python:v1.47.0-noble
 
 # 파이썬/피프 런타임 기본 옵션
 #  - PYTHONUNBUFFERED: 로그가 버퍼링 없이 즉시 출력되도록 한다.
@@ -31,8 +33,8 @@ COPY app ./app
 # 3) 파이썬 의존성 및 패키지 editable 설치.
 #    editable(-e) 로 설치해야 compose 의 ./app 바인드 마운트와 함께
 #    호스트의 소스 변경이 즉시 반영된다.
-RUN pip install --upgrade pip \
-    && pip install -e .
+RUN pip install --upgrade pip
+RUN pip install -e .
 
 # 4) 런타임에 사용되는 로컬 디렉터리 기본 생성.
 #    compose 의 ./data 볼륨이 이를 덮어쓰지만, 단독 컨테이너 실행 시에도 동작하도록 준비한다.
