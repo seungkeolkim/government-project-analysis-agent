@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# 가상환경
+.venv/
+venv/
+env/
+ENV/
+
+# 환경변수 (실제 값)
+.env
+.env.local
+.env.*.local
+
+# 빌드/배포 산출물
+build/
+dist/
+*.egg-info/
+*.egg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# 로그
+*.log
+logs/
+
+# 데이터 산출물 (다운로드 파일, 로컬 DB 등은 커밋하지 않음)
+data/downloads/*
+!data/downloads/.gitkeep
+data/db/*
+!data/db/.gitkeep
+data/tmp/
+*.sqlite3
+*.sqlite
+*.db
+
+# Playwright 브라우저 캐시
+.playwright/
+ms-playwright/
+
+# 기타 임시 파일
+*.tmp
+*.bak
