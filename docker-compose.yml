@@ -1,0 +1,67 @@
+# IRIS 사업공고 스크래퍼 로컬 실행용 docker compose 정의.
+#
+# 서비스 구성:
+#   - app:     FastAPI 기반 로컬 웹 UI. `docker compose up` 시 기본 기동.
+#              포트 8000 을 호스트에 노출한다.
+#   - scraper: Playwright 기반 스크래핑 CLI. 장시간 상주 프로세스가 아니라
+#              필요할 때만 1회 실행하는 형태이므로 `profiles: [scraper]` 로 분리한다.
+#              실행은 아래 명령으로 수행한다:
+#                  docker compose --profile scraper run --rm scraper
+#
+# 볼륨 구성:
+#   - ./data:/app/data  : SQLite DB 파일과 첨부파일을 호스트에 영속 보관.
+#   - ./app:/app/app    : 개발 편의를 위한 소스 바인드 마운트.
+#                          이미지 빌드 없이도 호스트의 코드 변경이 즉시 반영된다.
+#
+# 환경변수는 프로젝트 루트의 `.env` 파일을 공통으로 사용한다.
+# (`.env.example` 을 복사하여 생성)
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: iris-agent:dev
+    container_name: iris-agent-web
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./app:/app/app
+    # 개발 중 소스 변경 시 자동 재기동되도록 --reload 사용.
+    # app.web.main:app 은 후속 subtask(web 구현) 에서 정의된다.
+    command:
+      - uvicorn
+      - app.web.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+    restart: unless-stopped
+
+  scraper:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    # app 서비스와 동일한 이미지를 재사용하여 빌드 시간을 절약한다.
+    image: iris-agent:dev
+    container_name: iris-agent-scraper
+    # 기본 `up` 에서 기동되지 않도록 프로파일로 격리한다.
+    # 실행: `docker compose --profile scraper run --rm scraper`
+    profiles:
+      - scraper
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./app:/app/app
+    # app.cli 모듈은 후속 subtask(CLI 구현) 에서 정의된다.
+    # 필요 시 `docker compose --profile scraper run --rm scraper <다른 인자>` 로 오버라이드 가능.
+    command:
+      - python
+      - -m
+      - app.cli
+      - scrape
