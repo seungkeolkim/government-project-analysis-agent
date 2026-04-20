@@ -30,7 +30,7 @@ from bs4 import BeautifulSoup
 from loguru import logger
 
 from app.config import Settings, get_settings
-from app.scraper.list_scraper import (
+from app.scraper.iris.list_scraper import (
     DEFAULT_MAX_ATTEMPTS,
     DEFAULT_USER_AGENT,
     HTTP_CONNECT_TIMEOUT_SEC,

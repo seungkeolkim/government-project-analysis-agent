@@ -17,6 +17,7 @@ from loguru import logger
 from sqlalchemy import Engine, inspect
 
 from app.config import get_settings
+from app.db.migration import run_migrations
 from app.db.models import Base
 
 # 모델 클래스들을 import 해야 `Base.metadata` 에 테이블이 등록된다.
@@ -27,7 +28,11 @@ from app.logging_setup import configure_logging
 
 
 def init_db(engine: Engine | None = None) -> Engine:
-    """등록된 모든 모델의 테이블을 생성한다.
+    """누락된 스키마를 마이그레이션하고, 등록된 모든 모델의 테이블을 생성한다.
+
+    순서:
+        1. run_migrations: 기존 DB 스키마를 최신으로 업그레이드한다 (멱등).
+        2. create_all: 아직 없는 테이블/인덱스를 생성한다 (멱등).
 
     Args:
         engine: 사용할 엔진. 생략하면 `get_engine()` 이 반환하는 싱글턴을 쓴다.
@@ -39,6 +44,9 @@ def init_db(engine: Engine | None = None) -> Engine:
 
     # 런타임 경로(예: SQLite 파일의 부모 디렉터리)를 한 번 더 보장한다.
     get_settings().ensure_runtime_paths()
+
+    # 기존 DB 컬럼 변경/추가 마이그레이션 (create_all 전에 실행해야 한다)
+    run_migrations(effective_engine)
 
     existing_before = set(inspect(effective_engine).get_table_names())
     logger.info(
