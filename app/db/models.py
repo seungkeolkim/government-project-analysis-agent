@@ -5,8 +5,19 @@ Alembic 은 도입하지 않으며, 초기 DDL 은 `init_db.py` 의 `create_all`
 기존 DB 스키마 변경은 `app/db/migration.py` 의 `run_migrations` 가 처리한다.
 
 설계 메모:
-    - 공고의 고유 식별자는 (source_type, source_announcement_id) 복합 UNIQUE 이다.
-      소스마다 독립된 ID 공간을 가지므로 단일 컬럼 unique 로는 충분하지 않다.
+    - 증분 수집 이력 보존 모델:
+      동일 (source_type, source_announcement_id) 에 대해 여러 row 가 존재할 수 있다.
+      `is_current=True` 인 row 가 현재 유효한 최신 버전이며, `is_current=False` 인 row 는
+      이전 버전(이력)이다. DB 레벨 UNIQUE 제약 대신 repository 계층이 앱 레벨에서
+      "is_current=True row 는 (source_type, source_announcement_id) 당 최대 1개" 를 보장한다.
+
+      이력 보존 동작:
+        - 상태(status) 만 변경: is_current row 를 in-place UPDATE (status_transitioned)
+        - 그 외 비교 필드(title/deadline_at/agency) 변경: 기존 row 를 is_current=False 로
+          봉인하고 신규 row 를 INSERT (new_version). 이력이 row 단위로 누적된다.
+
+    - 소스마다 독립된 ID 공간을 가지므로 (source_type, source_announcement_id) 복합
+      인덱스를 조회 성능용으로 유지한다.
     - 상태값은 '접수중/접수예정/마감' 세 가지만 취급한다(문자열 Enum).
     - 시간 컬럼은 모두 timezone-aware UTC 로 저장한다(`DateTime(timezone=True)`).
     - `raw_metadata` 는 수집 소스에서 내려온 임의의 부가 필드를 손실 없이 보존한다.
@@ -21,6 +32,7 @@ from typing import Any, Optional
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     DateTime,
     Enum,
     ForeignKey,
@@ -28,7 +40,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    UniqueConstraint,
 )
 from sqlalchemy.orm import (
     DeclarativeBase,
@@ -68,18 +79,20 @@ class AnnouncementStatus(str, enum.Enum):
 class Announcement(Base):
     """사업공고 한 건을 나타내는 레코드.
 
-    (source_type, source_announcement_id) 복합 UNIQUE 로 UPSERT 대상을 판정한다.
-    화면 필터링과 마감 임박 정렬을 위해 `status` 와 `deadline_at` 에도 인덱스를 둔다.
+    동일 (source_type, source_announcement_id) 에 대해 이력이 다중 row 로 누적될 수 있다.
+    `is_current=True` 인 row 가 현재 유효한 버전이다.
+    화면 필터링과 마감 임박 정렬을 위해 `status`, `deadline_at`, `is_current` 에 인덱스를 둔다.
     """
 
     __tablename__ = "announcements"
 
-    # (source_type, source_announcement_id) 복합 UNIQUE: 소스별 외부 ID 중복 방지
+    # (source_type, source_announcement_id) 복합 인덱스 — 조회 성능용 (UNIQUE 아님).
+    # is_current=True row 의 유일성은 repository 계층(app-level)에서 보장한다.
     __table_args__ = (
-        UniqueConstraint(
+        Index(
+            "ix_announcement_source",
             "source_type",
             "source_announcement_id",
-            name="uq_announcement_source",
         ),
     )
 
@@ -206,6 +219,19 @@ class Announcement(Base):
         default=_utcnow,
         onupdate=_utcnow,
         doc="레코드가 마지막으로 갱신된 시각.",
+    )
+
+    # 현재 유효 버전 여부.
+    # True: 현재 유효한 최신 row. False: 이력(구버전) row.
+    # (source_type, source_announcement_id) 당 is_current=True row 는 최대 1개.
+    # 유일성은 DB 제약 대신 repository 계층이 보장한다.
+    is_current: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="1",
+        index=True,
+        doc="현재 유효 버전 여부. False 이면 이력(구버전) 레코드.",
     )
 
     # 첨부파일과의 1:N 관계. 공고 삭제 시 첨부 레코드도 함께 삭제한다.

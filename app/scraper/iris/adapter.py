@@ -3,6 +3,20 @@
 기존 `app/scraper/iris/list_scraper` / `detail_scraper` 를 `BaseSourceAdapter` API 로
 감싸는 adapter 클래스. HTTP 클라이언트를 생성·관리하며, list/detail 스크래퍼의
 private helper 를 외부에 노출하지 않는다.
+
+TODO [IRIS 접수예정·마감 수집 시작 시]:
+    현재 scrape_list 는 '접수중' 상태의 공고만 반환한다.
+    접수예정·마감 수집을 추가할 때 다음 사항을 함께 처리해야 한다:
+
+    1. list_scraper.scrape_list 에 status_filter 파라미터 추가
+       (예: status_filter="접수예정" / "마감" / None=전체)
+    2. 반환되는 row 의 status 값이 AnnouncementStatus Enum(접수중/접수예정/마감)으로
+       정규화되어야 한다. 현재 IRIS API 가 반환하는 상태값 문자열과 Enum 값을 매핑하는
+       로직을 list_scraper 또는 이 어댑터에서 처리한다.
+    3. 상태 전이(예: 접수예정 → 접수중) 가 발생하면 repository.upsert_announcement 가
+       action="status_transitioned" 을 반환한다. CLI(_log_upsert_action)에서
+       WARNING 으로 기록되며, 실제 검증 및 추가 처리(알림 등)를 이때 구현한다.
+    4. docs/status_transition_todo.md 참고.
 """
 
 from __future__ import annotations
