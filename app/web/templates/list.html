@@ -18,7 +18,7 @@
 #}
 {% extends "base.html" %}
 
-{% block page_title %}IRIS 공고 목록{% endblock %}
+{% block page_title %}공고 목록{% endblock %}
 
 {% block content %}
 <section class="list-filters">
@@ -59,6 +59,7 @@
             <tr>
                 <th class="col-title">제목</th>
                 <th class="col-agency">기관</th>
+                <th class="col-source">소스</th>
                 <th class="col-status">상태</th>
                 <th class="col-deadline">마감일</th>
             </tr>
@@ -72,8 +73,14 @@
                     </a>
                 </td>
                 <td class="col-agency">{{ announcement.agency or "-" }}</td>
+                <td class="col-source">
+                    {# 소스 유형별 클래스로 색상 구분. source_type 은 소문자로 변환해 클래스명에 사용. #}
+                    <span class="source-badge source-{{ announcement.source_type | lower }}">
+                        {{ announcement.source_type }}
+                    </span>
+                </td>
                 <td class="col-status">
-                    {# 상태별 클래스로 색상 구분. CSS 는 하드코드된 3개 값만 처리한다. #}
+                    {# 상태별 클래스로 색상 구분. #}
                     <span class="status-badge status-{{ announcement.status.name | lower }}">
                         {{ announcement.status.value }}
                     </span>
@@ -88,7 +95,7 @@
             </tr>
             {% else %}
             <tr>
-                <td colspan="4" class="empty-row">조건에 맞는 공고가 없습니다.</td>
+                <td colspan="5" class="empty-row">조건에 맞는 공고가 없습니다.</td>
             </tr>
             {% endfor %}
         </tbody>

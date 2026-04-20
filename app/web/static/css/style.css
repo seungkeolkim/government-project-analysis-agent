@@ -218,6 +218,35 @@ code {
     padding: 24px 12px;
 }
 
+/* ---------- 소스 배지 ---------- */
+/*
+ * 공고 수집 소스 유형을 표시하는 배지.
+ * CSS 클래스: source-badge source-iris, source-badge source-ntis, ...
+ * 새 소스 추가 시 해당 클래스를 이 블록에 추가한다.
+ */
+.source-badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 1px 7px;
+    border-radius: 3px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    border: 1px solid transparent;
+}
+
+.source-iris {
+    color: #1e3a8a;
+    background: #dbeafe;
+    border-color: #93c5fd;
+}
+
+.source-ntis {
+    color: #5b21b6;
+    background: #ede9fe;
+    border-color: #c4b5fd;
+}
+
 /* ---------- 상태 배지 ---------- */
 .status-badge {
     display: inline-block;

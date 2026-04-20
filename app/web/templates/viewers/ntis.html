@@ -1,0 +1,18 @@
+{#
+  NTIS 공고 상세 본문 뷰어 (stub).
+
+  NTIS 스크래퍼가 아직 구현되지 않았으므로 안내 메시지만 표시한다.
+  NTIS 수집 기능이 구현되면 이 파일을 실제 viewer 로 교체한다.
+#}
+<div class="detail-not-fetched">
+    <p><strong>이 소스의 상세 수집 기능은 아직 구현되지 않았습니다.</strong></p>
+    <p>NTIS 스크래퍼는 현재 stub 상태입니다. 향후 구현 예정입니다.</p>
+    {% if announcement.detail_url %}
+        <p>
+            원문을 직접 확인하세요:
+            <a href="{{ announcement.detail_url }}" target="_blank" rel="noopener noreferrer">
+                {{ announcement.detail_url }}
+            </a>
+        </p>
+    {% endif %}
+</div>

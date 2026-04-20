@@ -72,7 +72,8 @@ def _serialize_announcement(announcement: Announcement) -> dict[str, Any]:
     """
     return {
         "id": announcement.id,
-        "iris_announcement_id": announcement.iris_announcement_id,
+        "source_announcement_id": announcement.source_announcement_id,
+        "source_type": announcement.source_type,
         "title": announcement.title,
         "agency": announcement.agency,
         "status": announcement.status.value,
@@ -138,8 +139,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
     fastapi_app = FastAPI(
-        title="IRIS 공고 로컬 열람",
-        description="로컬에 적재된 IRIS 사업공고를 조회한다.",
+        title="사업공고 로컬 열람",
+        description="로컬에 적재된 사업공고를 조회한다.",
         version="0.1.0",
         docs_url="/docs",
         redoc_url=None,
