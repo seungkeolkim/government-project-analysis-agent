@@ -137,19 +137,17 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 # 2) 프로젝트를 editable 로 설치
 pip install -e .
 
-# 3) Playwright Chromium 바이너리 설치
-playwright install chromium
-
-# 4) 환경변수 준비 (한 번만)
+# 3) 환경변수 준비 (한 번만)
+# (Playwright/Chromium 은 첨부파일 수집 기능 활성화 시점에 필요, 현재 불필요)
 cp .env.example .env
 
-# 5) 스크래퍼 실행 — 접수중 공고 수집 (sources.yaml 의 enabled 소스 전체)
+# 4) 스크래퍼 실행 — 접수중 공고 수집 (sources.yaml 의 enabled 소스 전체)
 python -m app.cli run --status 접수중
 
 # IRIS 만 지정해서 실행
 python -m app.cli run --status 접수중 --source IRIS
 
-# 6) 별도 터미널에서 웹 UI 기동
+# 5) 별도 터미널에서 웹 UI 기동
 uvicorn app.web.main:app --host 0.0.0.0 --port 8000
 ```
 
@@ -208,8 +206,9 @@ uvicorn app.web.main:app --host 0.0.0.0 --port 8000
    - [ ] 첨부파일 다운로드 링크(`/attachments/{id}/download`) 에서 실제 파일이 내려온다.
    - [ ] `/announcements.json`, `/announcements/{id}.json` 이 JSON 을 반환한다.
 6. **로컬(비 Docker) 경로도 실행 가능한지 샘플 확인**
-   - [ ] `pip install -e .` + `playwright install chromium` 이후
+   - [ ] `pip install -e .` 이후
          `python -m app.cli run --status 접수중 --max-pages 1 --dry-run` 가 동작한다.
+         (Playwright 는 현재 불필요 — 첨부 수집 기능 활성화 시 `playwright install chromium` 추가 예정)
    - [ ] `uvicorn app.web.main:app --host 0.0.0.0 --port 8000` 로 동일 UI 가 기동된다.
 7. **데이터 정리**
    - [ ] 재설치/초기화가 필요할 때 `./data/db/app.sqlite3` 와 `./data/downloads/` 를 삭제하면
