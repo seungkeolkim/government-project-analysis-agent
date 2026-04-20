@@ -136,9 +136,12 @@ INFO  상세 수집 완료(ok): source=IRIS id=12345
 INFO  [5/42] 공고 처리: source=IRIS id=11111
 INFO  상세 수집 생략(변경 없음, 기존 데이터 재사용): source=IRIS id=11111
 ...
-INFO  소스 IRIS 완료: 목록 성공 42건 / 실패 0건 | 상세 성공 5건 / 실패 0건 / 생략(변경없음) 37건
-INFO  scrape 실행 완료: 목록 성공 42건 / 목록 실패 0건 | 상세 성공 5건 / 실패 0건 / 생략(변경없음) 37건
+INFO  소스 IRIS 완료: 목록 성공 42건 / 실패 0건 | 상세 성공 5건 / 실패 0건 / 생략(변경없음) 37건 | action 분포: 신규=5 변경없음=37 버전갱신=0 상태전이=0
+INFO  scrape 실행 완료: 목록 성공 42건 / 목록 실패 0건 | 상세 성공 5건 / 실패 0건 / 생략(변경없음) 37건 | action 분포: 신규=5 변경없음=37 버전갱신=0 상태전이=0
 ```
+
+> **확인 포인트**: 2회차 이후 실행에서 `변경없음=N` 이 전체 공고 수와 가까울수록 정상이다.
+> `신규=0 변경없음=42` 이면 모든 공고가 기존 데이터를 재사용하고 상세 수집도 생략된다.
 
 ### 주의가 필요한 로그
 
@@ -213,8 +216,9 @@ SELECT COUNT(*) FROM announcements WHERE is_current = 1;
 
 ### 재실행해도 상세 수집이 계속 발생한다
 
+- 종료 로그의 `action 분포: 신규=N 변경없음=N` 에서 `변경없음` 이 0에 가까우면 변경 감지가 오동작 중이다.
 - `상세 수집 생략` 로그가 없고 매번 상세를 수집하면:
-  - `detail_fetched_at` 이 NULL인 row가 있는지 확인
+  - `detail_fetched_at` 이 NULL인 row가 있는지 확인 (상세가 아직 한 번도 수집 안 된 경우)
   - 비교 필드(title/status/deadline_at/agency)가 매 수집마다 달라지는지 확인
 
 ```sql
@@ -222,6 +226,9 @@ SELECT id, title, deadline_at, detail_fetched_at
 FROM announcements WHERE is_current = 1
 ORDER BY id LIMIT 10;
 ```
+
+> **[00007 이후]** deadline_at tz-naive/aware 불일치 및 문자열 공백 차이로 인한 false-positive 변경 감지가 수정됐다.
+> 위 증상이 여전히 발생하면 `--log-level DEBUG` 로 실행하여 어떤 공고가 `created`/`new_version`으로 판정되는지 확인한다.
 
 ### DB 스키마 오류 (`no such column: is_current`)
 

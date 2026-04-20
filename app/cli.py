@@ -210,6 +210,8 @@ async def _run_source_announcements(
     detail_failure_count = 0
     # 변경 없음 + 기존 상세 있음 → 상세 수집을 생략한 건수
     skipped_detail_count = 0
+    # upsert action 별 건수 (created / unchanged / new_version / status_transitioned)
+    action_counts: dict[str, int] = {}
 
     # 상세 수집 실제 요청 순서 인덱스 (지연 계산용)
     detail_request_index = 0
@@ -236,6 +238,8 @@ async def _run_source_announcements(
                 with session_scope() as session:
                     upsert_result = upsert_announcement(session, payload)
                 _log_upsert_action(upsert_result, source_type, source_announcement_id)
+                # action 분포 집계
+                action_counts[upsert_result.action] = action_counts.get(upsert_result.action, 0) + 1
             success_count += 1
         except Exception as exc:
             failure_count += 1
@@ -314,6 +318,7 @@ async def _run_source_announcements(
         "detail_success_count": detail_success_count,
         "detail_failure_count": detail_failure_count,
         "skipped_detail_count": skipped_detail_count,
+        "action_counts": action_counts,
     }
 
 
@@ -441,6 +446,7 @@ async def _orchestrate(
     total_detail_success = 0
     total_detail_failure = 0
     total_skipped_detail = 0
+    total_action_counts: dict[str, int] = {}
 
     for source_config in active_sources:
         logger.info("── 소스 {} 수집 시작", source_config.id)
@@ -468,14 +474,22 @@ async def _orchestrate(
         total_detail_success += source_stats["detail_success_count"]
         total_detail_failure += source_stats["detail_failure_count"]
         total_skipped_detail += source_stats["skipped_detail_count"]
+        for action, count in source_stats.get("action_counts", {}).items():
+            total_action_counts[action] = total_action_counts.get(action, 0) + count
 
+        source_action_counts = source_stats.get("action_counts", {})
         logger.info(
             "소스 {} 완료: 목록 성공 {}건 / 실패 {}건 | "
-            "상세 성공 {}건 / 실패 {}건 / 생략(변경없음) {}건",
+            "상세 성공 {}건 / 실패 {}건 / 생략(변경없음) {}건 | "
+            "action 분포: 신규={} 변경없음={} 버전갱신={} 상태전이={}",
             source_config.id,
             source_stats["success_count"], source_stats["failure_count"],
             source_stats["detail_success_count"], source_stats["detail_failure_count"],
             source_stats["skipped_detail_count"],
+            source_action_counts.get("created", 0),
+            source_action_counts.get("unchanged", 0),
+            source_action_counts.get("new_version", 0),
+            source_action_counts.get("status_transitioned", 0),
         )
 
     return {
@@ -485,6 +499,7 @@ async def _orchestrate(
         "detail_success_count": total_detail_success,
         "detail_failure_count": total_detail_failure,
         "skipped_detail_count": total_skipped_detail,
+        "action_counts": total_action_counts,
     }
 
 
@@ -598,14 +613,20 @@ async def _async_main(argv: list[str]) -> int:
         )
         return 1
 
+    final_action_counts = summary.get("action_counts", {})
     logger.info(
         "scrape 실행 완료: 목록 성공 {}건 / 목록 실패 {}건 | "
-        "상세 성공 {}건 / 실패 {}건 / 생략(변경없음) {}건",
+        "상세 성공 {}건 / 실패 {}건 / 생략(변경없음) {}건 | "
+        "action 분포: 신규={} 변경없음={} 버전갱신={} 상태전이={}",
         summary["success_count"],
         summary["failure_count"],
         summary["detail_success_count"],
         summary["detail_failure_count"],
         summary["skipped_detail_count"],
+        final_action_counts.get("created", 0),
+        final_action_counts.get("unchanged", 0),
+        final_action_counts.get("new_version", 0),
+        final_action_counts.get("status_transitioned", 0),
     )
     if summary["failure_count"]:
         logger.warning("목록 실패 공고 ID 목록: {}", summary["failed_announcement_ids"])
