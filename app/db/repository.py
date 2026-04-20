@@ -50,6 +50,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
 from sqlalchemy import func, or_, select
@@ -148,6 +149,25 @@ def _filter_payload(payload: Mapping[str, Any], allowed: frozenset[str]) -> dict
     return {key: value for key, value in payload.items() if key in allowed}
 
 
+def _normalize_for_comparison(value: Any) -> Any:
+    """변경 감지 비교 전 값을 정규화한다. DB 저장 데이터는 수정하지 않는다.
+
+    - datetime: tz-aware 이면 naive UTC 로 변환, tz-naive 이면 그대로 반환한다.
+      SQLite 가 tz-naive 로 돌려주는 datetime 과 payload 의 tz-aware UTC datetime 간
+      불일치를 해소하여 false-positive 변경 감지를 방지한다.
+    - str: 앞뒤 공백 제거. IRIS 응답에 포함될 수 있는 여백으로 인한 false-positive 방지.
+    - 기타(None, Enum 등): 변경 없이 반환한다.
+    """
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            # tz-aware → naive UTC 로 변환 (비교 전용, 저장 데이터 불변)
+            return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
+    if type(value) is str:
+        return value.strip()
+    return value
+
+
 def _detect_changes(
     existing: Announcement,
     clean_payload: dict[str, Any],
@@ -156,6 +176,8 @@ def _detect_changes(
 
     비교 대상 필드: title, status, deadline_at, agency (_CHANGE_DETECTION_FIELDS 참조).
     payload 에 해당 키가 없으면 해당 필드는 변경 없음으로 판정한다.
+    양측 값은 _normalize_for_comparison 으로 정규화한 뒤 비교하여
+    datetime tz-naive/aware 불일치 및 문자열 공백 차이로 인한 false-positive 를 제거한다.
 
     Args:
         existing:      DB 에서 조회한 기존 Announcement 인스턴스 (is_current=True).
@@ -168,8 +190,8 @@ def _detect_changes(
     for field_name in _CHANGE_DETECTION_FIELDS:
         if field_name not in clean_payload:
             continue
-        existing_val = getattr(existing, field_name)
-        new_val = clean_payload[field_name]
+        existing_val = _normalize_for_comparison(getattr(existing, field_name))
+        new_val = _normalize_for_comparison(clean_payload[field_name])
         if existing_val != new_val:
             changed.add(field_name)
     return frozenset(changed)
