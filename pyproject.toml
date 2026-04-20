@@ -16,8 +16,9 @@ authors = [
 # 런타임 의존성.
 # 실제 설치는 pip / Docker 빌드 단계에서 수행하며, 이 파일은 선언 전용이다.
 dependencies = [
-    # 스크래핑 (HTTP 기반 목록 수집)
+    # 스크래핑 (HTTP 기반 목록·상세 수집)
     "httpx>=0.27,<1.0",
+    "beautifulsoup4>=4.12,<5.0",
 
     # 데이터 모델 / DB
     "SQLAlchemy>=2.0,<3.0",
