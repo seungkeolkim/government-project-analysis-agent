@@ -49,9 +49,15 @@ from app.db.init_db import init_db
 from app.db.repository import upsert_announcement, upsert_attachment
 from app.db.session import session_scope
 from app.logging_setup import configure_logging
-from app.scraper.detail_scraper import scrape_detail
-from app.scraper.downloader import download_attachments_for_announcement
-from app.scraper.list_scraper import _open_browser_context, scrape_list
+from app.scraper.list_scraper import scrape_list
+
+# TODO(00002-2): 상세/첨부 경로 제거 subtask에서 아래 import와 관련 코드를 삭제한다.
+try:
+    from app.scraper.detail_scraper import scrape_detail  # type: ignore[import]
+    from app.scraper.downloader import download_attachments_for_announcement  # type: ignore[import]
+    _DETAIL_SCRAPER_AVAILABLE = True
+except ImportError:
+    _DETAIL_SCRAPER_AVAILABLE = False
 
 # ──────────────────────────────────────────────────────────────
 # 상수
@@ -219,49 +225,13 @@ async def _process_single_announcement(
         with session_scope() as session:
             upsert_announcement(session, initial_payload)
 
-    # (b) 상세 메타 + 첨부 트리거 수집.
-    detail_result = await scrape_detail(row_metadata, page=page, settings=settings)
-    raw_metadata_pairs = detail_result.get("raw_metadata") or {}
-    attachment_triggers = detail_result.get("attachments") or []
-    log.info(
-        "상세 수집 완료: meta_pair={} attachment_trigger={}",
-        len(raw_metadata_pairs),
-        len(attachment_triggers),
-    )
-
-    # (c) raw_metadata 를 포함해 메타 보강 upsert.
-    enriched_payload = _build_enriched_announcement_payload(
-        row_metadata,
-        detail_result,
-        status_label,
-    )
-
-    # (d) 첨부파일 다운로드 + (e) 각 첨부 upsert.
+    # TODO(00002-2): 상세/첨부 경로 제거 subtask에서 이 블록 전체를 삭제한다.
+    # 현재는 상세/첨부 수집이 비활성화되어 있어 빈 결과를 사용한다.
+    attachment_triggers: list[Any] = []
     persisted_attachment_count = 0
     downloaded_attachment_count = 0
 
-    if dry_run:
-        log.info("[dry-run] 메타 보강 upsert / 첨부 다운로드(skip)")
-    else:
-        # 보강된 메타와 첨부 적재는 동일 트랜잭션으로 묶는다(메타와 첨부의 정합성).
-        download_payloads = await download_attachments_for_announcement(
-            detail_result,
-            page=page,
-            settings=settings,
-        )
-        downloaded_attachment_count = len(download_payloads)
-
-        with session_scope() as session:
-            persisted_announcement = upsert_announcement(session, enriched_payload)
-            for download_payload in download_payloads:
-                # download_url 이 빠진 채 들어오는 경우(트리거 다운로드)도 있으므로,
-                # 트리거의 download_url 은 None 그대로 받는다(repository 가 처리).
-                upsert_attachment(
-                    session,
-                    persisted_announcement.id,
-                    download_payload,
-                )
-                persisted_attachment_count += 1
+    log.info("상세/첨부 수집 비활성화 — 기본 메타만 적재한다 (00002-2에서 경로 축소 예정)")
 
     log.info(
         "공고 처리 완료: 첨부 시도 {} / 다운로드 {} / 적재 {}",
@@ -356,44 +326,41 @@ async def _orchestrate(
             "failed_announcement_ids": [],
         }
 
-    # (2) 상세/다운로드용 단일 브라우저 컨텍스트.
-    # list_scraper 와 별도로 여기서 한 번 더 연다(scrape_list 는 자체 컨텍스트를
-    # 닫고 반환하므로 재사용이 불가능하다). 이렇게 해도 브라우저 부팅은 총 2회로
-    # 끝나며, 공고 1건당 매번 새 브라우저를 띄우는 비용을 피한다.
-    async with _open_browser_context(settings) as (_browser, _context, shared_page):
-        for row_index, row_metadata in enumerate(target_rows, start=1):
-            iris_announcement_id = row_metadata.get("iris_announcement_id") or "(unknown)"
-            logger.info(
-                "── [{}/{}] 공고 처리 진입: id={}",
-                row_index,
-                len(target_rows),
-                iris_announcement_id,
+    # TODO(00002-2): 상세/첨부 경로 제거 subtask에서 이 루프 자체를 단순 upsert 루프로 교체한다.
+    # 현재는 목록 수집 후 기본 메타만 upsert하고 상세/첨부는 건너뛴다.
+    for row_index, row_metadata in enumerate(target_rows, start=1):
+        iris_announcement_id = row_metadata.get("iris_announcement_id") or "(unknown)"
+        logger.info(
+            "── [{}/{}] 공고 처리 진입: id={}",
+            row_index,
+            len(target_rows),
+            iris_announcement_id,
+        )
+
+        try:
+            stats = await _process_single_announcement(
+                row_metadata,
+                page=None,
+                settings=settings,
+                dry_run=dry_run,
+                status_label=status_label,
             )
+        except Exception as per_row_exc:
+            # 공고 단위 격리 — 어떤 예외든 다음 공고로 넘어간다.
+            failure_count += 1
+            failed_announcement_ids.append(str(iris_announcement_id))
+            logger.exception(
+                "공고 처리 실패(스킵): id={} ({}: {})",
+                iris_announcement_id,
+                type(per_row_exc).__name__,
+                per_row_exc,
+            )
+            continue
 
-            try:
-                stats = await _process_single_announcement(
-                    row_metadata,
-                    page=shared_page,
-                    settings=settings,
-                    dry_run=dry_run,
-                    status_label=status_label,
-                )
-            except Exception as per_row_exc:
-                # 공고 단위 격리 — 어떤 예외든 다음 공고로 넘어간다.
-                failure_count += 1
-                failed_announcement_ids.append(str(iris_announcement_id))
-                logger.exception(
-                    "공고 처리 실패(스킵): id={} ({}: {})",
-                    iris_announcement_id,
-                    type(per_row_exc).__name__,
-                    per_row_exc,
-                )
-                continue
-
-            success_count += 1
-            total_attachments_attempted += stats["attachments_attempted"]
-            total_attachments_downloaded += stats["attachments_downloaded"]
-            total_attachments_persisted += stats["attachments_persisted"]
+        success_count += 1
+        total_attachments_attempted += stats["attachments_attempted"]
+        total_attachments_downloaded += stats["attachments_downloaded"]
+        total_attachments_persisted += stats["attachments_persisted"]
 
     return {
         "success_count": success_count,
