@@ -1,0 +1,1 @@
+PROJECT_NOTES.md 에 프로젝트에 대한 내용이 있음

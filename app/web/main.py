@@ -31,6 +31,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
+from app.db.init_db import init_db
 from app.db.models import Announcement, AnnouncementStatus, Attachment
 from app.db.repository import (
     count_announcements,
@@ -234,6 +235,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     effective_settings = settings or get_settings()
     # SQLite 파일/다운로드 디렉터리 등 런타임 경로 보장.
     effective_settings.ensure_runtime_paths()
+    # 스크래퍼를 먼저 돌리지 않은 상태로 웹 UI 만 기동해도 조회가 가능하도록
+    # 스키마를 보장한다. create_all 은 멱등이므로 기존 테이블은 건드리지 않는다.
+    init_db()
 
     # 템플릿 디렉터리 보장. 패키지 내부에 함께 배포되는 것이 원칙이므로
     # 일반적으로 이미 존재하지만, 예기치 못한 삭제에도 부팅이 가능하도록 방어적으로 생성한다.
@@ -295,9 +299,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         total_pages = ceil(total_count / page_size) if total_count > 0 else 1
 
         return templates.TemplateResponse(
+            request,
             "list.html",
             {
-                "request": request,
                 "announcements": announcement_items,
                 "total": total_count,
                 "page": page,
@@ -402,9 +406,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             )
         announcement, attachments = fetched
         return templates.TemplateResponse(
+            request,
             "detail.html",
             {
-                "request": request,
                 "announcement": announcement,
                 "attachments": attachments,
             },

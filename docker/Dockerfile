@@ -8,7 +8,7 @@
 # - 실제 엔트리포인트(app.cli, app.web.main) 는 후속 subtask 에서 구현되며,
 #   본 subtask 에서는 CMD 가 경로만 정확히 가리키는 placeholder 상태다.
 
-FROM mcr.microsoft.com/playwright/python:v1.47.0-noble
+FROM mcr.microsoft.com/playwright/python:v1.58.0-noble
 
 # 파이썬/피프 런타임 기본 옵션
 #  - PYTHONUNBUFFERED: 로그가 버퍼링 없이 즉시 출력되도록 한다.
