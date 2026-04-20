@@ -16,19 +16,16 @@ authors = [
 # 런타임 의존성.
 # 실제 설치는 pip / Docker 빌드 단계에서 수행하며, 이 파일은 선언 전용이다.
 dependencies = [
-    # 스크래핑
-    "playwright>=1.44,<2.0",
+    # 스크래핑 (HTTP 기반 목록 수집)
     "httpx>=0.27,<1.0",
 
     # 데이터 모델 / DB
     "SQLAlchemy>=2.0,<3.0",
-    "alembic>=1.13,<2.0",
 
     # 웹 서버 (로컬 열람용)
     "fastapi>=0.110,<1.0",
     "uvicorn[standard]>=0.29,<1.0",
     "jinja2>=3.1,<4.0",
-    "python-multipart>=0.0.9,<1.0",
 
     # 설정/검증
     "pydantic>=2.6,<3.0",
