@@ -398,3 +398,47 @@ code {
     color: #6b7280;
     text-align: center;
 }
+
+/* ---------- 목록 제목 링크 ---------- */
+.announcement-title-link {
+    color: #1f2937;
+    font-weight: 500;
+}
+
+.announcement-title-link:hover {
+    color: #1d4ed8;
+    text-decoration: underline;
+}
+
+/* ---------- 상세 페이지 본문 ---------- */
+
+/* IRIS 원문 HTML 을 그대로 렌더하는 컨테이너. */
+/* 내부 스타일(font-family, font-size 등)이 IRIS 가 심어 놓은 inline style 과 충돌하지 않도록 */
+/* overflow 만 제어하고 나머지 스타일은 원문을 존중한다. */
+.detail-html-container {
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 24px;
+    overflow-x: auto;
+    line-height: 1.7;
+    margin-bottom: 24px;
+}
+
+/* 상세 내용 미수집 안내 블록. */
+.detail-not-fetched {
+    padding: 20px 24px;
+    background: #f9fafb;
+    border: 1px dashed #d1d5db;
+    border-radius: 6px;
+    color: #6b7280;
+    margin-bottom: 24px;
+}
+
+.detail-not-fetched p {
+    margin: 0 0 8px;
+}
+
+.detail-not-fetched p:last-child {
+    margin-bottom: 0;
+}

@@ -66,7 +66,11 @@
         <tbody>
             {% for announcement in announcements %}
             <tr>
-                <td class="col-title">{{ announcement.title }}</td>
+                <td class="col-title">
+                    <a class="announcement-title-link" href="/announcements/{{ announcement.id }}">
+                        {{ announcement.title }}
+                    </a>
+                </td>
                 <td class="col-agency">{{ announcement.agency or "-" }}</td>
                 <td class="col-status">
                     {# 상태별 클래스로 색상 구분. CSS 는 하드코드된 3개 값만 처리한다. #}

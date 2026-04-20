@@ -134,6 +134,24 @@ def upsert_announcement(session: Session, payload: Mapping[str, Any]) -> Announc
     return announcement
 
 
+def get_announcement_by_id(
+    session: Session,
+    announcement_id: int,
+) -> Optional[Announcement]:
+    """내부 PK(`id`)로 공고 한 건을 조회한다.
+
+    Args:
+        session:          호출자가 제어하는 SQLAlchemy 세션.
+        announcement_id:  `Announcement.id` (내부 PK, 자동 증가).
+
+    Returns:
+        해당 `Announcement` 인스턴스, 없으면 None.
+    """
+    return session.execute(
+        select(Announcement).where(Announcement.id == announcement_id)
+    ).scalar_one_or_none()
+
+
 def upsert_announcement_detail(
     session: Session,
     iris_announcement_id: str,
@@ -252,6 +270,7 @@ def count_announcements(
 __all__ = [
     "upsert_announcement",
     "upsert_announcement_detail",
+    "get_announcement_by_id",
     "list_announcements",
     "count_announcements",
 ]
