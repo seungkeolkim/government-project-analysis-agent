@@ -2,12 +2,14 @@
 
 SQLAlchemy 기반 ORM 모델과 세션 팩토리를 노출한다.
 - models: `Base`, `Announcement`, `AnnouncementStatus`, `Attachment`
+- repository: `UpsertResult` (증분 UPSERT 반환 타입)
 - session: `get_engine`, `SessionLocal`, `session_scope`, `reset_engine_cache`
 - init_db: `init_db` (CLI 및 서비스에서 호출 가능)
 """
 
 from app.db.init_db import init_db
 from app.db.models import Announcement, AnnouncementStatus, Attachment, Base
+from app.db.repository import UpsertResult
 from app.db.session import (
     SessionLocal,
     get_engine,
@@ -20,6 +22,7 @@ __all__ = [
     "Announcement",
     "AnnouncementStatus",
     "Attachment",
+    "UpsertResult",
     "get_engine",
     "SessionLocal",
     "session_scope",
