@@ -38,6 +38,14 @@ _ANNOUNCEMENT_ALLOWED_FIELDS: frozenset[str] = frozenset({
     "raw_metadata",
 })
 
+# 상세 수집 결과 업데이트 시 허용되는 컬럼 목록.
+_DETAIL_ALLOWED_FIELDS: frozenset[str] = frozenset({
+    "detail_html",
+    "detail_text",
+    "detail_fetched_at",
+    "detail_fetch_status",
+})
+
 
 def _coerce_status(value: Any) -> AnnouncementStatus:
     """payload 의 status 값을 `AnnouncementStatus` 로 변환한다.
@@ -126,6 +134,58 @@ def upsert_announcement(session: Session, payload: Mapping[str, Any]) -> Announc
     return announcement
 
 
+def get_announcement_by_id(
+    session: Session,
+    announcement_id: int,
+) -> Optional[Announcement]:
+    """내부 PK(`id`)로 공고 한 건을 조회한다.
+
+    Args:
+        session:          호출자가 제어하는 SQLAlchemy 세션.
+        announcement_id:  `Announcement.id` (내부 PK, 자동 증가).
+
+    Returns:
+        해당 `Announcement` 인스턴스, 없으면 None.
+    """
+    return session.execute(
+        select(Announcement).where(Announcement.id == announcement_id)
+    ).scalar_one_or_none()
+
+
+def upsert_announcement_detail(
+    session: Session,
+    iris_announcement_id: str,
+    detail_fields: Mapping[str, Any],
+) -> Optional[Announcement]:
+    """공고 한 건의 상세 수집 결과 필드를 갱신한다.
+
+    허용 컬럼: `detail_html`, `detail_text`, `detail_fetched_at`, `detail_fetch_status`.
+    대상 공고가 없으면 None 을 반환한다(목록 UPSERT 가 선행되어야 한다).
+    commit 은 호출자 책임이며, 여기서는 flush 까지만 수행한다.
+
+    Args:
+        session:               호출자가 제어하는 SQLAlchemy 세션.
+        iris_announcement_id:  갱신 대상 공고의 IRIS ID.
+        detail_fields:         `_DETAIL_ALLOWED_FIELDS` 키를 담은 매핑.
+
+    Returns:
+        갱신된 `Announcement` 또는 None(공고가 DB에 없는 경우).
+    """
+    existing = session.execute(
+        select(Announcement).where(Announcement.iris_announcement_id == iris_announcement_id)
+    ).scalar_one_or_none()
+
+    if existing is None:
+        return None
+
+    clean_fields = _filter_payload(detail_fields, _DETAIL_ALLOWED_FIELDS)
+    for field_name, field_value in clean_fields.items():
+        setattr(existing, field_name, field_value)
+
+    session.flush()
+    return existing
+
+
 def list_announcements(
     session: Session,
     status: Optional[AnnouncementStatus | str] = None,
@@ -209,6 +269,8 @@ def count_announcements(
 
 __all__ = [
     "upsert_announcement",
+    "upsert_announcement_detail",
+    "get_announcement_by_id",
     "list_announcements",
     "count_announcements",
 ]

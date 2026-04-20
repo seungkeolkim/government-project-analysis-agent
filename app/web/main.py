@@ -1,11 +1,11 @@
 """FastAPI 로컬 열람 웹 백엔드.
 
 현재 활성화된 라우트:
-    - GET /                공고 목록 HTML 페이지 (상태 필터·검색·페이지네이션)
-    - GET /announcements   공고 목록 JSON API
+    - GET /                          공고 목록 HTML 페이지 (상태 필터·검색·페이지네이션)
+    - GET /announcements             공고 목록 JSON API
+    - GET /announcements/{id}        공고 상세 HTML 페이지
 
-비활성화(상세·첨부 기능은 별도 subtask에서 활성화 예정):
-    - 공고 상세 HTML/JSON
+비활성화(첨부파일 다운로드는 별도 subtask에서 활성화 예정):
     - 첨부파일 다운로드
 
 로컬 전용. 인증이 없으므로 외부 노출 금지.
@@ -29,6 +29,7 @@ from app.db.init_db import init_db
 from app.db.models import Announcement, AnnouncementStatus
 from app.db.repository import (
     count_announcements,
+    get_announcement_by_id,
     list_announcements,
 )
 from app.db.session import SessionLocal
@@ -67,6 +68,7 @@ def _serialize_announcement(announcement: Announcement) -> dict[str, Any]:
     """Announcement ORM 인스턴스를 JSON 직렬화 가능한 dict 로 변환한다.
 
     datetime 은 ISO-8601 문자열로 고정하고, Enum 은 한글 value 로 보존한다.
+    detail_html 은 용량이 크므로 목록 API 에서는 제외한다(상세 API 전용).
     """
     return {
         "id": announcement.id,
@@ -81,6 +83,10 @@ def _serialize_announcement(announcement: Announcement) -> dict[str, Any]:
             announcement.deadline_at.isoformat() if announcement.deadline_at else None
         ),
         "detail_url": announcement.detail_url,
+        "detail_fetched_at": (
+            announcement.detail_fetched_at.isoformat() if announcement.detail_fetched_at else None
+        ),
+        "detail_fetch_status": announcement.detail_fetch_status,
         "scraped_at": announcement.scraped_at.isoformat(),
         "updated_at": announcement.updated_at.isoformat(),
     }
@@ -195,6 +201,34 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 "status": status_param or "",
                 "search": search or "",
             },
+        )
+
+    # ──────────────────────────────────────────────────────────
+    # HTML: 공고 상세 페이지
+    # ──────────────────────────────────────────────────────────
+
+    @fastapi_app.get("/announcements/{announcement_id}", response_class=HTMLResponse)
+    def detail_page(
+        request: Request,
+        announcement_id: int,
+        session: Session = Depends(get_session),
+    ) -> HTMLResponse:
+        """공고 상세 HTML 페이지.
+
+        내부 PK(`id`)로 공고를 조회해 DB에 저장된 `detail_html` 을 렌더한다.
+        없는 id 는 404 로 응답한다.
+        """
+        announcement = get_announcement_by_id(session, announcement_id)
+        if announcement is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"공고 id={announcement_id} 를 찾을 수 없습니다.",
+            )
+
+        return templates.TemplateResponse(
+            request,
+            "detail.html",
+            {"announcement": announcement},
         )
 
     # ──────────────────────────────────────────────────────────

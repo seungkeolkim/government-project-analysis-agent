@@ -133,6 +133,38 @@ class Announcement(Base):
         doc="공고 상세 페이지 URL.",
     )
 
+    # ── 상세 페이지 수집 결과 (detail_scraper 가 채운다) ──────────────────────
+    # DB 재생성 필요: 기존 SQLite 파일을 삭제 후 init_db 로 재생성.
+    #   rm -f data/db/app.sqlite3 && python -m app.cli run
+
+    # 공고 상세 영역(div.tstyle_view)의 원본 HTML. 없으면 NULL.
+    detail_html: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        doc="상세 페이지 본문 HTML(div.tstyle_view 섹션). detail_scraper 가 채운다.",
+    )
+
+    # 상세 HTML에서 추출한 정제 텍스트. 생략 가능하며 없으면 NULL.
+    detail_text: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        doc="detail_html 에서 BeautifulSoup 으로 추출한 가독성 텍스트.",
+    )
+
+    # 상세 수집 완료 시각 (UTC)
+    detail_fetched_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        doc="detail_scraper 가 상세 페이지를 수집 완료한 시각(UTC).",
+    )
+
+    # 상세 수집 결과 상태: 'ok' / 'empty' / 'error'
+    detail_fetch_status: Mapped[Optional[str]] = mapped_column(
+        String(16),
+        nullable=True,
+        doc="상세 수집 결과 상태. 'ok': 본문 확인, 'empty': 본문 없음, 'error': 수집 실패.",
+    )
+
     # IRIS 에서 수집한 원본 부가 메타데이터 (JSON)
     raw_metadata: Mapped[dict[str, Any]] = mapped_column(
         JSON,

@@ -4,17 +4,18 @@
     (1) init_db 로 스키마 보장
     (2) list_scraper.scrape_list 로 '접수중' 목록 수집
     (3) 각 공고에 대해 upsert_announcement 로 기본 메타 적재
+    (4) 각 공고의 상세 페이지를 detail_scraper 로 수집해 DB 갱신 (--skip-detail 로 건너뛸 수 있음)
 
-비활성화(상세·첨부 기능은 별도 subtask에서 활성화 예정):
-    - 상세 페이지 스크래핑
+비활성화(첨부파일 다운로드는 별도 subtask에서 활성화 예정):
     - 첨부파일 다운로드
 
 호출 형태:
-    python -m app.cli run [--max-pages N] [--max-announcements N] [--dry-run] [--log-level LEVEL]
+    python -m app.cli run [--max-pages N] [--max-announcements N] [--skip-detail] [--dry-run] [--log-level LEVEL]
 
 옵션:
     --max-pages N          list_scraper 가 순회할 최대 페이지 수. 0(기본) = 안전 상한 사용.
     --max-announcements N  UPSERT 할 최대 공고 수. 0(기본) = 무제한.
+    --skip-detail          상세 페이지 수집을 건너뛴다(목록 적재만 수행).
     --dry-run              DB 쓰기를 건너뛰고 수집만 검증한다.
     --log-level LEVEL      로그 레벨 일회성 오버라이드(기본: settings.log_level).
 
@@ -29,16 +30,20 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 
 from loguru import logger
 
+import httpx
+
 from app.config import Settings, get_settings
 from app.db.init_db import init_db
-from app.db.repository import upsert_announcement
+from app.db.repository import upsert_announcement, upsert_announcement_detail
 from app.db.session import session_scope
 from app.logging_setup import configure_logging
+from app.scraper.detail_scraper import _build_detail_http_client, scrape_detail_with_client
 from app.scraper.list_scraper import scrape_list
 
 # ──────────────────────────────────────────────────────────────
@@ -117,6 +122,17 @@ def _build_announcement_payload(
 
 
 # ──────────────────────────────────────────────────────────────
+# 유틸
+# ──────────────────────────────────────────────────────────────
+
+
+@asynccontextmanager
+async def _null_async_context() -> AsyncIterator[None]:
+    """skip_detail=True 또는 dry_run=True 일 때 httpx 클라이언트 자리를 채우는 더미 컨텍스트."""
+    yield None
+
+
+# ──────────────────────────────────────────────────────────────
 # 오케스트레이션
 # ──────────────────────────────────────────────────────────────
 
@@ -126,9 +142,10 @@ async def _orchestrate(
     settings: Settings,
     max_pages: int,
     max_announcements: int,
+    skip_detail: bool,
     dry_run: bool,
 ) -> dict[str, Any]:
-    """목록 수집 → DB 적재 흐름을 수행하고 최종 통계 dict 를 반환한다.
+    """목록 수집 → DB 적재 → 상세 수집 흐름을 수행하고 최종 통계 dict 를 반환한다.
 
     부트스트랩 실패(목록 수집 자체가 안 되는 경우)는 호출자로 전파한다.
     공고 단위 예외는 격리 — 한 공고 실패가 전체를 중단시키지 않는다.
@@ -164,45 +181,101 @@ async def _orchestrate(
 
     if not target_rows:
         logger.warning("처리할 공고가 없어 종료한다.")
-        return {"success_count": 0, "failure_count": 0, "failed_announcement_ids": []}
+        return {
+            "success_count": 0,
+            "failure_count": 0,
+            "failed_announcement_ids": [],
+            "detail_success_count": 0,
+            "detail_failure_count": 0,
+        }
 
-    # (3) 공고 단위 upsert
+    # (3) 공고 단위 upsert + (4) 상세 수집
     success_count = 0
     failure_count = 0
     failed_announcement_ids: list[str] = []
+    detail_success_count = 0
+    detail_failure_count = 0
 
-    for row_index, row_metadata in enumerate(target_rows, start=1):
-        iris_announcement_id = row_metadata.get("iris_announcement_id") or "(unknown)"
-        logger.info(
-            "── [{}/{}] 공고 upsert: id={}",
-            row_index,
-            len(target_rows),
-            iris_announcement_id,
-        )
+    # 상세 수집용 httpx 클라이언트 — 공고 간 재사용으로 연결 오버헤드 절감
+    detail_client_ctx = (
+        _build_detail_http_client(settings) if not skip_detail and not dry_run else None
+    )
 
-        try:
-            payload = _build_announcement_payload(row_metadata, DEFAULT_STATUS_LABEL)
-            if dry_run:
-                logger.info("[dry-run] upsert_announcement(skip): {}", iris_announcement_id)
-            else:
-                with session_scope() as session:
-                    upsert_announcement(session, payload)
-            success_count += 1
-        except Exception as exc:
-            # 공고 단위 격리 — 한 건 실패가 전체를 중단시키지 않는다.
-            failure_count += 1
-            failed_announcement_ids.append(str(iris_announcement_id))
-            logger.exception(
-                "공고 upsert 실패(스킵): id={} ({}: {})",
+    async with (detail_client_ctx if detail_client_ctx else _null_async_context()) as detail_client:
+        for row_index, row_metadata in enumerate(target_rows, start=1):
+            iris_announcement_id = row_metadata.get("iris_announcement_id") or "(unknown)"
+            detail_url: Optional[str] = row_metadata.get("detail_url")
+
+            logger.info(
+                "── [{}/{}] 공고 upsert: id={}",
+                row_index,
+                len(target_rows),
                 iris_announcement_id,
-                type(exc).__name__,
-                exc,
             )
+
+            try:
+                payload = _build_announcement_payload(row_metadata, DEFAULT_STATUS_LABEL)
+                if dry_run:
+                    logger.info("[dry-run] upsert_announcement(skip): {}", iris_announcement_id)
+                else:
+                    with session_scope() as session:
+                        upsert_announcement(session, payload)
+                success_count += 1
+            except Exception as exc:
+                failure_count += 1
+                failed_announcement_ids.append(str(iris_announcement_id))
+                logger.exception(
+                    "공고 upsert 실패(스킵): id={} ({}: {})",
+                    iris_announcement_id,
+                    type(exc).__name__,
+                    exc,
+                )
+                # upsert 실패 시 상세 수집도 건너뛴다
+                continue
+
+            # (4) 상세 페이지 수집
+            if skip_detail or dry_run:
+                continue
+
+            if not detail_url:
+                logger.warning("detail_url 없음 — 상세 수집 스킵: id={}", iris_announcement_id)
+                detail_failure_count += 1
+                continue
+
+            # 공고 간 요청 지연 (첫 번째 공고는 건너뜀)
+            if row_index > 1:
+                await asyncio.sleep(settings.request_delay_sec)
+
+            logger.info("상세 수집 시작: id={} url={}", iris_announcement_id, detail_url)
+            detail_result = await scrape_detail_with_client(detail_client, detail_url)
+
+            try:
+                with session_scope() as session:
+                    upsert_announcement_detail(session, iris_announcement_id, detail_result)
+            except Exception as exc:
+                logger.exception(
+                    "상세 DB 갱신 실패: id={} ({}: {})",
+                    iris_announcement_id,
+                    type(exc).__name__,
+                    exc,
+                )
+                detail_failure_count += 1
+                continue
+
+            status = detail_result.get("detail_fetch_status", "error")
+            if status == "ok":
+                detail_success_count += 1
+                logger.info("상세 수집 완료(ok): id={}", iris_announcement_id)
+            else:
+                detail_failure_count += 1
+                logger.warning("상세 수집 결과 '{}': id={}", status, iris_announcement_id)
 
     return {
         "success_count": success_count,
         "failure_count": failure_count,
         "failed_announcement_ids": failed_announcement_ids,
+        "detail_success_count": detail_success_count,
+        "detail_failure_count": detail_failure_count,
     }
 
 
@@ -234,6 +307,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_MAX_ANNOUNCEMENTS_FLAG,
         help="UPSERT 할 최대 공고 수. 0(기본) = 무제한.",
+    )
+    run_parser.add_argument(
+        "--skip-detail",
+        action="store_true",
+        help="상세 페이지 수집을 건너뛴다(목록 적재만 수행).",
     )
     run_parser.add_argument(
         "--dry-run",
@@ -276,9 +354,10 @@ async def _async_main(argv: list[str]) -> int:
     settings.ensure_runtime_paths()
 
     logger.info(
-        "iris-scrape 실행 시작: max_pages={} max_announcements={} dry_run={}",
+        "iris-scrape 실행 시작: max_pages={} max_announcements={} skip_detail={} dry_run={}",
         parsed_args.max_pages,
         parsed_args.max_announcements,
+        parsed_args.skip_detail,
         parsed_args.dry_run,
     )
 
@@ -287,6 +366,7 @@ async def _async_main(argv: list[str]) -> int:
             settings=settings,
             max_pages=parsed_args.max_pages,
             max_announcements=parsed_args.max_announcements,
+            skip_detail=parsed_args.skip_detail,
             dry_run=parsed_args.dry_run,
         )
     except Exception as bootstrap_exc:
@@ -298,12 +378,14 @@ async def _async_main(argv: list[str]) -> int:
         return 1
 
     logger.info(
-        "iris-scrape 실행 완료: 성공 {}건 / 실패 {}건",
+        "iris-scrape 실행 완료: 목록 성공 {}건 / 목록 실패 {}건 | 상세 성공 {}건 / 상세 실패 {}건",
         summary["success_count"],
         summary["failure_count"],
+        summary["detail_success_count"],
+        summary["detail_failure_count"],
     )
     if summary["failure_count"]:
-        logger.warning("실패 공고 ID 목록: {}", summary["failed_announcement_ids"])
+        logger.warning("목록 실패 공고 ID 목록: {}", summary["failed_announcement_ids"])
     return 0
 
 
