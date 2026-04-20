@@ -1,0 +1,272 @@
+# 시스템 관리자 운영 가이드
+
+> 이 문서는 **일상 운영·트러블슈팅** 중심이다.
+> 프로젝트 개요·설치 방법은 [README.md](README.md) 를 참고한다.
+
+---
+
+## 목차
+
+1. [초기 설치 요약](#초기-설치-요약)
+2. [스크래퍼 실행 방법](#스크래퍼-실행-방법)
+3. [증분 수집 동작 설명](#증분-수집-동작-설명)
+4. [로그 해석](#로그-해석)
+5. [DB 관리](#db-관리)
+6. [트러블슈팅](#트러블슈팅)
+7. [정기 운영 체크리스트](#정기-운영-체크리스트)
+
+---
+
+## 초기 설치 요약
+
+### Docker (권장)
+
+```bash
+# 1) 환경변수 파일 생성
+cp .env.example .env
+# 필요 시 .env 편집 (DB_URL, REQUEST_DELAY_SEC 등)
+
+# 2) 이미지 빌드
+docker compose build
+
+# 3) 웹 UI 기동
+docker compose up app
+# → http://localhost:8000 접속
+```
+
+### 로컬 Python (Docker 없이)
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e .
+cp .env.example .env
+uvicorn app.web.main:app --host 0.0.0.0 --port 8000
+```
+
+---
+
+## 스크래퍼 실행 방법
+
+### 기본 실행 (전체 소스, Docker)
+
+```bash
+docker compose --profile scrape run --rm scraper
+```
+
+### 기본 실행 (전체 소스, 로컬)
+
+```bash
+python -m app.cli run
+```
+
+### 자주 쓰는 옵션
+
+| 옵션 | 설명 | 예시 |
+|---|---|---|
+| `--max-pages N` | 소스당 최대 페이지 수 (0=안전상한 50) | `--max-pages 3` |
+| `--max-announcements N` | 소스당 최대 공고 수 (0=무제한) | `--max-announcements 20` |
+| `--skip-detail` | 목록만 수집, 상세 페이지 생략 | `--skip-detail` |
+| `--dry-run` | DB 쓰기 없이 수집 검증만 | `--dry-run` |
+| `--source SOURCE_ID` | 특정 소스만 실행 | `--source IRIS` |
+| `--log-level LEVEL` | 로그 레벨 일회성 변경 | `--log-level DEBUG` |
+
+### 활용 예시
+
+```bash
+# 빠른 검증 — 1페이지만 드라이런
+python -m app.cli run --max-pages 1 --dry-run
+
+# IRIS만 소량 수집 (상세 생략)
+python -m app.cli run --source IRIS --max-pages 2 --skip-detail
+
+# 전체 수집 (기본 동작)
+python -m app.cli run
+
+# 디버그 로그로 전체 수집
+python -m app.cli run --log-level DEBUG
+```
+
+---
+
+## 증분 수집 동작 설명
+
+스크래퍼를 반복 실행해도 DB를 초기화하지 않는다.
+이전 수집 결과를 재사용해 네트워크 요청을 최소화한다.
+
+### 동작 분류
+
+| 상황 | CLI 로그 | DB 동작 |
+|---|---|---|
+| 신규 공고 | `신규 공고 등록` (INFO) | 새 row INSERT |
+| 변경 없음 + 상세 있음 | `상세 수집 생략(변경 없음, 기존 데이터 재사용)` (INFO) | 변경 없음 |
+| 변경 없음 + 상세 없음 | `변경 없음` (DEBUG) → 상세 수집 진행 | 상세 필드만 UPDATE |
+| 내용 변경 (공고명/마감일 등) | `내용 변경 — 신규 버전 등록` (INFO) | 구버전 `is_current=False` 봉인, 신규 row INSERT |
+| 상태 전이만 | `상태 전이 감지 (현재 미검증 경로)` (WARNING) | 기존 row 상태 UPDATE |
+
+### 변경 감지 비교 대상 필드
+
+- **공고명(title)**, **상태(status)**, **마감일(deadline_at)**, **기관명(agency)**
+- `received_at`(접수시작일)은 비교 대상에서 제외 (접수예정 상태에서 미기재→보완 패턴이 빈번)
+
+### 이력 조회 (SQL)
+
+```sql
+-- 현재 유효 버전만 (목록 UI와 동일)
+SELECT * FROM announcements WHERE is_current = 1;
+
+-- 특정 공고의 전체 이력 (구버전 포함)
+SELECT * FROM announcements
+WHERE source_type = 'IRIS' AND source_announcement_id = '12345'
+ORDER BY id;
+```
+
+---
+
+## 로그 해석
+
+### 정상 수집 시 주요 로그
+
+```
+INFO  목록 수집 시작: source=IRIS max_pages=50
+INFO  목록 수집 완료: source=IRIS 42건
+INFO  [1/42] 공고 처리: source=IRIS id=12345
+INFO  신규 공고 등록: source=IRIS id=12345
+INFO  상세 수집 완료(ok): source=IRIS id=12345
+...
+INFO  [5/42] 공고 처리: source=IRIS id=11111
+INFO  상세 수집 생략(변경 없음, 기존 데이터 재사용): source=IRIS id=11111
+...
+INFO  소스 IRIS 완료: 목록 성공 42건 / 실패 0건 | 상세 성공 5건 / 실패 0건 / 생략(변경없음) 37건
+INFO  scrape 실행 완료: 목록 성공 42건 / 목록 실패 0건 | 상세 성공 5건 / 실패 0건 / 생략(변경없음) 37건
+```
+
+### 주의가 필요한 로그
+
+| 로그 | 의미 | 대응 |
+|---|---|---|
+| `WARNING 상태 전이 감지 (현재 미검증 경로)` | 공고 상태가 변경됨 (현재 정상 수집 범위에서 발생 불가) | IRIS 접수예정·마감 수집이 시작된 경우 `docs/status_transition_todo.md` 참고 |
+| `WARNING detail_url 없음 — 상세 수집 스킵` | 목록에서 상세 URL을 추출하지 못함 | 해당 소스의 HTML 구조 변경 여부 확인 |
+| `ERROR 공고 upsert 실패` | DB 쓰기 실패 | DB 파일 권한·디스크 용량 확인 |
+| `목록 실패 공고 ID 목록` | 특정 공고 처리 실패 | 로그 상세 확인 후 재실행 |
+
+---
+
+## DB 관리
+
+### DB 파일 위치
+
+| 실행 방식 | 기본 경로 |
+|---|---|
+| Docker | `./data/db/app.sqlite3` (호스트 볼륨 마운트) |
+| 로컬 | `./data/db/app.sqlite3` |
+
+`.env` 의 `DB_URL` 값으로 변경 가능하다.
+
+### 백업
+
+```bash
+# 단순 파일 복사 (SQLite는 파일 하나)
+cp ./data/db/app.sqlite3 ./data/db/app.sqlite3.bak.$(date +%Y%m%d)
+```
+
+### DB 초기화 (전체 삭제 후 재시작)
+
+```bash
+# 데이터 완전 삭제 후 다음 실행 시 자동으로 스키마가 재생성된다
+rm -f ./data/db/app.sqlite3
+python -m app.cli run --max-pages 1  # 스키마 생성 + 데이터 재수집
+```
+
+> **주의**: 삭제 전에 반드시 백업을 먼저 생성한다.
+
+### 스키마 마이그레이션
+
+신규 코드로 업데이트한 후 `init_db` 가 자동으로 마이그레이션을 적용한다.
+수동으로 스키마 상태만 확인하려면:
+
+```bash
+python -m app.db.init_db
+```
+
+### 이력 데이터 정리 (선택)
+
+`is_current=False` 인 구버전 row가 누적될 경우 아래로 정리할 수 있다:
+
+```bash
+# 주의: 이 SQL은 되돌릴 수 없다. 백업 후 실행한다.
+sqlite3 ./data/db/app.sqlite3 "DELETE FROM announcements WHERE is_current = 0;"
+```
+
+---
+
+## 트러블슈팅
+
+### 공고 목록이 비어 있다
+
+1. `python -m app.cli run --max-pages 1 --log-level DEBUG` 로 수집 시도
+2. `목록 수집 완료: source=IRIS 0건` 이면 IRIS 사이트 응답 이상 → 브라우저에서 직접 확인
+3. DB에 데이터는 있는데 웹 UI에 안 보이면 → `is_current=1` 조건 확인
+
+```sql
+SELECT COUNT(*) FROM announcements WHERE is_current = 1;
+```
+
+### 재실행해도 상세 수집이 계속 발생한다
+
+- `상세 수집 생략` 로그가 없고 매번 상세를 수집하면:
+  - `detail_fetched_at` 이 NULL인 row가 있는지 확인
+  - 비교 필드(title/status/deadline_at/agency)가 매 수집마다 달라지는지 확인
+
+```sql
+SELECT id, title, deadline_at, detail_fetched_at
+FROM announcements WHERE is_current = 1
+ORDER BY id LIMIT 10;
+```
+
+### DB 스키마 오류 (`no such column: is_current`)
+
+기존 DB에 마이그레이션이 적용되지 않은 경우다.
+다음 명령으로 마이그레이션을 강제 실행한다:
+
+```bash
+python -m app.db.init_db
+```
+
+그래도 해결되지 않으면 DB를 백업 후 삭제해 새로 생성한다.
+
+### Docker 컨테이너에서 권한 오류
+
+`./data/` 디렉터리의 소유자/권한을 확인한다:
+
+```bash
+ls -la ./data/
+chmod -R 755 ./data/
+```
+
+### 로그에 `상태 전이 감지 (현재 미검증 경로)` 경고가 나타난다
+
+현재 수집 범위(접수중만)에서는 발생하지 않아야 하는 경고다.
+이 경고가 실제로 출력되면 소스가 접수예정/마감 상태를 반환하기 시작한 것이므로,
+`docs/status_transition_todo.md` 를 참고해 대응한다.
+
+---
+
+## 정기 운영 체크리스트
+
+### 매 수집 후 확인
+
+- [ ] 종료 코드 0 확인 (`echo $?`)
+- [ ] `scrape 실행 완료` 로그에서 `목록 실패` 건수 = 0 확인
+- [ ] 웹 UI(`http://localhost:8000`) 에서 최신 공고 표시 확인
+
+### 주간 확인
+
+- [ ] DB 파일 크기 확인 (`ls -lh ./data/db/app.sqlite3`)
+- [ ] 구버전 row 누적 확인 (`SELECT COUNT(*) FROM announcements WHERE is_current=0;`)
+- [ ] 로그에 반복 `WARNING` 메시지 없는지 확인
+
+### 업데이트 후 확인
+
+- [ ] `python -m app.db.init_db` 로 마이그레이션 적용 확인
+- [ ] `python -m app.cli run --max-pages 1 --dry-run` 으로 기본 동작 확인
+- [ ] 웹 UI 로그인 페이지 정상 렌더링 확인
