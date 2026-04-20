@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "government-project-analysis-agent"
 version = "0.1.0"
-description = "IRIS 등 정부과제 공고를 스크래핑 · 저장 · 열람하는 로컬 에이전트"
+description = "IRIS, NTIS 등 정부과제 사업공고를 스크래핑 · 저장 · 열람하는 로컬 에이전트"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 license = { text = "Proprietary" }
@@ -32,6 +32,7 @@ dependencies = [
     "pydantic>=2.6,<3.0",
     "pydantic-settings>=2.2,<3.0",
     "python-dotenv>=1.0,<2.0",
+    "pyyaml>=6.0,<7.0",
 
     # 로깅
     "loguru>=0.7,<1.0",

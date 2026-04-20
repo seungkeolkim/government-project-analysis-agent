@@ -1,8 +1,8 @@
-"""IRIS 스크래퍼 오케스트레이터 CLI.
+"""사업공고 스크래퍼 오케스트레이터 CLI.
 
 현재 활성화된 흐름:
     (1) init_db 로 스키마 보장
-    (2) list_scraper.scrape_list 로 '접수중' 목록 수집
+    (2) list_scraper.scrape_list 로 '접수중' 목록 수집 (현재 IRIS 전용)
     (3) 각 공고에 대해 upsert_announcement 로 기본 메타 적재
     (4) 각 공고의 상세 페이지를 detail_scraper 로 수집해 DB 갱신 (--skip-detail 로 건너뛸 수 있음)
 
@@ -45,6 +45,7 @@ from app.db.session import session_scope
 from app.logging_setup import configure_logging
 from app.scraper.detail_scraper import _build_detail_http_client, scrape_detail_with_client
 from app.scraper.list_scraper import scrape_list
+from app.sources.constants import SOURCE_TYPE_IRIS
 
 # ──────────────────────────────────────────────────────────────
 # 상수
@@ -101,10 +102,19 @@ def _parse_datetime_text(value: Optional[str]) -> Optional[datetime]:
 def _build_announcement_payload(
     row_metadata: dict[str, Any],
     status_label: str,
+    source_type: str = SOURCE_TYPE_IRIS,
 ) -> dict[str, Any]:
-    """list_scraper 의 row 메타를 repository.upsert_announcement payload 로 변환한다."""
+    """list_scraper 의 row 메타를 repository.upsert_announcement payload 로 변환한다.
+
+    list_scraper 가 출력하는 'iris_announcement_id' 키를 DB 범용 키
+    'source_announcement_id' 로 매핑하고, 소스 유형(source_type)을 추가한다.
+    """
+    # 스크래퍼 출력 키 'iris_announcement_id' → DB 컬럼 'source_announcement_id'
+    # (subtask 00004-2 에서 스크래퍼가 플러그인화되면 키 자체가 통일된다)
+    raw_source_id = row_metadata.get("iris_announcement_id") or row_metadata.get("source_announcement_id")
     return {
-        "iris_announcement_id": row_metadata["iris_announcement_id"],
+        "source_announcement_id": raw_source_id,
+        "source_type": source_type,
         "title": row_metadata.get("title") or "(제목 미상)",
         "agency": row_metadata.get("agency"),
         "status": row_metadata.get("status") or status_label,
@@ -203,30 +213,40 @@ async def _orchestrate(
 
     async with (detail_client_ctx if detail_client_ctx else _null_async_context()) as detail_client:
         for row_index, row_metadata in enumerate(target_rows, start=1):
-            iris_announcement_id = row_metadata.get("iris_announcement_id") or "(unknown)"
+            # 스크래퍼는 아직 'iris_announcement_id' 키를 사용한다 (subtask 00004-2 에서 통일 예정)
+            source_announcement_id = (
+                row_metadata.get("iris_announcement_id")
+                or row_metadata.get("source_announcement_id")
+                or "(unknown)"
+            )
             detail_url: Optional[str] = row_metadata.get("detail_url")
 
             logger.info(
-                "── [{}/{}] 공고 upsert: id={}",
+                "── [{}/{}] 공고 upsert: source={} id={}",
                 row_index,
                 len(target_rows),
-                iris_announcement_id,
+                SOURCE_TYPE_IRIS,
+                source_announcement_id,
             )
 
             try:
                 payload = _build_announcement_payload(row_metadata, DEFAULT_STATUS_LABEL)
                 if dry_run:
-                    logger.info("[dry-run] upsert_announcement(skip): {}", iris_announcement_id)
+                    logger.info(
+                        "[dry-run] upsert_announcement(skip): source={} id={}",
+                        SOURCE_TYPE_IRIS,
+                        source_announcement_id,
+                    )
                 else:
                     with session_scope() as session:
                         upsert_announcement(session, payload)
                 success_count += 1
             except Exception as exc:
                 failure_count += 1
-                failed_announcement_ids.append(str(iris_announcement_id))
+                failed_announcement_ids.append(str(source_announcement_id))
                 logger.exception(
                     "공고 upsert 실패(스킵): id={} ({}: {})",
-                    iris_announcement_id,
+                    source_announcement_id,
                     type(exc).__name__,
                     exc,
                 )
@@ -238,7 +258,7 @@ async def _orchestrate(
                 continue
 
             if not detail_url:
-                logger.warning("detail_url 없음 — 상세 수집 스킵: id={}", iris_announcement_id)
+                logger.warning("detail_url 없음 — 상세 수집 스킵: id={}", source_announcement_id)
                 detail_failure_count += 1
                 continue
 
@@ -246,16 +266,21 @@ async def _orchestrate(
             if row_index > 1:
                 await asyncio.sleep(settings.request_delay_sec)
 
-            logger.info("상세 수집 시작: id={} url={}", iris_announcement_id, detail_url)
+            logger.info("상세 수집 시작: id={} url={}", source_announcement_id, detail_url)
             detail_result = await scrape_detail_with_client(detail_client, detail_url)
 
             try:
                 with session_scope() as session:
-                    upsert_announcement_detail(session, iris_announcement_id, detail_result)
+                    upsert_announcement_detail(
+                        session,
+                        source_announcement_id,
+                        detail_result,
+                        source_type=SOURCE_TYPE_IRIS,
+                    )
             except Exception as exc:
                 logger.exception(
                     "상세 DB 갱신 실패: id={} ({}: {})",
-                    iris_announcement_id,
+                    source_announcement_id,
                     type(exc).__name__,
                     exc,
                 )
@@ -265,10 +290,10 @@ async def _orchestrate(
             status = detail_result.get("detail_fetch_status", "error")
             if status == "ok":
                 detail_success_count += 1
-                logger.info("상세 수집 완료(ok): id={}", iris_announcement_id)
+                logger.info("상세 수집 완료(ok): id={}", source_announcement_id)
             else:
                 detail_failure_count += 1
-                logger.warning("상세 수집 결과 '{}': id={}", status, iris_announcement_id)
+                logger.warning("상세 수집 결과 '{}': id={}", status, source_announcement_id)
 
     return {
         "success_count": success_count,
@@ -288,7 +313,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     """CLI 인자 파서를 생성한다."""
     root_parser = argparse.ArgumentParser(
         prog="python -m app.cli",
-        description="IRIS 사업공고 목록 수집 및 DB 적재 CLI",
+        description="사업공고 목록 수집 및 DB 적재 CLI",
     )
     subparsers = root_parser.add_subparsers(dest="subcommand", required=True)
 
@@ -354,7 +379,7 @@ async def _async_main(argv: list[str]) -> int:
     settings.ensure_runtime_paths()
 
     logger.info(
-        "iris-scrape 실행 시작: max_pages={} max_announcements={} skip_detail={} dry_run={}",
+        "scrape 실행 시작: max_pages={} max_announcements={} skip_detail={} dry_run={}",
         parsed_args.max_pages,
         parsed_args.max_announcements,
         parsed_args.skip_detail,
@@ -378,7 +403,7 @@ async def _async_main(argv: list[str]) -> int:
         return 1
 
     logger.info(
-        "iris-scrape 실행 완료: 목록 성공 {}건 / 목록 실패 {}건 | 상세 성공 {}건 / 상세 실패 {}건",
+        "scrape 실행 완료: 목록 성공 {}건 / 목록 실패 {}건 | 상세 성공 {}건 / 상세 실패 {}건",
         summary["success_count"],
         summary["failure_count"],
         summary["detail_success_count"],

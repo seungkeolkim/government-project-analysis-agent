@@ -1,13 +1,15 @@
 """SQLAlchemy ORM 모델 정의.
 
-IRIS 사업공고(Announcement)와 첨부파일(Attachment)을 표현한다.
+사업공고(Announcement)와 첨부파일(Attachment)을 표현한다.
 Alembic 은 도입하지 않으며, 초기 DDL 은 `init_db.py` 의 `create_all` 로 생성한다.
+기존 DB 스키마 변경은 `app/db/migration.py` 의 `run_migrations` 가 처리한다.
 
 설계 메모:
-    - 공고의 고유 식별자는 IRIS 에서 부여하는 `iris_announcement_id` 이며 UNIQUE 제약으로 보호한다.
+    - 공고의 고유 식별자는 (source_type, source_announcement_id) 복합 UNIQUE 이다.
+      소스마다 독립된 ID 공간을 가지므로 단일 컬럼 unique 로는 충분하지 않다.
     - 상태값은 '접수중/접수예정/마감' 세 가지만 취급한다(문자열 Enum).
     - 시간 컬럼은 모두 timezone-aware UTC 로 저장한다(`DateTime(timezone=True)`).
-    - `raw_metadata` 는 IRIS 에서 수집한 임의의 부가 필드를 손실 없이 보존하기 위한 JSON 컬럼이다.
+    - `raw_metadata` 는 수집 소스에서 내려온 임의의 부가 필드를 손실 없이 보존한다.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import (
     DeclarativeBase,
@@ -52,7 +55,7 @@ class Base(DeclarativeBase):
 
 
 class AnnouncementStatus(str, enum.Enum):
-    """IRIS 공고의 접수 상태.
+    """사업공고의 접수 상태.
 
     값은 한글 원문을 그대로 사용하여 화면 표시와 1:1 매칭되도록 한다.
     """
@@ -63,25 +66,40 @@ class AnnouncementStatus(str, enum.Enum):
 
 
 class Announcement(Base):
-    """IRIS 사업공고 한 건을 나타내는 레코드.
+    """사업공고 한 건을 나타내는 레코드.
 
-    동일한 `iris_announcement_id` 가 들어오면 UPSERT(갱신) 대상이 되도록
-    UNIQUE 제약을 건다. 화면 필터링과 마감 임박 정렬을 위해 `status`
-    와 `deadline_at` 에도 인덱스를 둔다.
+    (source_type, source_announcement_id) 복합 UNIQUE 로 UPSERT 대상을 판정한다.
+    화면 필터링과 마감 임박 정렬을 위해 `status` 와 `deadline_at` 에도 인덱스를 둔다.
     """
 
     __tablename__ = "announcements"
 
+    # (source_type, source_announcement_id) 복합 UNIQUE: 소스별 외부 ID 중복 방지
+    __table_args__ = (
+        UniqueConstraint(
+            "source_type",
+            "source_announcement_id",
+            name="uq_announcement_source",
+        ),
+    )
+
     # 내부 PK (표시/정렬 용도)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
-    # IRIS 에서 부여하는 공고 ID (외부 식별자, 중복 방지)
-    iris_announcement_id: Mapped[str] = mapped_column(
+    # 수집 소스가 부여하는 공고 ID (source_type 과 함께 UPSERT 키)
+    source_announcement_id: Mapped[str] = mapped_column(
         String(128),
         nullable=False,
-        unique=True,
         index=True,
-        doc="IRIS 시스템이 부여한 공고 고유 ID. UPSERT 키.",
+        doc="수집 소스가 부여한 공고 고유 ID. source_type 과 함께 UPSERT 키.",
+    )
+
+    # 공고 수집 소스 유형 (app.sources.constants.SOURCE_TYPE_* 중 하나)
+    source_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="IRIS",
+        doc="공고 수집 소스 유형. 예: 'IRIS', 'NTIS'.",
     )
 
     # 공고 제목
@@ -201,7 +219,8 @@ class Announcement(Base):
     def __repr__(self) -> str:
         """디버깅 편의용 문자열 표현을 반환한다."""
         return (
-            f"<Announcement id={self.id} iris_id={self.iris_announcement_id!r} "
+            f"<Announcement id={self.id} source={self.source_type!r} "
+            f"src_id={self.source_announcement_id!r} "
             f"status={self.status.value!r} title={self.title[:20]!r}>"
         )
 

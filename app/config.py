@@ -3,6 +3,9 @@
 환경변수 또는 프로젝트 루트의 `.env` 파일로부터 값을 읽어 `Settings` 객체에 담는다.
 다른 모듈은 `get_settings()` 를 호출해 싱글턴으로 공유한다.
 
+소스별 상세 파라미터(base_url 등)는 `sources.yaml` 에서 관리한다.
+여기서는 전역 fallback 값과 공통 동작 설정만 보유한다.
+
 보안상의 이유로 기본값에는 비밀 정보를 넣지 않는다.
 URL/경로 기본값은 로컬 개발 편의를 위한 값이므로 운영 환경에서는 반드시 환경변수로 덮어쓴다.
 """
@@ -24,15 +27,21 @@ class Settings(BaseSettings):
 
     모든 필드는 환경변수로 덮어쓸 수 있으며, 이름은 필드명과 동일하다(대소문자 무시).
     예) `BASE_URL=...`, `REQUEST_DELAY_SEC=2.0`.
+
+    소스별 base_url 등 상세 파라미터는 `sources.yaml` 에서 관리한다.
+    여기서는 소스 공통 fallback 값과 전역 동작 옵션만 보유한다.
     """
 
     # ──────────────────────────────────────────────────────────────
-    # 스크래핑 대상 및 네트워크 정책
+    # 스크래핑 공통 설정 및 네트워크 정책
     # ──────────────────────────────────────────────────────────────
 
     base_url: str = Field(
         default="https://www.iris.go.kr/contents/retrieveBsnsAncmBtinSituListView.do",
-        description="IRIS 사업공고 목록 페이지 URL",
+        description=(
+            "사업공고 목록 페이지 기본 URL. "
+            "sources.yaml 에 소스별 base_url 이 지정되지 않은 경우의 fallback 값."
+        ),
     )
     request_delay_sec: float = Field(
         default=1.5,
@@ -41,7 +50,7 @@ class Settings(BaseSettings):
     )
     user_agent: str = Field(
         default="",
-        description="HTTP 요청에 사용할 User-Agent. 빈 문자열이면 list_scraper 의 기본값을 사용한다.",
+        description="HTTP 요청에 사용할 User-Agent. 빈 문자열이면 스크래퍼 어댑터의 기본값을 사용한다.",
     )
 
     # ──────────────────────────────────────────────────────────────
