@@ -100,4 +100,54 @@
 #}
 {% include ["viewers/" ~ (announcement.source_type | lower) ~ ".html", "viewers/default.html"] %}
 
+{# ── 첨부파일 목록 ── #}
+<h3 class="attachments-title">첨부파일</h3>
+{% if attachments %}
+    <div class="list-table-wrap">
+        <table class="attachments-table">
+            <thead>
+                <tr>
+                    <th class="col-ext">형식</th>
+                    <th>파일명</th>
+                    <th class="col-size">크기</th>
+                    <th class="col-download">다운로드</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for att in attachments %}
+                <tr>
+                    <td class="col-ext">
+                        <span class="ext-badge ext-{{ att.file_ext | lower }}">
+                            {{ att.file_ext | upper }}
+                        </span>
+                    </td>
+                    <td>{{ att.original_filename }}</td>
+                    <td class="col-size">
+                        {% if att.file_size is not none %}
+                            {% set kb = (att.file_size / 1024) | round(1) %}
+                            {% if kb < 1024 %}
+                                {{ kb }} KB
+                            {% else %}
+                                {{ (kb / 1024) | round(2) }} MB
+                            {% endif %}
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                    <td class="col-download">
+                        <a class="download-link"
+                           href="/attachments/{{ att.id }}/download"
+                           download="{{ att.original_filename }}">
+                            다운로드
+                        </a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+{% else %}
+    <p class="empty-attachments">첨부파일이 없거나 아직 다운로드되지 않았습니다.</p>
+{% endif %}
+
 {% endblock %}

@@ -8,6 +8,32 @@
 
 ---
 
+## 구현 상태 (task 00008 완료 기준, 2026-04-20)
+
+> **설계 의도 vs. 실제 구현 차이 요약**
+
+| 항목 | 설계 문서(4절) 권장안 | 실제 구현 선택 | 이유 |
+|---|---|---|---|
+| 다운로드 방식 | 옵션 A — httpx 직접 GET (세션 없이 동작 실측) | **Playwright headless 주 경로, httpx 폴백** | 사용자가 'headless 브라우저 제어 필수'를 명시 요청 |
+| Docker 이미지 | 변경 불필요 | Playwright chromium 추가 (~400MB 증가) | 위와 동일 |
+| 저장 경로 | `downloads/<ancmId>/` | `downloads/{source_type}/{source_announcement_id}/` | 소스 확장성 고려(NTIS 등) |
+| CLI 플래그 | `--skip-attachments` 추가 | **구현됨** | 설계 문서 9-2절 그대로 |
+| DB UPSERT 키 | `(announcement_id, original_filename)` | **구현됨** | 설계 문서 6절 그대로 |
+| 실패 기록 | `raw_metadata.attachment_errors` | **구현됨** | 설계 문서 8절 그대로 |
+
+### 구현된 모듈 위치
+
+| 역할 | 파일 |
+|---|---|
+| 파일명·경로 정제 유틸 | `app/scraper/attachment_paths.py` |
+| 첨부 다운로더 (Playwright 주 / httpx 폴백) | `app/scraper/attachment_downloader.py` |
+| DB UPSERT·조회 헬퍼 | `app/db/repository.py` (`upsert_attachment`, `get_attachment_by_id`, 등) |
+| CLI 오케스트레이션 | `app/cli.py` (`_scrape_and_store_attachments`, `--skip-attachments`) |
+| 웹 첨부 목록·다운로드 API | `app/web/main.py` (`GET /attachments/{id}/download`) |
+| 웹 첨부 목록 템플릿 | `app/web/templates/detail.html` |
+
+---
+
 ## 1. 배경 — 왜 첨부 다운로드가 별도 설계가 필요한가
 
 IRIS 공고 상세 페이지의 첨부파일 링크는 **평범한 `<a href="...pdf">` 형태가 아니다**.
@@ -161,21 +187,29 @@ filename="%EB%B6%99%EC%9E%841. 2026년도 한-스페인 ... 국문 공고문.pdf
 
 ## 4. 권장안과 근거
 
-**권장안: 옵션 A — httpx 직접 GET 다운로드**
+**설계 시 권장안: 옵션 A — httpx 직접 GET 다운로드**  
+**실제 구현 선택: Playwright headless 주 경로, httpx 폴백 (사용자 요청 반영)**
 
-**근거:**
-1. 2026-04-20 실측에서 세션 없이 `fileDownload.do` GET 요청만으로 파일(390801 바이트)이 정상 반환됨
-2. `detail_html`에 이미 `atchDocId`, `atchFileId`, 파일명, 크기가 명시적으로 포함되어 있어 브라우저 없이 파싱 가능
-3. 이미 구현된 `detail_scraper.py`의 httpx 클라이언트를 재사용할 수 있어 코드 추가량이 최소
-4. Playwright를 도입하지 않으면 Docker 이미지가 경량으로 유지됨 (PROJECT_NOTES.md: "목록 수집은 httpx, 첨부 수집만 Playwright" 방침이 있었으나 실측 결과 httpx만으로 충분)
+설계 단계에서는 실측 결과(세션 없이 httpx GET만으로 파일 취득 가능)를 근거로 옵션 A를 권장했다.
+그러나 task 00008에서 사용자가 "DOM이 숨겨져 있었으니 브라우저 제어 headless 방식 사용"을 명시적으로 요청하여,
+Playwright를 주 경로로 채택하고 httpx를 폴백으로 유지하는 방식으로 구현되었다.
 
-**만약 httpx 방식이 차단될 경우 대비책(옵션 B 전환 조건):**
-- `fileDownload.do` 응답이 301/302 로그인 페이지로 리다이렉트되기 시작할 때
+실측에서 httpx만으로도 파일 취득이 가능함은 여전히 사실이므로,
+IRIS가 향후 세션·Referer 검증을 강화하더라도 현재 구현의 httpx 폴백 경로에서도 대응 가능하다.
+
+**httpx 폴백이 동작하는 조건 (현재 구현 기준):**
+- Playwright 기동 실패(브라우저 바이너리 없음, 환경 오류)
+- `a.file_down` DOM 요소를 찾지 못한 경우
+- `page.expect_download()` 타임아웃 발생
+
+**httpx 방식이 차단될 경우 판단 기준:**
+- `fileDownload.do` 응답이 301/302 로그인 페이지로 리다이렉트될 때
 - `Content-Length` 가 예상 파일 크기보다 현저히 작거나 Content-Type이 `text/html`로 변경될 때
+- 위 상황에서는 전체 흐름을 Playwright 전용으로 전환하면 해결된다
 
 ---
 
-### 옵션 B(Playwright) 전환 시 필요 절차 (참고용)
+### 옵션 B(Playwright) 구현 내역 (task 00008에서 주 경로로 채택)
 
 필요 브라우저: `chromium`  
 headless 여부: `headless=True`  
@@ -207,13 +241,17 @@ RUN pip install playwright && playwright install --with-deps chromium
 ### 기본 경로 형식
 
 ```
-./data/downloads/<ancmId>/<sanitized_filename>
+./data/downloads/{source_type}/{source_announcement_id}/{sanitized_filename}
 ```
 
-예시:
+`source_type` 과 `source_announcement_id` 는 모두 `sanitize_path_component()` 로 정제되어 경로 구분자·특수문자가 `_` 로 치환된다.
+
+예시 (IRIS, ancmId=020640):
 ```
-./data/downloads/020640/붙임1._2026년도_한-스페인_공동연구사업_신규과제_공모_국문_공고문.pdf
+./data/downloads/IRIS/020640/붙임1._2026년도_한-스페인_공동연구사업_신규과제_공모_국문_공고문.pdf
 ```
+
+> **설계 문서와의 차이**: 원 설계는 `downloads/<ancmId>/` 였으나, NTIS 등 다른 소스 추가 시 ID 충돌을 방지하기 위해 `downloads/{source_type}/{id}/` 로 구현되었다.
 
 ### 파일명 정제 규칙 (경로 트래버설 방어)
 
@@ -298,108 +336,64 @@ def sanitize_filename(raw_name: str) -> str:
 
 ---
 
-## 9. 다음 task 구현 체크리스트
+## 9. 구현 완료 내역 (task 00008)
 
-### 9-1. 모듈 추가 위치
+> 이전에 "다음 task 구현 체크리스트"였던 섹션. task 00008에서 모두 구현 완료.
 
-**파일**: `app/scraper/attachment_downloader.py`
+### 9-1. 모듈 구현 위치
 
-**공개 함수 시그니처 초안:**
+| 역할 | 파일 | 주요 공개 API |
+|---|---|---|
+| 첨부 링크 추출·다운로드 | `app/scraper/attachment_downloader.py` | `extract_attachment_links()`, `scrape_attachments_for_announcement()` |
+| 파일명·경로 정제 | `app/scraper/attachment_paths.py` | `sanitize_filename()`, `build_attachment_path()` |
 
-```python
-from __future__ import annotations
-from typing import Any
-import httpx
-from app.config import Settings
+`scrape_attachments_for_announcement(announcement)` 가 공고 한 건의 첨부파일을 모두 다운로드하고
+성공/실패 결과(`AttachmentScrapeResult`)를 반환한다.
 
-async def extract_attachment_links(detail_html: str) -> list[dict[str, Any]]:
-    """detail_html에서 첨부파일 링크 정보를 추출한다.
+### 9-2. CLI 플래그 (구현됨)
 
-    Returns:
-        [
-          {
-            "atc_doc_id": str,
-            "atc_file_id": str,
-            "original_filename": str,
-            "file_size_bytes": int,
-            "download_url": str,  # 구성된 완전한 URL
-          },
-          ...
-        ]
-    """
-    ...
+`app/cli.py`의 `run` 서브커맨드에 아래 플래그가 추가되었다:
 
-async def download_attachment(
-    client: httpx.AsyncClient,
-    attachment_info: dict[str, Any],
-    save_dir: Path,
-) -> Path:
-    """단일 첨부파일을 다운로드하고 저장 경로를 반환한다.
-
-    Raises:
-        httpx.HTTPStatusError: 서버가 4xx/5xx를 반환할 때.
-    """
-    ...
-
-async def scrape_attachments_for_announcement(
-    announcement: Announcement,
-    *,
-    settings: Settings | None = None,
-) -> list[dict[str, Any]]:
-    """공고 한 건의 첨부파일을 모두 다운로드하고 저장 결과를 반환한다.
-
-    성공한 첨부는 Attachment 모델에 upsert할 준비가 된 dict로,
-    실패한 첨부는 attachment_errors 포맷으로 반환한다.
-    """
-    ...
+```bash
+python -m app.cli run --skip-attachments   # 첨부파일 다운로드 단계를 건너뛴다
 ```
 
-### 9-2. CLI 플래그 추가
+요약 로그에 `attachment_success/failure/skipped_count` 3종 카운터가 집계된다.
 
-`app/cli.py`의 `_build_arg_parser()`에 아래 플래그 추가:
+### 9-3. Docker / pyproject 변경 (구현됨)
 
-```python
-run_parser.add_argument(
-    "--skip-attachments",
-    action="store_true",
-    help="첨부파일 다운로드를 건너뛴다.",
-)
-```
+사용자의 "브라우저 headless" 명시 요청에 따라 Playwright를 주 경로로 채택하여 아래가 실제로 변경되었다.
 
-`_orchestrate`의 summary에 `attachment_success_count`, `attachment_failure_count` 카운터 추가.
-
-### 9-3. compose scraper 서비스 변경 여부
-
-**권장안(옵션 A, httpx)의 경우**: `docker/Dockerfile` 변경 불필요. `pyproject.toml`에 의존성 추가 없음 (BeautifulSoup은 이미 추가됨).
-
-**옵션 B(Playwright)로 전환할 경우에만:**
-
-`docker/Dockerfile`에 추가:
-```dockerfile
-RUN pip install playwright && playwright install --with-deps chromium
-```
-
-`pyproject.toml` dependencies에 추가:
+`pyproject.toml`:
 ```toml
 "playwright>=1.44,<2.0",
 ```
 
-### 9-4. DB 처리 순서
+`docker/Dockerfile` (`pip install -e .` 이후에 추가):
+```dockerfile
+RUN playwright install --with-deps chromium
+```
 
-1. `extract_attachment_links(announcement.detail_html)` → attachment_info 목록
-2. 목록이 비어 있으면 스킵
-3. 각 attachment_info에 대해:
-   a. `(announcement_id, original_filename)` 으로 기존 `Attachment` 조회
-   b. 있으면 `sha256` 비교 → 동일하면 스킵
-   c. 없거나 sha256 다르면 `download_attachment()` 호출
-   d. 성공 → `upsert_attachment(session, ...)` 호출
-   e. 실패 → `raw_metadata.attachment_errors`에 기록
+`docker-compose.yml` (scraper 서비스):
+```yaml
+shm_size: '256m'   # Chromium /dev/shm 크래시 방지
+```
 
-### 9-5. 구현 전 검증 권장 사항
+### 9-4. DB 처리 흐름 (구현됨)
 
-1. `retrieveCheckFileDownload.do` POST가 실제로 필요한지 재확인 (현재 실측에서는 불필요)
-2. 로그인 세션이 없어도 모든 공고/파일에서 다운로드 가능한지 샘플 10건 이상으로 확인
-3. Base64 인코딩된 `atchDocId`/`atchFileId`가 시간 기반 토큰인지 확인 (만료 여부)
+`app/cli.py`의 `_scrape_and_store_attachments()` 헬퍼가 아래 순서를 처리한다:
+
+1. 공고 fresh 조회 → `session.expunge()` (비동기 다운로드 중 세션 안전 해제)
+2. `scrape_attachments_for_announcement()` 비동기 호출
+3. 새 세션 오픈: 성공 항목 → `upsert_attachment()`, 실패 항목 → `raw_metadata.attachment_errors` 병합
+
+UPSERT 키: `(announcement_id, original_filename)` — sha256 동일하면 스킵, 다르면 갱신.
+
+### 9-5. 검증 결과 (구현 당시 실측 근거 재확인)
+
+- `retrieveCheckFileDownload.do` POST는 구현에 포함하지 않음 (실측 결과 불필요).
+- `atchDocId`/`atchFileId` 토큰은 실측 범위 내에서 만료 없음 확인.
+- Playwright 주 경로가 동작하지 않을 경우 httpx 폴백이 자동 실행된다.
 
 ---
 

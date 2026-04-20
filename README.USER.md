@@ -66,6 +66,7 @@ python -m app.cli run
 | `--max-pages N` | 소스당 최대 페이지 수 (0=안전상한 50) | `--max-pages 3` |
 | `--max-announcements N` | 소스당 최대 공고 수 (0=무제한) | `--max-announcements 20` |
 | `--skip-detail` | 목록만 수집, 상세 페이지 생략 | `--skip-detail` |
+| `--skip-attachments` | 목록·상세 수집은 정상 실행, 첨부파일 다운로드만 생략 | `--skip-attachments` |
 | `--dry-run` | DB 쓰기 없이 수집 검증만 | `--dry-run` |
 | `--source SOURCE_ID` | 특정 소스만 실행 | `--source IRIS` |
 | `--log-level LEVEL` | 로그 레벨 일회성 변경 | `--log-level DEBUG` |
@@ -79,8 +80,11 @@ python -m app.cli run --max-pages 1 --dry-run
 # IRIS만 소량 수집 (상세 생략)
 python -m app.cli run --source IRIS --max-pages 2 --skip-detail
 
-# 전체 수집 (기본 동작)
+# 전체 수집 (목록·상세·첨부파일 다운로드 포함, 기본 동작)
 python -m app.cli run
+
+# 첨부파일 다운로드 없이 목록·상세만 수집
+python -m app.cli run --skip-attachments
 
 # 디버그 로그로 전체 수집
 python -m app.cli run --log-level DEBUG
@@ -132,16 +136,19 @@ INFO  목록 수집 완료: source=IRIS 42건
 INFO  [1/42] 공고 처리: source=IRIS id=12345
 INFO  신규 공고 등록: source=IRIS id=12345
 INFO  상세 수집 완료(ok): source=IRIS id=12345
+INFO  첨부 수집 완료: source=IRIS id=12345 성공=3 실패=0 생략(이미 존재)=0
 ...
 INFO  [5/42] 공고 처리: source=IRIS id=11111
 INFO  상세 수집 생략(변경 없음, 기존 데이터 재사용): source=IRIS id=11111
+INFO  첨부 수집 완료: source=IRIS id=11111 성공=0 실패=0 생략(이미 존재)=2
 ...
-INFO  소스 IRIS 완료: 목록 성공 42건 / 실패 0건 | 상세 성공 5건 / 실패 0건 / 생략(변경없음) 37건 | action 분포: 신규=5 변경없음=37 버전갱신=0 상태전이=0
-INFO  scrape 실행 완료: 목록 성공 42건 / 목록 실패 0건 | 상세 성공 5건 / 실패 0건 / 생략(변경없음) 37건 | action 분포: 신규=5 변경없음=37 버전갱신=0 상태전이=0
+INFO  소스 IRIS 완료: 목록 성공 42건 / 실패 0건 | 상세 성공 5건 / 실패 0건 / 생략(변경없음) 37건 | 첨부 성공 8건 / 실패 0건 / 생략 74건 | action 분포: 신규=5 변경없음=37 버전갱신=0 상태전이=0
+INFO  scrape 실행 완료: 목록 성공 42건 / 목록 실패 0건 | 상세 성공 5건 / 실패 0건 / 생략(변경없음) 37건 | 첨부 성공 8건 / 실패 0건 / 생략 74건 | action 분포: 신규=5 변경없음=37 버전갱신=0 상태전이=0
 ```
 
 > **확인 포인트**: 2회차 이후 실행에서 `변경없음=N` 이 전체 공고 수와 가까울수록 정상이다.
-> `신규=0 변경없음=42` 이면 모든 공고가 기존 데이터를 재사용하고 상세 수집도 생략된다.
+> `신규=0 변경없음=42` 이면 모든 공고가 기존 데이터를 재사용하고 상세·첨부 재수집도 최소화된다.
+> 첨부는 sha256 비교로 중복 방지 — 이미 존재하는 파일은 `생략(이미 존재)` 으로 집계된다.
 
 ### 주의가 필요한 로그
 
@@ -256,6 +263,30 @@ chmod -R 755 ./data/
 이 경고가 실제로 출력되면 소스가 접수예정/마감 상태를 반환하기 시작한 것이므로,
 `docs/status_transition_todo.md` 를 참고해 대응한다.
 
+### 첨부파일이 다운로드되지 않는다
+
+1. 로그에서 `첨부 수집` 관련 라인을 확인한다.
+2. `attachment_errors` 키가 있는지 DB에서 확인한다:
+   ```sql
+   SELECT id, source_announcement_id, json_extract(raw_metadata, '$.attachment_errors')
+   FROM announcements
+   WHERE is_current = 1 AND raw_metadata LIKE '%attachment_errors%';
+   ```
+3. Playwright 브라우저가 설치되어 있는지 확인한다:
+   - Docker: 이미지 재빌드 (`docker compose build`) 후 `playwright install chromium` 스텝 로그 확인
+   - 로컬: `playwright install chromium` 실행
+4. `--skip-attachments` 플래그 없이 재실행하면 이전에 실패한 항목을 재시도한다.
+
+### 웹 UI에서 첨부파일 다운로드 링크가 404를 반환한다
+
+`stored_path` 가 가리키는 파일이 실제로 존재하지 않는 경우다.
+CLI를 재실행해 파일을 다운로드하거나, DB의 해당 `attachments` 레코드가 유효한지 확인한다:
+
+```sql
+SELECT id, original_filename, stored_path FROM attachments
+WHERE announcement_id = {공고_id};
+```
+
 ---
 
 ## 정기 운영 체크리스트
@@ -264,6 +295,7 @@ chmod -R 755 ./data/
 
 - [ ] 종료 코드 0 확인 (`echo $?`)
 - [ ] `scrape 실행 완료` 로그에서 `목록 실패` 건수 = 0 확인
+- [ ] `scrape 실행 완료` 로그에서 `첨부 실패` 건수 확인 (0이면 정상)
 - [ ] 웹 UI(`http://localhost:8000`) 에서 최신 공고 표시 확인
 
 ### 주간 확인

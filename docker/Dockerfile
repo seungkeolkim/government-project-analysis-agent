@@ -1,8 +1,8 @@
 # IRIS 사업공고 목록 수집 및 로컬 웹 UI 실행용 Docker 이미지
 #
-# 현재 단계(목록 수집만)에서는 Playwright/Chromium이 필요 없으므로
-# 경량 python:3.12-slim 베이스를 사용한다.
-# 첨부파일 수집 기능이 활성화될 때 Playwright 베이스로 전환 예정.
+# Playwright headless chromium 을 사용한 첨부파일 다운로드를 지원한다.
+# python:3.12-slim 베이스 위에 playwright install --with-deps chromium 으로
+# Chromium 및 시스템 의존성을 설치한다 (이미지 크기 ~400 MB 증가).
 
 FROM python:3.12-slim
 
@@ -31,7 +31,17 @@ COPY app ./app
 #    호스트의 소스 변경이 즉시 반영된다.
 RUN pip install --upgrade pip && pip install -e .
 
-# 4) 런타임에 사용되는 로컬 디렉터리 기본 생성.
+# 4) Playwright headless chromium 브라우저 설치.
+#    --with-deps: python:3.12-slim 에 없는 시스템 라이브러리(libnss3, libatk,
+#    libgbm 등)를 함께 설치한다. root 권한이 필요하며 이미지 크기가 ~400 MB 증가한다.
+#    브라우저 바이너리는 /root/.cache/ms-playwright 에 저장된다.
+#
+#    빌드 후 smoke 테스트:
+#      docker compose --profile scrape run --rm scraper \
+#        python -c 'from playwright.async_api import async_playwright; print("ok")'
+RUN playwright install --with-deps chromium
+
+# 5) 런타임에 사용되는 로컬 디렉터리 기본 생성.
 #    compose 의 ./data 볼륨이 이를 덮어쓰지만, 단독 컨테이너 실행 시에도 동작하도록 준비한다.
 RUN mkdir -p /app/data/db /app/data/downloads
 
