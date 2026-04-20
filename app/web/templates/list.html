@@ -4,7 +4,7 @@
   기능:
     - 상태 필터 드롭다운 (전체/접수중/접수예정/마감)
     - 제목·기관명 부분일치 검색창
-    - 테이블: 제목 · 기관 · 상태 · 마감일 · 첨부수
+    - 테이블: 제목 · 기관 · 상태 · 마감일
     - 페이지네이션 (prev / next / 현재 페이지 표시)
 
   입력 컨텍스트 (main.py `index_page` 가 주입):
@@ -22,8 +22,7 @@
 
 {% block content %}
 <section class="list-filters">
-    {# GET 폼 하나로 status/search 를 동시에 넘긴다. 페이지는 1 로 초기화되도록 hidden 을 걸지 않는다
-       (사용자가 필터/검색을 바꾸면 1 페이지부터 보여주는 것이 자연스럽다). #}
+    {# GET 폼 하나로 status/search 를 동시에 넘긴다. #}
     <form method="get" action="/" class="filter-form">
         <label class="filter-label" for="filter-status">상태</label>
         <select id="filter-status" name="status" class="filter-input">
@@ -62,15 +61,12 @@
                 <th class="col-agency">기관</th>
                 <th class="col-status">상태</th>
                 <th class="col-deadline">마감일</th>
-                <th class="col-attachments">첨부수</th>
             </tr>
         </thead>
         <tbody>
             {% for announcement in announcements %}
             <tr>
-                <td class="col-title">
-                    <a href="/announcements/{{ announcement.id }}">{{ announcement.title }}</a>
-                </td>
+                <td class="col-title">{{ announcement.title }}</td>
                 <td class="col-agency">{{ announcement.agency or "-" }}</td>
                 <td class="col-status">
                     {# 상태별 클래스로 색상 구분. CSS 는 하드코드된 3개 값만 처리한다. #}
@@ -85,11 +81,10 @@
                         -
                     {% endif %}
                 </td>
-                <td class="col-attachments">{{ announcement.attachments | length }}</td>
             </tr>
             {% else %}
             <tr>
-                <td colspan="5" class="empty-row">조건에 맞는 공고가 없습니다.</td>
+                <td colspan="4" class="empty-row">조건에 맞는 공고가 없습니다.</td>
             </tr>
             {% endfor %}
         </tbody>
@@ -98,8 +93,7 @@
 
 {% if total_pages > 1 %}
 <nav class="pagination" aria-label="페이지 이동">
-    {# 쿼리스트링 조합: 필터/검색 값을 보존한 채 페이지 번호만 바꿔 링크한다.
-       상태/검색이 비어 있으면 파라미터를 아예 붙이지 않아 URL 을 깔끔하게 유지한다. #}
+    {# 필터/검색 값을 보존한 채 페이지 번호만 바꿔 링크한다. #}
     {% set base_query %}{% if status %}&status={{ status }}{% endif %}{% if search %}&search={{ search }}{% endif %}{% endset %}
 
     {% if page > 1 %}
