@@ -12,6 +12,7 @@ from app.db.models import Announcement, AnnouncementStatus, Attachment, Base
 from app.db.repository import (
     UpsertResult,
     upsert_attachment,
+    get_attachment_by_id,
     get_attachment_by_announcement_and_filename,
     get_attachments_by_announcement,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "reset_engine_cache",
     "init_db",
     "upsert_attachment",
+    "get_attachment_by_id",
     "get_attachment_by_announcement_and_filename",
     "get_attachments_by_announcement",
 ]

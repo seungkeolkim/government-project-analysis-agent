@@ -524,6 +524,22 @@ def upsert_attachment(
     return existing, True
 
 
+def get_attachment_by_id(
+    session: Session,
+    attachment_id: int,
+) -> Optional[Attachment]:
+    """내부 PK 로 첨부파일 레코드를 조회한다.
+
+    Args:
+        session:       호출자가 제어하는 SQLAlchemy 세션.
+        attachment_id: 첨부파일 내부 PK.
+
+    Returns:
+        `Attachment` 인스턴스 또는 None.
+    """
+    return session.get(Attachment, attachment_id)
+
+
 def get_attachment_by_announcement_and_filename(
     session: Session,
     announcement_id: int,
@@ -583,6 +599,7 @@ __all__ = [
     "list_announcements",
     "count_announcements",
     "upsert_attachment",
+    "get_attachment_by_id",
     "get_attachment_by_announcement_and_filename",
     "get_attachments_by_announcement",
 ]

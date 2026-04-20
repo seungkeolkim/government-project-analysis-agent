@@ -1,25 +1,24 @@
 """FastAPI 로컬 열람 웹 백엔드.
 
-현재 활성화된 라우트:
-    - GET /                          공고 목록 HTML 페이지 (상태 필터·검색·페이지네이션)
-    - GET /announcements             공고 목록 JSON API
-    - GET /announcements/{id}        공고 상세 HTML 페이지
-
-비활성화(첨부파일 다운로드는 별도 subtask에서 활성화 예정):
-    - 첨부파일 다운로드
+활성화된 라우트:
+    - GET /                                       공고 목록 HTML 페이지 (상태 필터·검색·페이지네이션)
+    - GET /announcements                          공고 목록 JSON API
+    - GET /announcements/{id}                     공고 상세 HTML 페이지 (첨부파일 목록 포함)
+    - GET /attachments/{attachment_id}/download   로컬 파일 스트리밍 다운로드
 
 로컬 전용. 인증이 없으므로 외부 노출 금지.
 """
 
 from __future__ import annotations
 
+import mimetypes
 from collections.abc import Iterator
 from math import ceil
 from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
@@ -30,6 +29,8 @@ from app.db.models import Announcement, AnnouncementStatus
 from app.db.repository import (
     count_announcements,
     get_announcement_by_id,
+    get_attachment_by_id,
+    get_attachments_by_announcement,
     list_announcements,
 )
 from app.db.session import SessionLocal
@@ -217,6 +218,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         """공고 상세 HTML 페이지.
 
         내부 PK(`id`)로 공고를 조회해 DB에 저장된 `detail_html` 을 렌더한다.
+        공고에 연결된 첨부파일 목록도 함께 조회해 템플릿에 전달한다.
         없는 id 는 404 로 응답한다.
         """
         announcement = get_announcement_by_id(session, announcement_id)
@@ -226,10 +228,62 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 detail=f"공고 id={announcement_id} 를 찾을 수 없습니다.",
             )
 
+        attachments = get_attachments_by_announcement(session, announcement_id)
+
         return templates.TemplateResponse(
             request,
             "detail.html",
-            {"announcement": announcement},
+            {"announcement": announcement, "attachments": attachments},
+        )
+
+    # ──────────────────────────────────────────────────────────
+    # 첨부파일 로컬 다운로드
+    # ──────────────────────────────────────────────────────────
+
+    @fastapi_app.get("/attachments/{attachment_id}/download")
+    def attachment_download(
+        attachment_id: int,
+        session: Session = Depends(get_session),
+    ) -> FileResponse:
+        """로컬에 저장된 첨부파일을 스트리밍으로 반환한다.
+
+        보안 검증:
+            1. DB에서 첨부파일 레코드 조회 — 없으면 404.
+            2. `stored_path` 가 실제 파일인지 확인 — 없으면 404.
+            3. `stored_path.resolve()` 가 `settings.download_dir.resolve()` 하위인지
+               `Path.is_relative_to()` 로 검증 — 벗어나면 403 (경로 트래버설 방어).
+
+        한글 파일명은 starlette FileResponse 가 RFC 5987 `filename*=UTF-8''...` 형식으로
+        Content-Disposition 헤더를 설정하므로 별도 처리가 불필요하다.
+        """
+        attachment = get_attachment_by_id(session, attachment_id)
+        if attachment is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"첨부파일 id={attachment_id} 를 찾을 수 없습니다.",
+            )
+
+        stored = Path(attachment.stored_path).resolve()
+        download_root = effective_settings.download_dir.resolve()
+
+        if not stored.is_file():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="첨부파일이 로컬에 존재하지 않습니다.",
+            )
+
+        # 경로 트래버설 방어: stored_path 가 download_dir 하위인지 검증
+        if not stored.is_relative_to(download_root):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="허용되지 않는 파일 경로입니다.",
+            )
+
+        media_type, _ = mimetypes.guess_type(str(stored))
+        return FileResponse(
+            path=str(stored),
+            filename=attachment.original_filename,
+            media_type=media_type or "application/octet-stream",
         )
 
     # ──────────────────────────────────────────────────────────
