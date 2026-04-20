@@ -19,6 +19,8 @@ dependencies = [
     # 스크래핑 (HTTP 기반 목록·상세 수집)
     "httpx>=0.27,<1.0",
     "beautifulsoup4>=4.12,<5.0",
+    # headless 브라우저 기반 첨부파일 다운로드 (Playwright headless chromium)
+    "playwright>=1.44,<2.0",
 
     # 데이터 모델 / DB
     "SQLAlchemy>=2.0,<3.0",

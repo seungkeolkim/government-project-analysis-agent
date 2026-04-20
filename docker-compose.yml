@@ -49,6 +49,9 @@ services:
     # 실행: docker compose --profile scrape run --rm scraper
     profiles:
       - scrape
+    # Playwright headless chromium 이 /dev/shm 공유 메모리를 사용한다.
+    # Docker 기본값(64 MB)은 Chromium 렌더러 프로세스 크래시를 유발하므로 256 MB 로 확장한다.
+    shm_size: '256m'
     env_file:
       - .env
     volumes:
