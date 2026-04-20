@@ -1,23 +1,19 @@
 # IRIS 사업공고 스크래퍼 로컬 실행용 docker compose 정의.
 #
 # 서비스 구성:
-#   - app:     FastAPI 기반 로컬 웹 UI. `docker compose up app` 로 기동한다.
+#   - app:     FastAPI 기반 로컬 웹 UI. `docker compose up app` 으로 기동한다.
 #              포트 8000 을 호스트에 노출한다.
-#   - scraper: Playwright 기반 스크래핑 CLI. 장시간 상주 프로세스가 아니라
+#   - scraper: httpx 기반 목록 수집 CLI. 장시간 상주 프로세스가 아니라
 #              필요할 때만 1회 실행하는 형태이므로 `profiles: [scrape]` 로 분리한다.
-#              실행은 아래 명령으로 수행한다:
-#                  docker compose --profile scrape run --rm scraper
+#              실행: docker compose --profile scrape run --rm scraper
 #
 # 볼륨 구성:
-#   - ./data:/app/data  : SQLite DB 파일과 첨부파일을 호스트에 영속 보관.
+#   - ./data:/app/data  : SQLite DB 파일을 호스트에 영속 보관.
 #   - ./app:/app/app    : 개발 편의를 위한 소스 바인드 마운트.
 #                          이미지 빌드 없이도 호스트의 코드 변경이 즉시 반영된다.
 #
 # 환경변수는 프로젝트 루트의 `.env` 파일을 공통으로 사용한다.
 # (`.env.example` 을 복사하여 생성)
-#
-# 참고: 파이썬 패키지는 `app` 이다. 따라서 uvicorn 모듈 경로는
-#       `app.web.main:app` 이고 CLI 는 `python -m app.cli` 이다.
 
 services:
   app:
@@ -33,7 +29,6 @@ services:
     volumes:
       - ./data:/app/data
       - ./app:/app/app
-    # 로컬 열람 UI 기동 명령(최종 확정).
     command:
       - uvicorn
       - app.web.main:app
@@ -51,7 +46,7 @@ services:
     image: iris-agent:dev
     container_name: iris-agent-scraper
     # 기본 `up` 에서 기동되지 않도록 프로파일로 격리한다.
-    # 실행: `docker compose --profile scrape run --rm scraper`
+    # 실행: docker compose --profile scrape run --rm scraper
     profiles:
       - scrape
     env_file:
@@ -59,13 +54,11 @@ services:
     volumes:
       - ./data:/app/data
       - ./app:/app/app
-    # 기본 실행: 접수중 공고를 목록→상세→첨부 다운로드 순으로 처리한다.
-    # 필요 시 `docker compose --profile scrape run --rm scraper python -m app.cli run --max-pages 1 --dry-run`
-    # 처럼 인자를 오버라이드해 사용할 수 있다.
+    # '접수중' 목록을 수집하고 DB에 적재한다.
+    # 인자 오버라이드 예시:
+    #   docker compose --profile scrape run --rm scraper python -m app.cli run --max-pages 1 --dry-run
     command:
       - python
       - -m
       - app.cli
       - run
-      - --status
-      - 접수중

@@ -39,18 +39,9 @@ class Settings(BaseSettings):
         ge=0.0,
         description="각 요청 사이에 삽입할 최소 지연(초). 차단 방지 목적.",
     )
-    navigation_timeout_ms: int = Field(
-        default=30_000,
-        ge=1_000,
-        description="Playwright page goto/wait 에 사용할 타임아웃(ms).",
-    )
-    headless: bool = Field(
-        default=True,
-        description="Playwright 브라우저 headless 여부. 디버깅 시에만 false 권장.",
-    )
     user_agent: str = Field(
         default="",
-        description="사용자 지정 User-Agent. 빈 문자열이면 Playwright 기본값을 사용한다.",
+        description="HTTP 요청에 사용할 User-Agent. 빈 문자열이면 list_scraper 의 기본값을 사용한다.",
     )
 
     # ──────────────────────────────────────────────────────────────
