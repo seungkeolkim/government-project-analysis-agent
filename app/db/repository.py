@@ -56,7 +56,7 @@ from typing import Any, Literal, Optional
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from app.db.models import Announcement, AnnouncementStatus
+from app.db.models import Announcement, AnnouncementStatus, Attachment
 
 # 공고에서 사용자가 payload 로 덮어쓰지 말아야 하는 자동 관리 컬럼들.
 _ANNOUNCEMENT_PROTECTED_FIELDS: frozenset[str] = frozenset({"id", "scraped_at", "updated_at"})
@@ -445,6 +445,136 @@ def count_announcements(
     return int(session.execute(statement).scalar_one())
 
 
+
+# ── 첨부파일(Attachment) UPSERT 키 기준 허용 필드 ────────────────────────────────────
+# downloaded_at 은 NOT NULL 이므로 payload 에 항상 포함해야 한다.
+_ATTACHMENT_ALLOWED_FIELDS: frozenset[str] = frozenset({
+    "announcement_id",
+    "original_filename",
+    "stored_path",
+    "file_ext",
+    "file_size",
+    "download_url",
+    "sha256",
+    "downloaded_at",
+})
+
+
+def upsert_attachment(
+    session: Session,
+    payload: Mapping[str, Any],
+) -> tuple[Attachment, bool]:
+    """첨부파일 한 건을 증분 UPSERT 한다.
+
+    UPSERT 키: `(announcement_id, original_filename)`.
+    기존 레코드가 있으면 `sha256` 을 비교한다.
+        - 동일 → 스킵(기존 레코드 반환, upserted=False)
+        - 변경 → 저장 경로·크기·해시·다운로드 시각을 in-place UPDATE (upserted=True)
+    기존 레코드가 없으면 INSERT (upserted=True).
+
+    `downloaded_at` 은 NOT NULL 컬럼이므로 payload 에 반드시 포함해야 한다.
+    commit 은 호출자 책임이며, 여기서는 flush 까지만 수행한다.
+
+    Args:
+        session: 호출자가 제어하는 SQLAlchemy 세션.
+        payload: 첨부파일 속성 매핑.
+                 필수 키: `announcement_id`, `original_filename`, `stored_path`,
+                          `file_ext`, `downloaded_at`.
+
+    Returns:
+        (Attachment 인스턴스, upserted 여부).
+        upserted=True: 신규 삽입 또는 변경된 경우. False: sha256 동일로 스킵.
+
+    Raises:
+        KeyError: 필수 키가 payload 에 없을 때.
+    """
+    for required_key in ("announcement_id", "original_filename", "stored_path", "file_ext", "downloaded_at"):
+        if required_key not in payload:
+            raise KeyError(f"첨부파일 payload 에 {required_key!r} 가 반드시 포함되어야 합니다.")
+
+    clean = _filter_payload(payload, _ATTACHMENT_ALLOWED_FIELDS)
+    announcement_id: int = clean["announcement_id"]
+    original_filename: str = clean["original_filename"]
+
+    existing = session.execute(
+        select(Attachment).where(
+            Attachment.announcement_id == announcement_id,
+            Attachment.original_filename == original_filename,
+        )
+    ).scalar_one_or_none()
+
+    # ── 신규 삽입 ─────────────────────────────────────────────────────────────
+    if existing is None:
+        attachment = Attachment(**clean)
+        session.add(attachment)
+        session.flush()
+        return attachment, True
+
+    # ── sha256 비교 — 동일하면 스킵 ───────────────────────────────────────────
+    incoming_sha256 = clean.get("sha256")
+    if incoming_sha256 and existing.sha256 == incoming_sha256:
+        return existing, False
+
+    # ── 변경됨 → in-place UPDATE ──────────────────────────────────────────────
+    for field_name in ("stored_path", "file_ext", "file_size", "download_url", "sha256", "downloaded_at"):
+        if field_name in clean:
+            setattr(existing, field_name, clean[field_name])
+
+    session.flush()
+    return existing, True
+
+
+def get_attachment_by_announcement_and_filename(
+    session: Session,
+    announcement_id: int,
+    original_filename: str,
+) -> Optional[Attachment]:
+    """공고 ID와 원본 파일명으로 첨부파일 레코드를 조회한다.
+
+    존재하지 않으면 None 을 반환한다.
+
+    Args:
+        session:           호출자가 제어하는 SQLAlchemy 세션.
+        announcement_id:   소속 공고의 내부 PK.
+        original_filename: 원본 파일명 (소스가 제공하는 그대로).
+
+    Returns:
+        `Attachment` 인스턴스 또는 None.
+    """
+    return session.execute(
+        select(Attachment).where(
+            Attachment.announcement_id == announcement_id,
+            Attachment.original_filename == original_filename,
+        )
+    ).scalar_one_or_none()
+
+
+def get_attachments_by_announcement(
+    session: Session,
+    announcement_id: int,
+) -> list[Attachment]:
+    """공고 ID에 속한 모든 첨부파일 레코드를 반환한다.
+
+    결과는 `id` 오름차순으로 정렬된다.
+
+    Args:
+        session:         호출자가 제어하는 SQLAlchemy 세션.
+        announcement_id: 소속 공고의 내부 PK.
+
+    Returns:
+        `Attachment` 리스트. 첨부파일이 없으면 빈 리스트.
+    """
+    return list(
+        session.execute(
+            select(Attachment)
+            .where(Attachment.announcement_id == announcement_id)
+            .order_by(Attachment.id.asc())
+        )
+        .scalars()
+        .all()
+    )
+
+
 __all__ = [
     "UpsertResult",
     "upsert_announcement",
@@ -452,4 +582,7 @@ __all__ = [
     "get_announcement_by_id",
     "list_announcements",
     "count_announcements",
+    "upsert_attachment",
+    "get_attachment_by_announcement_and_filename",
+    "get_attachments_by_announcement",
 ]
