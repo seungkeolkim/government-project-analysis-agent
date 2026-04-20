@@ -1,5 +1,13 @@
-"""Playwright 기반 IRIS 스크래퍼 패키지.
+"""사업공고 수집 스크래퍼 패키지.
 
-목록 크롤링, 상세 페이지 파싱, 숨겨진 DOM/첨부파일 수집 모듈이
-후속 subtask에서 이 패키지에 추가된다. 이 파일은 현재 패키지 선언만 수행한다.
+소스별 어댑터(iris/, ntis/ 등)를 포함하며, 외부 코드는
+`registry.get_adapter()` 를 통해 어댑터를 획득한다.
 """
+
+from app.scraper.base import BaseSourceAdapter
+from app.scraper.registry import get_adapter
+
+__all__ = [
+    "BaseSourceAdapter",
+    "get_adapter",
+]
