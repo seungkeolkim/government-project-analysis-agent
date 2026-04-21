@@ -2,19 +2,25 @@
   공고 목록 페이지.
 
   기능:
-    - 상태 필터 드롭다운 (전체/접수중/접수예정/마감)
-    - 제목·기관명 부분일치 검색창
-    - 테이블: 제목 · 기관 · 상태 · 마감일
-    - 페이지네이션 (prev / next / 현재 페이지 표시)
+    - 필터 폼: 상태 / 소스(sources.yaml 기반 자동 반영) / 정렬 / 제목 검색 / canonical 묶어보기 토글
+    - 분리 표시 모드(기본): 각 소스 공고를 개별 row 로, 동일 과제 N건 배지 표시
+    - 묶어 보기 모드: canonical 그룹 1건 대표 row + <details> expand 로 소스별 구성원 표시
+    - 페이지네이션 — 필터/정렬/그룹 상태를 URL query param 으로 보존
 
-  입력 컨텍스트 (main.py `index_page` 가 주입):
-    - announcements: list[Announcement]
-    - total:         int  (전체 건수)
-    - page:          int  (1-based 현재 페이지)
-    - page_size:     int
-    - total_pages:   int
-    - status:        str  (선택된 상태 값 또는 빈 문자열)
-    - search:        str  (검색어 또는 빈 문자열)
+  입력 컨텍스트 (main.py index_page 가 주입):
+    - group_mode:       bool
+    - ann_with_sizes:   list[tuple[Announcement, int]]  (group_mode=False 시)
+    - groups:           list[CanonicalGroupRow]          (group_mode=True 시)
+    - total:            int
+    - page:             int  (1-based)
+    - page_size:        int
+    - total_pages:      int
+    - status:           str  (선택된 상태 값 또는 빈 문자열)
+    - search:           str  (검색어 또는 빈 문자열)
+    - source:           str  (선택된 소스 또는 빈 문자열)
+    - sort:             str  (received_desc | deadline_asc | title_asc)
+    - group:            str  (on | off)
+    - available_sources: list[str]
 #}
 {% extends "base.html" %}
 
@@ -22,7 +28,7 @@
 
 {% block content %}
 <section class="list-filters">
-    {# GET 폼 하나로 status/search 를 동시에 넘긴다. #}
+    {# GET 폼 하나로 모든 필터·정렬·그룹 상태를 동시에 넘긴다. #}
     <form method="get" action="/" class="filter-form">
         <label class="filter-label" for="filter-status">상태</label>
         <select id="filter-status" name="status" class="filter-input">
@@ -32,6 +38,22 @@
             <option value="마감" {% if status == "마감" %}selected{% endif %}>마감</option>
         </select>
 
+        <label class="filter-label" for="filter-source">소스</label>
+        <select id="filter-source" name="source" class="filter-input">
+            <option value="" {% if not source %}selected{% endif %}>전체</option>
+            {# available_sources 는 sources.yaml 기반으로 동적 생성된다. #}
+            {% for src in available_sources %}
+            <option value="{{ src }}" {% if source == src %}selected{% endif %}>{{ src }}</option>
+            {% endfor %}
+        </select>
+
+        <label class="filter-label" for="filter-sort">정렬</label>
+        <select id="filter-sort" name="sort" class="filter-input">
+            <option value="received_desc" {% if sort == "received_desc" %}selected{% endif %}>수집일 최신순</option>
+            <option value="deadline_asc" {% if sort == "deadline_asc" %}selected{% endif %}>마감일 가까운순</option>
+            <option value="title_asc" {% if sort == "title_asc" %}selected{% endif %}>공고명 가나다순</option>
+        </select>
+
         <label class="filter-label" for="filter-search">검색</label>
         <input
             id="filter-search"
@@ -39,18 +61,27 @@
             type="search"
             name="search"
             value="{{ search }}"
-            placeholder="제목 또는 기관명"
+            placeholder="제목"
             autocomplete="off">
+
+        {# select 방식으로 구현해 기본값(off)이 항상 명시적으로 전송되게 한다. #}
+        <label class="filter-label" for="filter-group">묶어 보기</label>
+        <select id="filter-group" name="group" class="filter-input">
+            <option value="off" {% if group != "on" %}selected{% endif %}>분리 표시</option>
+            <option value="on" {% if group == "on" %}selected{% endif %}>중복 묶어 보기</option>
+        </select>
 
         <button type="submit" class="filter-submit">적용</button>
 
-        {% if status or search %}
-        {# 필터/검색이 걸려 있을 때만 초기화 링크를 노출한다. #}
+        {# 기본값이 아닌 필터·정렬·토글 중 하나라도 활성 상태이면 초기화 링크를 노출한다. #}
+        {% if status or source or search or sort != "received_desc" or group == "on" %}
         <a class="filter-reset" href="/">초기화</a>
         {% endif %}
     </form>
 
-    <p class="list-summary">총 {{ total }}건 · {{ page }} / {{ total_pages }} 페이지</p>
+    <p class="list-summary">
+        총 {{ total }}건{% if group_mode %} (그룹 단위){% endif %} · {{ page }} / {{ total_pages }} 페이지
+    </p>
 </section>
 
 <section class="list-table-wrap">
@@ -65,29 +96,52 @@
             </tr>
         </thead>
         <tbody>
-            {% for announcement in announcements %}
+            {% if group_mode %}
+            {# ── 묶어 보기 모드: canonical 그룹 단위 대표 1건 + expand ────────────── #}
+            {% for gr in groups %}
             <tr>
                 <td class="col-title">
-                    <a class="announcement-title-link" href="/announcements/{{ announcement.id }}">
-                        {{ announcement.title }}
+                    <a class="announcement-title-link" href="/announcements/{{ gr.representative.id }}">
+                        {{ gr.representative.title }}
                     </a>
+                    {# 그룹 크기 배지: 항상 표시 #}
+                    <span class="canonical-count-badge">{{ gr.group_size }}건</span>
+                    {# 소스별 구성원 expand: 그룹 크기 2 이상이고 canonical_project 가 로드된 경우 #}
+                    {% if gr.group_size > 1 and gr.representative.canonical_project %}
+                    <details class="group-expand">
+                        <summary class="group-expand__summary">소스별 보기</summary>
+                        <ul class="group-member-list">
+                            {% for member in gr.representative.canonical_project.announcements if member.is_current %}
+                            <li class="group-member-list__item">
+                                <a class="group-member-list__link" href="/announcements/{{ member.id }}">
+                                    {{ member.title | truncate(70, end='…') }}
+                                </a>
+                                <span class="source-badge source-{{ member.source_type | lower }}">
+                                    {{ member.source_type }}
+                                </span>
+                                <span class="status-badge status-{{ member.status.name | lower }}">
+                                    {{ member.status.value }}
+                                </span>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                    </details>
+                    {% endif %}
                 </td>
-                <td class="col-agency">{{ announcement.agency or "-" }}</td>
+                <td class="col-agency">{{ gr.representative.agency or "-" }}</td>
                 <td class="col-source">
-                    {# 소스 유형별 클래스로 색상 구분. source_type 은 소문자로 변환해 클래스명에 사용. #}
-                    <span class="source-badge source-{{ announcement.source_type | lower }}">
-                        {{ announcement.source_type }}
+                    <span class="source-badge source-{{ gr.representative.source_type | lower }}">
+                        {{ gr.representative.source_type }}
                     </span>
                 </td>
                 <td class="col-status">
-                    {# 상태별 클래스로 색상 구분. #}
-                    <span class="status-badge status-{{ announcement.status.name | lower }}">
-                        {{ announcement.status.value }}
+                    <span class="status-badge status-{{ gr.representative.status.name | lower }}">
+                        {{ gr.representative.status.value }}
                     </span>
                 </td>
                 <td class="col-deadline">
-                    {% if announcement.deadline_at %}
-                        {{ announcement.deadline_at.strftime("%Y-%m-%d %H:%M") }}
+                    {% if gr.representative.deadline_at %}
+                        {{ gr.representative.deadline_at.strftime("%Y-%m-%d %H:%M") }}
                     {% else %}
                         -
                     {% endif %}
@@ -98,14 +152,54 @@
                 <td colspan="5" class="empty-row">조건에 맞는 공고가 없습니다.</td>
             </tr>
             {% endfor %}
+
+            {% else %}
+            {# ── 분리 표시 모드(기본): 각 소스 공고 개별 row ─────────────────────── #}
+            {% for ann, group_size in ann_with_sizes %}
+            <tr>
+                <td class="col-title">
+                    <a class="announcement-title-link" href="/announcements/{{ ann.id }}">
+                        {{ ann.title }}
+                    </a>
+                    {# 동일 과제 배지: 같은 canonical group 에 2건 이상 있을 때만 표시 #}
+                    {% if group_size > 1 %}
+                    <span class="canonical-count-badge">동일 과제 {{ group_size }}건</span>
+                    {% endif %}
+                </td>
+                <td class="col-agency">{{ ann.agency or "-" }}</td>
+                <td class="col-source">
+                    <span class="source-badge source-{{ ann.source_type | lower }}">
+                        {{ ann.source_type }}
+                    </span>
+                </td>
+                <td class="col-status">
+                    <span class="status-badge status-{{ ann.status.name | lower }}">
+                        {{ ann.status.value }}
+                    </span>
+                </td>
+                <td class="col-deadline">
+                    {% if ann.deadline_at %}
+                        {{ ann.deadline_at.strftime("%Y-%m-%d %H:%M") }}
+                    {% else %}
+                        -
+                    {% endif %}
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="5" class="empty-row">조건에 맞는 공고가 없습니다.</td>
+            </tr>
+            {% endfor %}
+            {% endif %}
         </tbody>
     </table>
 </section>
 
 {% if total_pages > 1 %}
 <nav class="pagination" aria-label="페이지 이동">
-    {# 필터/검색 값을 보존한 채 페이지 번호만 바꿔 링크한다. #}
-    {% set base_query %}{% if status %}&status={{ status }}{% endif %}{% if search %}&search={{ search }}{% endif %}{% endset %}
+    {# 필터·정렬·그룹 값을 보존하며 페이지 번호만 바꿔 링크한다.
+       기본값(sort=received_desc, group=off)은 URL 간결화를 위해 생략한다. #}
+    {% set base_query %}{% if status %}&status={{ status }}{% endif %}{% if search %}&search={{ search }}{% endif %}{% if source %}&source={{ source }}{% endif %}{% if sort != "received_desc" %}&sort={{ sort }}{% endif %}{% if group == "on" %}&group=on{% endif %}{% endset %}
 
     {% if page > 1 %}
     <a class="pagination-link" href="/?page={{ page - 1 }}{{ base_query }}">← 이전</a>

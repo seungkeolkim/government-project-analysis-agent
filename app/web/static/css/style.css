@@ -471,3 +471,87 @@ code {
 .detail-not-fetched p:last-child {
     margin-bottom: 0;
 }
+
+/* ---------- canonical 그룹 카운트 배지 ---------- */
+/*
+ * 분리 표시 모드: "동일 과제 N건" 배지 — 같은 canonical group 에 2건 이상일 때 표시.
+ * 묶어 보기 모드: "N건" 배지 — 항상 표시.
+ */
+.canonical-count-badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-weight: 600;
+    background: #e0f2fe;
+    color: #0369a1;
+    border: 1px solid #bae6fd;
+    margin-left: 6px;
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
+/* ---------- 그룹 expand (묶어 보기 모드 전용) ---------- */
+.group-expand {
+    margin-top: 6px;
+}
+
+.group-expand__summary {
+    cursor: pointer;
+    font-size: 12px;
+    color: #6b7280;
+    user-select: none;
+    /* 기본 목록 마커 제거 */
+    list-style: none;
+}
+
+/* Chrome/Safari: 기본 화살표 제거 */
+.group-expand__summary::-webkit-details-marker {
+    display: none;
+}
+
+/* 열림/닫힘 방향 표시자 */
+.group-expand__summary::before {
+    content: "▶ ";
+    font-size: 9px;
+    vertical-align: middle;
+}
+
+.group-expand[open] .group-expand__summary::before {
+    content: "▼ ";
+}
+
+/* ---------- 그룹 구성원 목록 ---------- */
+.group-member-list {
+    margin: 6px 0 0 0;
+    padding: 6px 12px;
+    background: #f8fafc;
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    list-style: none;
+}
+
+.group-member-list__item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 0;
+    font-size: 13px;
+}
+
+.group-member-list__item + .group-member-list__item {
+    border-top: 1px solid #f3f4f6;
+}
+
+.group-member-list__link {
+    flex: 1;
+    color: #374151;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.group-member-list__link:hover {
+    color: #1d4ed8;
+    text-decoration: underline;
+}
