@@ -11,6 +11,7 @@ sources.yaml 파일을 읽어 SourcesConfig 로 파싱한다.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -21,6 +22,45 @@ from app.config import PROJECT_ROOT
 
 # sources.yaml 기본 위치
 DEFAULT_SOURCES_CONFIG_PATH: Path = PROJECT_ROOT / "sources.yaml"
+
+
+class SourceCredentials(BaseModel):
+    """소스별 인증 정보.
+
+    실제 값은 환경변수에서 읽으며, yaml 파일에 직접 기재하지 않는다.
+    환경변수 이름 규칙: `{SOURCE_ID}_USERNAME`, `{SOURCE_ID}_PASSWORD`
+    예) IRIS_USERNAME, IRIS_PASSWORD
+
+    현재 지원 소스:
+    - IRIS: 로그인 필요 여부 미확인
+    - NTIS: 로그인 불필요 (docs/ntis_site_exploration.md §5). 환경변수 설정 불필요.
+    """
+
+    username: Optional[str] = None
+    """로그인 사용자명. None 이면 인증 없이 게스트 접근."""
+
+    password: Optional[str] = None
+    """로그인 비밀번호. None 이면 인증 없이 게스트 접근."""
+
+    @classmethod
+    def from_env(cls, source_id: str) -> Optional["SourceCredentials"]:
+        """환경변수에서 소스별 credentials 를 취득한다.
+
+        `{SOURCE_ID}_USERNAME` / `{SOURCE_ID}_PASSWORD` 두 환경변수를 읽는다.
+        두 환경변수 모두 설정되지 않은 경우 None 을 반환한다.
+
+        Args:
+            source_id: 소스 유형 식별자 (예: 'IRIS', 'NTIS').
+
+        Returns:
+            SourceCredentials 인스턴스, 또는 환경변수가 없으면 None.
+        """
+        prefix = source_id.upper()
+        username = os.environ.get(f"{prefix}_USERNAME")
+        password = os.environ.get(f"{prefix}_PASSWORD")
+        if username is None and password is None:
+            return None
+        return cls(username=username, password=password)
 
 
 class SourceConfig(BaseModel):
@@ -56,6 +96,20 @@ class SourceConfig(BaseModel):
     def source_type(self) -> str:
         """소스 유형 문자열. id 의 별칭."""
         return self.id
+
+    def resolve_credentials(self) -> Optional[SourceCredentials]:
+        """환경변수에서 소스별 credentials 를 취득한다.
+
+        yaml 에 credentials 를 직접 기재하지 않고, 런타임에 환경변수로부터
+        `{SOURCE_ID}_USERNAME` / `{SOURCE_ID}_PASSWORD` 를 읽는다.
+        인증 로직은 이 메서드를 호출하는 세션 팩토리 함수 1곳에서만 사용한다.
+
+        로그인이 불필요한 소스(NTIS 등)는 환경변수를 설정하지 않으면 None 을 반환한다.
+
+        Returns:
+            credentials 인스턴스, 또는 환경변수가 설정되지 않은 경우 None.
+        """
+        return SourceCredentials.from_env(self.id)
 
 
 class SourcesConfig(BaseModel):
@@ -102,6 +156,7 @@ def load_sources_config(path: Path | str | None = None) -> SourcesConfig:
 
 
 __all__ = [
+    "SourceCredentials",
     "SourceConfig",
     "SourcesConfig",
     "load_sources_config",

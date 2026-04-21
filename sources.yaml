@@ -14,5 +14,12 @@ sources:
 
   - id: NTIS
     enabled: false
-    base_url: https://www.ntis.go.kr/
+    # 목록 POST 엔드포인트 (docs/ntis_site_exploration.md §1)
+    base_url: https://www.ntis.go.kr/rndgate/eg/un/ra/mng.do
     request_delay_sec: 2.0
+    statuses:
+      - 접수예정
+      - 접수중
+      - 마감
+    # credentials 슬롯: NTIS 는 로그인 불필요(게스트 수집 가능)이므로 설정하지 않는다.
+    # 로그인이 필요한 소스는 NTIS_USERNAME / NTIS_PASSWORD 환경변수로 주입한다.
