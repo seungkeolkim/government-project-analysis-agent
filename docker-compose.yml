@@ -9,9 +9,11 @@
 #              실행 파라미터는 sources.yaml 의 scrape: 섹션에서 제어한다.
 #
 # 볼륨 구성:
-#   - ./data:/app/data  : SQLite DB 파일을 호스트에 영속 보관.
-#   - ./app:/app/app    : 개발 편의를 위한 소스 바인드 마운트.
-#                          이미지 빌드 없이도 호스트의 코드 변경이 즉시 반영된다.
+#   - ./data:/app/data                            : SQLite DB 파일을 호스트에 영속 보관.
+#   - ./app:/app/app                              : 개발 편의를 위한 소스 바인드 마운트.
+#                                                   이미지 빌드 없이도 호스트의 코드 변경이 즉시 반영된다.
+#   - ./sources.yaml:/run/config/sources.yaml:ro  : 실행 설정 주입. 이미지 빌드 없이 수정 반영.
+#                                                   entrypoint.sh 가 per-run 임시 복사본을 생성한다.
 #
 # 환경변수는 프로젝트 루트의 `.env` 파일을 공통으로 사용한다.
 # (`.env.example` 을 복사하여 생성)
@@ -30,6 +32,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./app:/app/app
+      - ./sources.yaml:/run/config/sources.yaml:ro
     command:
       - uvicorn
       - app.web.main:app
@@ -58,9 +61,11 @@ services:
     volumes:
       - ./data:/app/data
       - ./app:/app/app
+      - ./sources.yaml:/run/config/sources.yaml:ro
     # 수집 파라미터는 sources.yaml 의 scrape: 섹션에서 제어한다.
-    # CLI 인자는 사용하지 않으며, 설정 변경 후 run 을 다시 실행하면 반영된다.
-    entrypoint:
+    # entrypoint.sh 가 SOURCES_CONFIG_PATH 를 주입한 뒤 command 를 exec 한다.
+    # CLI 인자는 사용하지 않는다.
+    command:
       - python
       - -m
       - app.cli
