@@ -79,6 +79,8 @@ sources:
     enabled: true
     base_url: https://www.iris.go.kr/...
     request_delay_sec: 1.5
+    # max_pages: 10          # 소스별 기본 페이지 상한 (CLI 인자 없을 때 사용, 생략 시 코드 default 10)
+    # max_announcements: 200 # 소스별 기본 공고 수 상한 (생략 시 코드 default 200)
   - id: NTIS
     enabled: false   # stub — 구현 전까지 비활성화
     base_url: https://www.ntis.go.kr/
@@ -110,19 +112,29 @@ docker compose up app
 docker compose --profile scrape run --rm scraper
 ```
 
-기본 명령은 `python -m app.cli run` 이며, `sources.yaml` 에서
-`enabled: true` 인 소스를 순서대로 처리해 SQLite DB 에 적재한다.
+`sources.yaml` 에서 `enabled: true` 인 소스를 순서대로 처리해 SQLite DB 에 적재한다.
 재실행 시 변경 없는 공고는 상세 재수집을 생략하고 기존 데이터를 재사용한다(증분 수집).
-인자를 바꾸고 싶다면 뒤에 덧붙일 수 있다. 예:
+
+**CLI 인자는 `docker compose run` 뒤에 바로 붙이면 된다** — `python -m app.cli run` 을 직접 입력할 필요 없다.
+인자를 생략하면 소스당 최대 **10 페이지 · 200 건** 이 수집된다(코드 default).
+`sources.yaml` 에 소스별 `max_pages` / `max_announcements` 를 설정하면 그 값이 default 로 쓰인다.
+우선순위: **CLI 인자 > sources.yaml 소스별 설정 > 코드 default (10 / 200)**
 
 ```bash
-# 1 페이지만 스캔하되 실제 DB/파일 쓰기 없이 드라이런
-docker compose --profile scrape run --rm scraper \
-  python -m app.cli run --max-pages 1 --dry-run
+# 기본값으로 전체 수집 (소스당 최대 10페이지 · 200건)
+docker compose --profile scrape run --rm scraper
 
-# IRIS 소스만 지정해서 실행
-docker compose --profile scrape run --rm scraper \
-  python -m app.cli run --source IRIS
+# 페이지·공고 수 직접 지정
+docker compose --profile scrape run --rm scraper --max-pages 3 --max-announcements 50
+
+# 드라이런 — DB/파일 쓰기 없이 수집만 검증 (1페이지만)
+docker compose --profile scrape run --rm scraper --max-pages 1 --dry-run
+
+# 특정 소스만 실행
+docker compose --profile scrape run --rm scraper --source IRIS
+
+# 첨부파일 다운로드 없이 목록·상세만 수집
+docker compose --profile scrape run --rm scraper --skip-attachments
 ```
 
 수집된 데이터는 호스트의 `./data/db/app.sqlite3` 와 `./data/downloads/{source_type}/{announcement_id}/`
@@ -147,7 +159,14 @@ playwright install chromium
 cp .env.example .env
 
 # 5) 스크래퍼 실행 — 접수중 공고 수집 (sources.yaml 의 enabled 소스 전체)
+#    인자 생략 시: 소스당 최대 10페이지 · 200건 (코드 default)
 python -m app.cli run
+
+# 페이지·공고 수 직접 지정
+python -m app.cli run --max-pages 3 --max-announcements 50
+
+# 드라이런 — DB/파일 쓰기 없이 1페이지만 검증
+python -m app.cli run --max-pages 1 --dry-run
 
 # IRIS 만 지정해서 실행
 python -m app.cli run --source IRIS
@@ -214,10 +233,10 @@ uvicorn app.web.main:app --host 0.0.0.0 --port 8000
    - [ ] `docker compose up app` 후 <http://localhost:8000> 가 200 을 반환한다.
    - [ ] 초기 목록 페이지에 "공고가 없습니다" 빈 상태 UI 가 정상 렌더링된다.
 3. **스크래퍼 드라이런**
-   - [ ] `docker compose --profile scrape run --rm scraper python -m app.cli run --max-pages 1 --dry-run`
+   - [ ] `docker compose --profile scrape run --rm scraper --max-pages 1 --dry-run`
          실행 시 목록 파싱 로그가 정상 출력되고 DB/파일 쓰기 없이 exit code 0 으로 종료된다.
 4. **스크래퍼 실제 실행 및 증분 동작 확인**
-   - [ ] `docker compose --profile scrape run --rm scraper` (또는 `--max-pages 1`) 실행 후
+   - [ ] `docker compose --profile scrape run --rm scraper --max-pages 1` 실행 후
          `./data/db/app.sqlite3` 가 생성된다.
    - [ ] 같은 명령을 재실행하면 변경 없는 공고는 `상세 수집 생략(변경 없음)` 로그가 출력되고,
          신규 공고만 새로 수집된다(증분 수집 동작 확인).
@@ -232,7 +251,7 @@ uvicorn app.web.main:app --host 0.0.0.0 --port 8000
    - [ ] `/announcements.json`, `/announcements/{id}.json` 이 JSON 을 반환한다.
 6. **로컬(비 Docker) 경로도 실행 가능한지 샘플 확인**
    - [ ] `pip install -e . && playwright install chromium` 이후
-         `python -m app.cli run --max-pages 1 --dry-run` 가 동작한다.
+         `python -m app.cli run --max-pages 1 --dry-run` 이 동작한다.
    - [ ] `uvicorn app.web.main:app --host 0.0.0.0 --port 8000` 로 동일 UI 가 기동된다.
 7. **데이터 정리**
    - [ ] 재설치/초기화가 필요할 때 `./data/db/app.sqlite3` 와 `./data/downloads/` 를 삭제하면

@@ -36,14 +36,19 @@ sources.yaml 에 정의된 활성 소스를 순회하여 공고 목록·상세·
                           [--log-level LEVEL] [--source SOURCE_ID]
 
 옵션:
-    --max-pages N          각 소스에서 순회할 최대 페이지 수. 0(기본) = 안전 상한 사용.
-    --max-announcements N  소스당 UPSERT 할 최대 공고 수. 0(기본) = 무제한.
+    --max-pages N          각 소스에서 순회할 최대 페이지 수 (양의 정수).
+                           미지정 → sources.yaml 소스별 설정 → 코드 default(10).
+    --max-announcements N  소스당 UPSERT 할 최대 공고 수 (양의 정수).
+                           미지정 → sources.yaml 소스별 설정 → 코드 default(200).
     --skip-detail          상세 페이지 수집을 건너뛴다(목록 적재만 수행).
     --skip-attachments     첨부파일 다운로드를 건너뛴다. 목록·상세만 수집한다.
     --dry-run              DB 쓰기를 건너뛰고 수집만 검증한다.
     --log-level LEVEL      로그 레벨 일회성 오버라이드(기본: settings.log_level).
     --source SOURCE_ID     sources.yaml 의 enabled 설정을 무시하고 지정 소스만 실행.
                            예: --source NTIS (stub 동작 확인용)
+
+우선순위:
+    CLI 인자 > sources.yaml 소스별 설정 > 코드 내부 default (max_pages=10, max_announcements=200)
 
 종료 코드:
     0  : 정상(처리한 공고 수가 0 건이어도 정상 종료)
@@ -84,12 +89,9 @@ from app.sources.constants import SOURCE_TYPE_IRIS
 
 DEFAULT_STATUS_LABEL: str = "접수중"
 
-# argparse 기본값. 0 은 '무제한' 으로 해석한다.
-DEFAULT_MAX_PAGES_FLAG: int = 0
-DEFAULT_MAX_ANNOUNCEMENTS_FLAG: int = 0
-
-# 안전 상한: 소스당 최대 페이지 수 (max_pages=0 일 때 적용)
-MAX_PAGES_SAFE_CEILING: int = 50
+# 코드 내부 default (CLI·sources.yaml 둘 다 없을 때 사용)
+CODE_DEFAULT_MAX_PAGES: int = 10
+CODE_DEFAULT_MAX_ANNOUNCEMENTS: int = 200
 
 # 날짜 텍스트 → datetime 변환 시 시도할 포맷 후보.
 _DATETIME_TEXT_FORMATS: tuple[str, ...] = (
@@ -267,8 +269,8 @@ async def _run_source_announcements(
     Args:
         adapter:           이미 열린(open) 소스 어댑터.
         settings:          전역 설정 (request_delay_sec 등).
-        max_pages:         목록 페이지 순회 상한.
-        max_announcements: 소스당 최대 처리 공고 수. 0 이면 무제한.
+        max_pages:         목록 페이지 순회 상한 (양의 정수).
+        max_announcements: 소스당 최대 처리 공고 수 (양의 정수).
         skip_detail:       True 면 모든 상세 수집을 건너뛴다(--skip-detail 플래그).
         skip_attachments:  True 면 첨부파일 다운로드를 건너뛴다(--skip-attachments 플래그).
         dry_run:           True 면 DB 쓰기를 건너뛴다.
@@ -285,14 +287,12 @@ async def _run_source_announcements(
     aggregated_rows = await adapter.scrape_list(max_pages=max_pages)
     logger.info("목록 수집 완료: source={} {}건", source_type, len(aggregated_rows))
 
-    if max_announcements > 0:
-        target_rows = aggregated_rows[:max_announcements]
+    target_rows = aggregated_rows[:max_announcements]
+    if len(target_rows) < len(aggregated_rows):
         logger.info(
             "처리 대상 제한: source={} max_announcements={} → {}건만 처리",
             source_type, max_announcements, len(target_rows),
         )
-    else:
-        target_rows = aggregated_rows
 
     if not target_rows:
         logger.warning("처리할 공고가 없음: source={}", source_type)
@@ -568,8 +568,8 @@ def _resolve_active_sources(
 async def _orchestrate(
     *,
     settings: Settings,
-    max_pages: int,
-    max_announcements: int,
+    max_pages: Optional[int],
+    max_announcements: Optional[int],
     skip_detail: bool,
     skip_attachments: bool,
     dry_run: bool,
@@ -577,18 +577,15 @@ async def _orchestrate(
 ) -> dict[str, Any]:
     """소스 목록 → 소스별 공고 수집 → DB 적재 흐름을 수행하고 통계 dict 를 반환한다.
 
+    max_pages / max_announcements 는 CLI 에서 명시된 경우 Optional[int] 로 전달된다.
+    각 소스 루프에서 CLI > sources.yaml > 코드 default 우선순위로 유효 상한을 결정한다.
+
     부트스트랩 실패(init_db)는 호출자로 전파한다.
     소스 단위 예외는 격리 — 한 소스 실패가 다른 소스를 중단시키지 않는다.
     """
     # (1) DB 스키마 보장
     logger.info("DB 초기화 시작 — dry_run={}", dry_run)
     init_db()
-
-    safe_max_pages = (
-        max(int(max_pages), 1)
-        if max_pages > 0
-        else MAX_PAGES_SAFE_CEILING
-    )
 
     # (2) 활성 소스 목록 결정
     active_sources = _resolve_active_sources(source_override, settings)
@@ -607,15 +604,30 @@ async def _orchestrate(
     total_attachment_skipped = 0
 
     for source_config in active_sources:
-        logger.info("── 소스 {} 수집 시작", source_config.id)
+        # CLI > sources.yaml > 코드 default 우선순위로 유효 상한 결정
+        effective_max_pages: int = (
+            max_pages if max_pages is not None
+            else (source_config.max_pages if source_config.max_pages is not None
+                  else CODE_DEFAULT_MAX_PAGES)
+        )
+        effective_max_announcements: int = (
+            max_announcements if max_announcements is not None
+            else (source_config.max_announcements if source_config.max_announcements is not None
+                  else CODE_DEFAULT_MAX_ANNOUNCEMENTS)
+        )
+
+        logger.info(
+            "── 소스 {} 수집 시작 (max_pages={} max_announcements={})",
+            source_config.id, effective_max_pages, effective_max_announcements,
+        )
         try:
             adapter = get_adapter(source_config, settings)
             async with adapter:
                 source_stats = await _run_source_announcements(
                     adapter=adapter,
                     settings=settings,
-                    max_pages=safe_max_pages,
-                    max_announcements=max_announcements,
+                    max_pages=effective_max_pages,
+                    max_announcements=effective_max_announcements,
                     skip_detail=skip_detail,
                     skip_attachments=skip_attachments,
                     dry_run=dry_run,
@@ -677,6 +689,17 @@ async def _orchestrate(
 # ──────────────────────────────────────────────────────────────
 
 
+def _positive_int(value: str) -> int:
+    """argparse type 콜백 — 1 이상의 정수만 허용한다."""
+    try:
+        int_value = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"정수가 아닙니다: {value!r}")
+    if int_value <= 0:
+        raise argparse.ArgumentTypeError(f"1 이상의 정수여야 합니다: {int_value}")
+    return int_value
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     """CLI 인자 파서를 생성한다."""
     root_parser = argparse.ArgumentParser(
@@ -691,15 +714,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument(
         "--max-pages",
-        type=int,
-        default=DEFAULT_MAX_PAGES_FLAG,
-        help="소스당 목록 순회 최대 페이지 수. 0(기본) = 안전 상한 사용.",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help=(
+            "소스당 목록 순회 최대 페이지 수 (1 이상 정수). "
+            f"미지정 시 sources.yaml 설정 → 코드 default({CODE_DEFAULT_MAX_PAGES}) 순으로 사용."
+        ),
     )
     run_parser.add_argument(
         "--max-announcements",
-        type=int,
-        default=DEFAULT_MAX_ANNOUNCEMENTS_FLAG,
-        help="소스당 UPSERT 최대 공고 수. 0(기본) = 무제한.",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help=(
+            "소스당 UPSERT 최대 공고 수 (1 이상 정수). "
+            f"미지정 시 sources.yaml 설정 → 코드 default({CODE_DEFAULT_MAX_ANNOUNCEMENTS}) 순으로 사용."
+        ),
     )
     run_parser.add_argument(
         "--skip-detail",
@@ -837,4 +868,6 @@ if __name__ == "__main__":
 __all__ = [
     "main",
     "DEFAULT_STATUS_LABEL",
+    "CODE_DEFAULT_MAX_PAGES",
+    "CODE_DEFAULT_MAX_ANNOUNCEMENTS",
 ]
