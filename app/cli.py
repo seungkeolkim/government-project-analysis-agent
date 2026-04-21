@@ -130,6 +130,10 @@ def _build_announcement_payload(row_metadata: dict[str, Any]) -> dict[str, Any]:
     """어댑터가 반환한 row 메타를 repository.upsert_announcement payload 로 변환한다.
 
     어댑터는 source_announcement_id / source_type 키를 이미 정규화하여 반환한다.
+
+    ancm_no: IRIS 는 목록 단계에서 공식 공고번호(ancmNo)를 row 에 담아 반환한다.
+             NTIS 는 목록 단계에서 알 수 없으므로 None 이다(상세 수집 후 subtask 8 에서 재계산).
+             두 경우 모두 이 함수가 소스 무관하게 패스스루하여 repository 로 전달한다.
     """
     return {
         "source_announcement_id": row_metadata["source_announcement_id"],
@@ -140,6 +144,9 @@ def _build_announcement_payload(row_metadata: dict[str, Any]) -> dict[str, Any]:
         "received_at": _parse_datetime_text(row_metadata.get("received_at_text")),
         "deadline_at": _parse_datetime_text(row_metadata.get("deadline_at_text")),
         "detail_url": row_metadata.get("detail_url"),
+        # repository._apply_canonical 이 canonical_key 계산에 사용하는 공식 공고번호.
+        # 소스 무관하게 row_metadata 에서 꺼내 패스스루한다.
+        "ancm_no": row_metadata.get("ancm_no"),
         "raw_metadata": {
             "list_row": {
                 key: value
