@@ -305,6 +305,15 @@ ALTER TABLE announcements
 
 ## 7. 미결 사항
 
+### 00014-1 탐사에서 추가 확인된 사항 (2026-04-21)
+
+- **`\xa0` (non-breaking space) + en-dash(`–`, U+2013) 혼용 실측**: `roRndUid=1262576` 공고번호 원문 = `'과학기술정보통신부 공고 제2026\xa0–\xa00484호'`. 기존 정규화 규칙(공백 제거 + 대시 통일)에 `unicodedata.normalize('NFKC', ...)` 선적용이 필수임을 확인.
+- **NTIS 목록: SSR HTML** (JSON API 없음). IRIS와 달리 POST `mng.do` + HTML 파싱 방식.
+- **NTIS 첨부 다운로드: httpx POST 직접 가능** — `POST /rndgate/eg/cmm/file/download.do` with `wfUid` + `roTextUid`. Playwright 불필요. IRIS와 상이하므로 adapter 레벨 분기 필요.
+- **NTIS 로그인 불필요** — 게스트 수집 가능. credentials 슬롯 추가 불필요.
+- **상태 필터 코드**: `searchStatusList` = `P`(접수예정) / `B`(접수중) / `Y`(마감). IRIS `ancmPrg` 코드와 무관.
+- 자세한 사항: `docs/ntis_site_exploration.md` 참조.
+
 ### 00013 에서 확정된 사항
 
 - ✅ 같은 `ancmNo` → 같은 canonical group. `ancmId`별 row는 `announcements`에 유지. (`official:` scheme)
