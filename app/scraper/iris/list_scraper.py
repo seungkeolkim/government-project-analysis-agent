@@ -54,7 +54,7 @@ from __future__ import annotations
 import asyncio
 import random
 from collections.abc import Sequence
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 from loguru import logger
@@ -79,9 +79,9 @@ DETAIL_VIEW_PATH: str = "/contents/retrieveBsnsAncmView.do"
 STATUS_FILTER_PARAM: str = "ancmPrg"
 
 # 상태 코드 — IRIS API ancmPrg 값
-STATUS_CODE_SCHEDULED: str = "ancmPre"   # 접수예정
-STATUS_CODE_RECEIVING: str = "ancmIng"   # 접수중
-STATUS_CODE_CLOSED: str = "ancmEnd"      # 마감
+STATUS_CODE_SCHEDULED: str = "ancmPre"  # 접수예정
+STATUS_CODE_RECEIVING: str = "ancmIng"  # 접수중
+STATUS_CODE_CLOSED: str = "ancmEnd"  # 마감
 
 # 공고 상태 한글 라벨 (AnnouncementStatus.value 와 1:1 일치)
 STATUS_LABEL_SCHEDULED: str = "접수예정"
@@ -126,8 +126,7 @@ HTTP_READ_TIMEOUT_SEC: float = 30.0
 
 # 기본 User-Agent (브라우저를 흉내 내 차단 방지)
 DEFAULT_USER_AGENT: str = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 
 
@@ -218,7 +217,7 @@ async def _fetch_page_with_retry(
     HTTP 4xx/5xx는 재시도 없이 즉시 전파한다.
     """
     effective_max = max(int(max_attempts), 1)
-    last_exc: Optional[BaseException] = None
+    last_exc: BaseException | None = None
 
     for attempt_index in range(1, effective_max + 1):
         try:
@@ -259,7 +258,7 @@ def _build_detail_url(ancm_id: str) -> str:
 def _map_api_record_to_dict(
     record: dict[str, Any],
     status_label: str,
-) -> Optional[dict[str, Any]]:
+) -> dict[str, Any] | None:
     """IRIS API 레코드 하나를 scrape_list 반환 스키마 dict로 변환한다.
 
     status_label은 현재 순회 중인 상태의 한글 라벨이다.
@@ -270,19 +269,23 @@ def _map_api_record_to_dict(
         record:       IRIS API 응답 목록의 단일 레코드 dict.
         status_label: 현재 순회 중인 상태 한글 라벨 ('접수예정'/'접수중'/'마감').
     """
-    ancm_id: Optional[str] = record.get("ancmId")
+    ancm_id: str | None = record.get("ancmId")
     if not ancm_id:
         logger.warning("ancmId 없는 레코드 발견 — 스킵: {!r}", record)
         return None
 
-    title: Optional[str] = record.get("ancmTl") or None
-    agency: Optional[str] = record.get("sorgnNm") or None
+    title: str | None = record.get("ancmTl") or None
+    agency: str | None = record.get("sorgnNm") or None
     # 접수예정 상태에서는 rcveStrDe/rcveEndDe 가 공란인 경우가 많다.
-    received_at_text: Optional[str] = record.get("rcveStrDe") or None
-    deadline_at_text: Optional[str] = record.get("rcveEndDe") or None
+    received_at_text: str | None = record.get("rcveStrDe") or None
+    deadline_at_text: str | None = record.get("rcveEndDe") or None
+    # ancmNo: 외부 공유 가능한 공식 공고번호. canonical_key 계산에 사용된다.
+    # N:1 구조(1 ancmNo → 여러 ancmId)이므로 canonical group 단위 식별자로 활용한다.
+    ancm_no: str | None = record.get("ancmNo") or None
 
     return {
         "iris_announcement_id": ancm_id,
+        "ancm_no": ancm_no,
         "title": title,
         "agency": agency,
         "status": status_label,
@@ -331,9 +334,9 @@ def _resolve_statuses(statuses: Sequence[str]) -> list[tuple[str, str]]:
 
 async def scrape_list(
     *,
-    settings: Optional[Settings] = None,
+    settings: Settings | None = None,
     max_pages: int = DEFAULT_MAX_PAGES,
-    max_announcements: Optional[int] = None,
+    max_announcements: int | None = None,
     statuses: Sequence[str] = DEFAULT_STATUSES,
 ) -> list[dict[str, Any]]:
     """IRIS AJAX API로 접수예정·접수중·마감 공고 메타데이터를 순차 수집한다.
@@ -390,9 +393,7 @@ async def scrape_list(
             logger.info("=== 상태 수집 시작: {} (code={}) ===", status_label, status_code)
 
             # 1페이지 요청으로 전체 페이지 수 파악
-            first_page_data = await _fetch_page_with_retry(
-                client, page_index=1, status_code=status_code
-            )
+            first_page_data = await _fetch_page_with_retry(client, page_index=1, status_code=status_code)
 
             pagination = first_page_data.get(RESPONSE_PAGINATION_KEY) or {}
             total_page_count: int = int(pagination.get(PAGINATION_TOTAL_PAGE_KEY) or 1)
