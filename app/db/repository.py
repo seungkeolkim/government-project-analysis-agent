@@ -26,12 +26,9 @@
         (c) 기존 row 존재, changed_fields == {"status"} (상태 전이만)
             → 기존 row in-place UPDATE (상태만 갱신), action="status_transitioned",
                needs_detail_scraping=True.
-            ※ TODO [IRIS 접수예정·마감 수집 시작 시 활성화]:
-               현재는 접수중만 수집하므로 이 분기는 실제로 실행되지 않는다.
-               IRIS 에서 접수예정·마감 상태를 수집하기 시작할 때 이 분기가 동작하며,
-               CLI(_run_source_announcements)에서 status_transitioned 케이스를 별도 로그·
-               알림 처리할 것을 권장한다.
-            ※ TODO [NTIS 등 신규 크롤러 구현 시 동일 UpsertResult 인터페이스 준수 확인]:
+               IRIS 접수예정/접수중/마감 3개 상태 수집이 활성화된 이후 정상 실행 경로.
+               예: 접수예정으로 등록된 공고가 다음 수집 시 접수중으로 재등장하는 경우.
+            ※ [NTIS 등 신규 크롤러 구현 시]:
                새 소스 어댑터를 추가할 때 status 값을 AnnouncementStatus Enum 으로
                정규화하는 로직을 반드시 포함해야 한다.
         (d) 기존 row 존재, 그 외 변경 (title/deadline_at/agency 변경, status 포함 여부 무관)
@@ -157,6 +154,14 @@ def _normalize_for_comparison(value: Any) -> Any:
       불일치를 해소하여 false-positive 변경 감지를 방지한다.
     - str: 앞뒤 공백 제거. IRIS 응답에 포함될 수 있는 여백으로 인한 false-positive 방지.
     - 기타(None, Enum 등): 변경 없이 반환한다.
+
+    접수예정 공고의 None 처리 동작:
+      - deadline_at_text 가 공란인 접수예정 공고는 payload.deadline_at=None 으로 전달된다.
+      - None 은 그대로 None 으로 반환되므로 DB 의 NULL 과 동일하게 비교된다.
+      - 결과: 최초 수집 시 (a) INSERT, 재수집 시 deadline_at 이 여전히 None 이면 (b) unchanged,
+        나중에 deadline_at 이 채워지면 changed_fields={deadline_at} → (d) new_version 봉인+INSERT.
+      - received_at 은 _CHANGE_DETECTION_FIELDS 에서 의도적으로 제외되어 있어
+        공란 보완 시에도 new_version 을 트리거하지 않는다.
     """
     if isinstance(value, datetime):
         if value.tzinfo is not None:
@@ -269,8 +274,7 @@ def upsert_announcement(session: Session, payload: Mapping[str, Any]) -> UpsertR
         )
 
     # ── (c) 상태 전이: status 만 변경 ─────────────────────────────────────────
-    # 현재는 접수중만 수집하므로 이 분기는 실제로 실행되지 않는다.
-    # IRIS 접수예정·마감 수집 시작 시, 또는 NTIS 등 다중 상태 소스 구현 시 활성화된다.
+    # 동일 공고가 다른 상태(예: 접수예정→접수중, 접수중→마감)로 재등장할 때 발동한다.
     if changed_fields == frozenset({"status"}):
         existing.status = clean_payload["status"]
         # detail_url 이 함께 내려온 경우 갱신한다 (동일 공고, URL 불변이 보통이지만 방어적으로).

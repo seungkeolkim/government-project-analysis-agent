@@ -4,7 +4,7 @@ sources.yaml 에 정의된 활성 소스를 순회하여 공고 목록·상세·
 각 소스는 `app/scraper/registry.get_adapter()` 가 반환하는 어댑터로 실행된다.
 
 현재 구현 상태:
-    - IRIS: 완전 구현 (list + detail + attachment 수집). 접수중 공고만 수집.
+    - IRIS: 완전 구현 (list + detail + attachment 수집). 접수예정·접수중·마감 3개 상태 수집.
     - NTIS: stub (경고 로그 + 빈 결과 반환)
 
 증분 수집 전략 (UpsertResult 기반):
@@ -16,13 +16,10 @@ sources.yaml 에 정의된 활성 소스를 순회하여 공고 목록·상세·
     첨부파일 수집은 상세 수집이 완료(또는 기존 detail_html 있음)된 공고에 대해 실행한다.
     이미 다운로드된 파일(로컬 FS 기준)은 sha256 만 계산하여 반환하고 재다운로드하지 않는다.
 
-상태 전이 TODO:
-    현재는 접수중만 수집하므로 status_transitioned 분기는 실제로 발생하지 않는다.
-    다음 시점에 CLI 분기 로직 추가 및 검증이 필요하다:
-    - IRIS 접수예정·마감 수집 시작 시 → _run_source_announcements 의 status_transitioned
-      케이스를 실제 검증하고 필요 시 추가 처리(알림, 별도 상세 수집 큐 등)를 구현.
-    - NTIS 등 신규 크롤러 구현 시 → UpsertResult 인터페이스와 4-branch 동작을 준수
-      하는지 확인. docs/status_transition_todo.md 참고.
+상태 전이 동작:
+    동일 공고가 접수예정→접수중→마감 으로 상태가 바뀌면 status_transitioned 분기가 발동한다.
+    상태만 변경된 경우 in-place UPDATE, title/deadline_at/agency 도 함께 바뀐 경우 이력 보존
+    (기존 row 봉인 + 신규 INSERT). docs/status_transition_todo.md 참고.
 
 활성화된 흐름:
     (1) init_db 로 스키마 보장 (기존 DB 재사용, create_all 멱등)
@@ -87,6 +84,7 @@ from app.sources.constants import SOURCE_TYPE_IRIS
 # 상수
 # ──────────────────────────────────────────────────────────────
 
+# 어댑터가 row['status'] 를 채우지 않은 비정상 케이스 대비 fallback. 정상 경로에서는 발생하지 않는다.
 DEFAULT_STATUS_LABEL: str = "접수중"
 
 # 코드 내부 default (CLI·sources.yaml 둘 다 없을 때 사용)
@@ -483,8 +481,8 @@ def _log_upsert_action(
 ) -> None:
     """UpsertResult.action 에 따라 적절한 로그를 남긴다.
 
-    status_transitioned 분기는 현재 수집 범위(접수중만)에서 발생하지 않는 미검증 경로이므로
-    WARNING 레벨로 기록한다.
+    status_transitioned 는 접수예정→접수중→마감 전이가 감지된 정상 경로이며 INFO 로 기록한다.
+    title/deadline_at/agency 도 함께 바뀐 경우에는 new_version 분기(INFO)로 기록된다.
 
     Args:
         result:                 upsert_announcement 의 반환값.
@@ -508,13 +506,9 @@ def _log_upsert_action(
             source_type, source_announcement_id, sorted(result.changed_fields),
         )
     elif action == "status_transitioned":
-        # TODO [IRIS 접수예정·마감 수집 시작 시 실제 검증 필요]:
-        # 현재는 접수중만 수집하므로 이 분기는 실제로 발생하지 않는다.
-        # 이 경고가 실제로 출력된다면 소스가 접수예정/마감 상태를 반환하기 시작한 것이므로
-        # 해당 소스의 scrape_list 구현 및 상태 정규화를 점검해야 한다.
-        logger.warning(
-            "상태 전이 감지 (현재 미검증 경로) — 상세 재수집: "
-            "source={} id={} changed_fields={}",
+        # 동일 공고의 상태(status)만 변경된 경우 — 정상 전이 경로 (in-place UPDATE)
+        logger.info(
+            "상태 전이 — in-place 갱신: source={} id={} changed_fields={}",
             source_type, source_announcement_id, sorted(result.changed_fields),
         )
     else:
