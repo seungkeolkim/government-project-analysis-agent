@@ -229,6 +229,21 @@ python -m app.cli run --max-pages 1  # 스키마 생성 + 데이터 재수집
 python -m app.db.init_db
 ```
 
+### canonical backfill (일회성)
+
+기존 수집 데이터에 canonical_group_id가 채워지지 않은 경우(00013 적용 이전 수집분) 한 번 실행한다.
+이미 채워진 row는 건너뛰므로 **멱등** — 실수로 두 번 실행해도 안전하다.
+
+```bash
+# 1) dry-run 으로 대상 건수 확인 (DB 변경 없음)
+python scripts/backfill_canonical.py --dry-run
+
+# 2) 실제 실행 (200건마다 commit)
+python scripts/backfill_canonical.py --batch-size 200
+```
+
+신규 DB(00013 이후 설치)는 첫 수집 시부터 자동으로 canonical이 채워지므로 이 스크립트를 실행하지 않아도 된다.
+
 ### 이력 데이터 정리 (선택)
 
 `is_current=False` 인 구버전 row가 누적될 경우 아래로 정리할 수 있다:

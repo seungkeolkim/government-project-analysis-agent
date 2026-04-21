@@ -1,7 +1,7 @@
 # Canonical Identity 설계 (00013)
 
 > 최종 작성: 2026-04-21  
-> 상태: 탐사 완료 초안 (00013-1: IRIS 탐사, 00013-2: NTIS 탐사 추가)
+> 상태: **최종본** (00013 전 subtask 완료 — 00013-1: IRIS 탐사, 00013-2: NTIS 탐사, 00013-3~6: 구현 완료)
 
 ---
 
@@ -303,12 +303,21 @@ ALTER TABLE announcements
 
 ---
 
-## 7. 미결 사항 (00013-3 이후 결정)
+## 7. 미결 사항
 
-- `ancmNo` 정규화 후 같은 ancmNo를 가진 IRIS ancmId들을 하나의 canonical group으로 묶을지, 각각 별개 group으로 둘지 (현재 권고: 같은 ancmNo → 같은 group, ancmId별 row는 announcements에 유지)
-- 재공고(재공고 여부=Y) 처리: 동일 ancmNo 재사용 여부 확인 후 결정
-- NTIS 상세 HTML 본문에서 공고번호 파싱 정규식 정교화 (패턴: `[부처명]\s*공고\s*제\s*[\d\-]+\s*호`) — NTIS 수집 구현 task에서 확정
-- NTIS `roRndUid` vs `순번` 중 `source_announcement_id` 채택 결정 (현재 권고: `roRndUid` — URL PK로 더 명확)
+### 00013 에서 확정된 사항
+
+- ✅ 같은 `ancmNo` → 같은 canonical group. `ancmId`별 row는 `announcements`에 유지. (`official:` scheme)
+- ✅ `ancmNo` 정규화: NFKC + 공백 전체 제거 (`app/canonical.py: _normalize_official_key`)
+- ✅ fuzzy fallback: 제목 정규화 50자 + 기관 정규화 + 마감연도 조합 (`fuzzy:` scheme)
+- ✅ NTIS `source_announcement_id` = `roRndUid` (URL PK로 명확)
+
+### NTIS 구현 이후 결정할 사항
+
+- **재공고(재공고 여부=Y) 처리**: 동일 `ancmNo` 재사용 여부 — 실데이터 관찰 필요
+- **NTIS 공고번호 파싱 정규식 정교화**: 상세 HTML 본문에서 추출 (`[부처명]\s*공고\s*제\s*[\d\-]+\s*호`)
+- **IRIS 재등록(ancmId 변경) 실데이터 검증**: `scripts/verify_canonical_iris.py` 시나리오 B는 현재 fixture 대체 — NTIS 구현 이후 실데이터로 최종 점검
+- **ancmNo 공란 케이스**: 현재 샘플에서 0건이나, 마감 대량 페이지에서 추가 확인 권장
 
 ---
 
@@ -323,3 +332,63 @@ ALTER TABLE announcements
 | source_announcement_id | `ancmId` | `roRndUid` |
 | canonical_key 추출 용이성 | ★★★ 높음 — 필드 직접 사용 | ★☆☆ 낮음 — HTML 파싱 필요 |
 | cross-source 연결 | — | 상세에 "IRIS 바로가기" 링크 |
+
+---
+
+## 9. 구현 완료 요약 (00013)
+
+### 구현된 파일
+
+| 파일 | 역할 |
+|------|------|
+| `app/canonical.py` | `compute_canonical_key()` 유틸 — official 우선, fuzzy fallback |
+| `app/db/models.py` | `CanonicalProject` ORM 모델 + `Announcement` canonical 컬럼 3개 |
+| `app/db/migration.py` | 단계 5 (`canonical_projects` CREATE) + 단계 6 (컬럼 3개 ADD) |
+| `app/db/repository.py` | `_apply_canonical()` 헬퍼 + `upsert_announcement()` 4-branch 통합 |
+| `app/scraper/iris/list_scraper.py` | `ancmNo` → `ancm_no` 추출 추가 |
+| `scripts/verify_canonical_iris.py` | IRIS 단독 검증 스크립트 (18/18 PASS) |
+| `scripts/backfill_canonical.py` | 기존 데이터 일회성 backfill 스크립트 |
+
+### 수집 파이프라인 canonical 적용 규칙
+
+| branch | canonical 처리 |
+|--------|--------------|
+| (a) created | 신규 CanonicalProject 생성 or 기존 그룹 매칭 |
+| (b) unchanged | `canonical_group_id=NULL` 인 경우만 기회적 backfill |
+| (c) status_transitioned | `canonical_group_id=NULL` 인 경우만 기회적 backfill |
+| (d) new_version | 구 row의 `canonical_group_id` 승계. 없으면 신규 계산 |
+
+### canonical_key 포맷
+
+```
+official:{NFKC + 공백제거(ancmNo)}
+예) "official:과학기술정보통신부공고제2026-0455호"
+
+fuzzy:{제목정규화50자}:{기관정규화}:{마감연도}
+예) "fuzzy:2026년바이오과제공고:생명공학연구원:2026"
+```
+
+### IRIS 단독 검증 시나리오 (scripts/verify_canonical_iris.py)
+
+| 시나리오 | 검증 내용 | 결과 |
+|----------|-----------|------|
+| A | 같은 `ancmNo` 재수집 (unchanged 분기) | PASS |
+| B | 같은 `ancmNo` 다른 `ancmId` 재등록 (fixture) | PASS |
+| C | `ancmNo` 없는 공고 fuzzy fallback | PASS |
+| D | 내용 변경 new_version — `canonical_group_id` 승계 | PASS |
+
+> 시나리오 B의 실데이터 재등록 검증은 NTIS 구현 이후 수행 예정.
+
+### 기존 데이터 backfill (scripts/backfill_canonical.py)
+
+한 번만 실행하면 된다. 멱등 설계 — 이미 `canonical_group_id`가 채워진 row는 건너뛴다.
+
+```bash
+# 1) dry-run 으로 대상 건수 먼저 확인
+python scripts/backfill_canonical.py --dry-run
+
+# 2) 실제 실행
+python scripts/backfill_canonical.py --batch-size 200
+```
+
+신규 DB는 첫 수집 시부터 canonical이 자동으로 채워지므로 backfill 불필요.
