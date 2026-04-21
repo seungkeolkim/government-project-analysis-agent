@@ -401,3 +401,104 @@ python scripts/backfill_canonical.py --batch-size 200
 ```
 
 신규 DB는 첫 수집 시부터 canonical이 자동으로 채워지므로 backfill 불필요.
+
+---
+
+## 10. Cross-source canonical 매칭 실검증 (00014-8)
+
+> 검증 일시: 2026-04-21  
+> 스크립트: `scripts/verify_canonical_cross_source.py`  
+> 결과: **PASS 15 / FAIL 0**  
+> IRIS 단독 검증(`scripts/verify_canonical_iris.py`): **PASS 18 / FAIL 0** (회귀 없음)
+
+### 10-1. NTIS canonical 수집 파이프라인 보완 (00014-6 known_concern 해소)
+
+subtask 00014-6에서 "NTIS detail 결과의 `ntis_ancm_no`가 현재 DB에 저장되지 않고 버려짐"으로 기록된 사항을 이번 subtask에서 해소했다.
+
+**추가된 코드 경로**
+
+| 파일 | 변경 내용 |
+|------|-----------|
+| `app/db/repository.py` | `recompute_canonical_with_ancm_no(session, src_id, *, source_type, ancm_no) -> bool` 신규 함수 추가. fuzzy scheme 공고를 official scheme 으로 승급. |
+| `app/cli.py` | 상세 수집 성공(`detail_fetch_status="ok"`) 후 `detail_result.get("ntis_ancm_no")` 가 있으면 `recompute_canonical_with_ancm_no` 호출. |
+
+**canonical 승급 흐름**
+
+```
+NTIS 목록 수집
+  → ancm_no=None 주입 → fuzzy canonical 부여
+    → canonical_key = "fuzzy:2026년도한스페인공동연구사업신규과제공모:한국연구재단:2026"
+
+NTIS 상세 수집
+  → ntis_ancm_no = "과학기술정보통신부공고제2026-0455호" (detail_scraper 정규화 산출물)
+  → recompute_canonical_with_ancm_no 호출
+    → canonical_key = "official:과학기술정보통신부공고제2026-0455호"
+    → 기존 IRIS 공고와 동일한 canonical_group 에 매칭됨
+```
+
+### 10-2. 검증 시나리오 결과
+
+#### 시나리오 E — NTIS 목록(fuzzy) + IRIS(official): 아직 별도 그룹 (PASS)
+
+```
+IRIS  canonical_key : official:과학기술정보통신부공고제2026-0455호  (group_id=1)
+NTIS  canonical_key : fuzzy:2026년도한스페인공동연구사업신규과제공모:한국연구재단:2026  (group_id=2)
+```
+
+목록 단계에서는 공고번호를 모르므로 서로 다른 그룹에 배치된다. 이는 의도된 동작이며, 상세 수집 후 시나리오 F로 수렴한다.
+
+#### 시나리오 F — NTIS 상세 후 canonical 승급: 같은 그룹으로 수렴 (PASS)
+
+```
+NTIS fuzzy_key(전)    : fuzzy:2026년도한스페인공동연구사업신규과제공모:한국연구재단:2026
+NTIS official_key(후) : official:과학기술정보통신부공고제2026-0455호
+IRIS canonical_key    : official:과학기술정보통신부공고제2026-0455호
+IRIS group_id=1  NTIS group_id=1  (매칭됨)
+```
+
+실제 수집 파이프라인을 인메모리 DB로 재현한 결과, NTIS 상세 수집 후 `recompute_canonical_with_ancm_no`가 IRIS와 동일한 그룹에 정확히 매칭됨을 확인.
+
+#### 시나리오 G — False-positive 방어: agency 다른 유사 제목 (PASS)
+
+```
+p1(IRIS)  fuzzy_key: fuzzy:2026년도한스페인...:한국연구재단:2026        (group_id=3)
+p2(NTIS)  fuzzy_key: fuzzy:2026년도한스페인...:국가과학기술연구회:2026  (group_id=4)
+```
+
+제목 앞 50자가 동일해도 `agency`가 다르면 fuzzy key가 달라 별도 그룹으로 분리된다. **false-positive 없음** 확인.
+
+#### 시나리오 H — False-negative 방어: `\xa0` + en-dash 표기 변이 (PASS)
+
+탐사 §4-3 실측 케이스: `roRndUid=1262576`, 공고번호 원문 `'과학기술정보통신부 공고 제2026\xa0–\xa00484호'`
+
+```
+IRIS ancmNo 원문   : '과학기술정보통신부 공고 제2026-0484호'
+NTIS ancmNo 원문   : '과학기술정보통신부 공고 제2026\xa0–\xa00484호'
+detail_scraper 정규화 결과: '과학기술정보통신부공고제2026-0484호'
+IRIS canonical_key : official:과학기술정보통신부공고제2026-0484호
+NTIS canonical_key : official:과학기술정보통신부공고제2026-0484호  ← 동일
+```
+
+`detail_scraper._extract_ancm_no`의 NFKC + dash 통일 + 공백 제거 정규화가 표기 변이를 흡수하여 **false-negative 없음** 확인.
+
+### 10-3. fuzzy 임계값 튜닝 검토
+
+현재 fuzzy 키는 **완전 일치(exact match)** 방식이다 (`canonical_key` 문자열 동등 비교).
+
+`difflib.SequenceMatcher` 기반 유사도 매칭은 **이번 검증에서 도입 불필요**하다는 결론:
+
+| 검토 근거 | 판단 |
+|-----------|------|
+| 실측된 cross-source 공고는 모두 동일 `ancmNo` 를 가지므로 official key 로 정확 매칭됨 | fuzzy 유사도 불필요 |
+| fuzzy scheme 공고끼리의 매칭은 제목 앞 50자 + agency + 마감연도 조합으로 충분히 식별 | 임계값 조정 불필요 |
+| SequenceMatcher 기반 유사도 매칭은 false-positive 위험(다른 공고를 같은 과제로 묶는 오류)이 exact match 대비 높음 | 도입 보류 |
+
+> **결론**: 현행 exact-match 방식 유지. official key 부재 시 fuzzy scheme 으로 fallback. SequenceMatcher 기반 유사도 매칭은 실데이터에서 false-negative가 다수 관찰될 경우 재검토.
+
+### 10-4. 미결 사항 갱신
+
+- ✅ `recompute_canonical_with_ancm_no` 구현으로 NTIS fuzzy→official 승급 경로 완성
+- ✅ Cross-source 시나리오 E/F/G/H 모두 PASS. fuzzy 임계값 조정 불필요 확인.
+- □ 실데이터 기반 NTIS 목록 수집 + 상세 canonical 승급 E2E 확인 (NTIS 활성화 후 수행)
+- □ NTIS 개별공고(공고형태=개별공고) fuzzy canonical 품질 점검 (통합공고는 ancmNo 파싱 가능하지만 개별공고는 패턴이 다를 수 있음)
+- □ 재공고(공고유형=재공고) 시 ancmNo 재사용 여부 실데이터 확인

@@ -471,6 +471,71 @@ def upsert_announcement_detail(
     return existing
 
 
+def recompute_canonical_with_ancm_no(
+    session: Session,
+    source_announcement_id: str,
+    *,
+    source_type: str,
+    ancm_no: str,
+) -> bool:
+    """상세 수집 후 공식 공고번호가 확보된 경우 canonical_key 를 official scheme 으로 재계산한다.
+
+    NTIS 목록 단계에서는 공식 공고번호를 알 수 없어 fuzzy canonical 이 먼저 부여된다.
+    상세 페이지 파싱 후 ntis_ancm_no 가 확보되면 이 함수를 호출해 official key 로 승급한다.
+
+    canonical_key_scheme 이 이미 'official' 인 공고는 건드리지 않는다.
+    현재 버전(is_current=True) row 만 대상으로 한다.
+
+    Args:
+        session:                호출자가 제어하는 SQLAlchemy 세션.
+        source_announcement_id: 갱신 대상 공고의 소스 ID.
+        source_type:            공고 소스 유형.
+        ancm_no:                상세 파싱에서 추출한 공식 공고번호.
+
+    Returns:
+        True 이면 canonical 이 재계산됨. False 이면 이미 official 이거나 공고를 찾지 못함.
+    """
+    existing = session.execute(
+        select(Announcement).where(
+            Announcement.source_type == source_type,
+            Announcement.source_announcement_id == source_announcement_id,
+            Announcement.is_current.is_(True),
+        )
+    ).scalar_one_or_none()
+
+    if existing is None:
+        logger.debug(
+            "canonical 재계산 대상 없음(is_current row 미존재): source={} id={}",
+            source_type, source_announcement_id,
+        )
+        return False
+
+    # 이미 official scheme 이면 재계산 불필요
+    if existing.canonical_key_scheme == "official":
+        logger.debug(
+            "canonical 재계산 스킵(이미 official): source={} id={} key={}",
+            source_type, source_announcement_id, existing.canonical_key,
+        )
+        return False
+
+    # 기존 필드로 clean_payload 재구성 (title/agency/deadline_at 은 목록 단계에서 이미 저장됨)
+    clean_payload: dict[str, Any] = {
+        "title": existing.title or "",
+        "agency": existing.agency,
+        "deadline_at": existing.deadline_at,
+        "status": existing.status,
+    }
+
+    prev_key = existing.canonical_key
+    _apply_canonical(session, existing, ancm_no=ancm_no, clean_payload=clean_payload)
+
+    logger.info(
+        "canonical 재계산(fuzzy→official): source={} id={} prev_key={} new_key={} ancm_no={}",
+        source_type, source_announcement_id, prev_key, existing.canonical_key, ancm_no,
+    )
+    return True
+
+
 def list_announcements(
     session: Session,
     status: AnnouncementStatus | str | None = None,
@@ -704,6 +769,7 @@ __all__ = [
     "UpsertResult",
     "upsert_announcement",
     "upsert_announcement_detail",
+    "recompute_canonical_with_ancm_no",
     "get_announcement_by_id",
     "list_announcements",
     "count_announcements",

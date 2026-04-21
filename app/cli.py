@@ -68,6 +68,7 @@ from app.db.init_db import init_db
 from app.db.repository import (
     UpsertResult,
     get_announcement_by_id,
+    recompute_canonical_with_ancm_no,
     upsert_announcement,
     upsert_announcement_detail,
     upsert_attachment,
@@ -434,6 +435,31 @@ async def _run_source_announcements(
                         "상세 수집 완료(ok): source={} id={}",
                         source_type, source_announcement_id,
                     )
+                    # NTIS 전용: 상세 파싱에서 공식 공고번호가 확보된 경우 canonical 재계산.
+                    # 목록 단계에서는 공고번호를 알 수 없어 fuzzy canonical 이 부여되었으므로
+                    # 여기서 official key 로 승급하여 cross-source 매칭 정확도를 높인다.
+                    ntis_ancm_no: Optional[str] = detail_result.get("ntis_ancm_no")
+                    if ntis_ancm_no:
+                        try:
+                            with session_scope() as session:
+                                recomputed = recompute_canonical_with_ancm_no(
+                                    session,
+                                    source_announcement_id,
+                                    source_type=source_type,
+                                    ancm_no=ntis_ancm_no,
+                                )
+                            if recomputed:
+                                logger.info(
+                                    "canonical 재계산 완료(fuzzy→official): "
+                                    "source={} id={} ancm_no={}",
+                                    source_type, source_announcement_id, ntis_ancm_no,
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                "canonical 재계산 실패(스킵, 공고 수집은 유지됨): "
+                                "source={} id={} ({}: {})",
+                                source_type, source_announcement_id, type(exc).__name__, exc,
+                            )
                 else:
                     detail_failure_count += 1
                     logger.warning(
