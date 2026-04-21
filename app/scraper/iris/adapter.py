@@ -36,7 +36,8 @@ class IrisSourceAdapter(BaseSourceAdapter):
         """상세 수집용 httpx.AsyncClient 를 생성하고 연결 풀을 시작한다."""
         from app.scraper.iris.detail_scraper import _build_detail_http_client
 
-        client = _build_detail_http_client(self.settings)
+        # Referer 로 sources.yaml 의 IRIS base_url 을 사용한다.
+        client = _build_detail_http_client(self.settings, self.source_config.base_url)
         # httpx.AsyncClient.__aenter__ 는 self 를 반환하며 연결 풀을 초기화한다.
         self._detail_client = await client.__aenter__()
         logger.debug("IrisSourceAdapter: HTTP 클라이언트 열림")
@@ -67,6 +68,7 @@ class IrisSourceAdapter(BaseSourceAdapter):
 
         raw_rows = await scrape_list(
             settings=self.settings,
+            list_view_url=self.source_config.base_url,
             max_pages=max_pages,
             max_announcements=self.source_config.max_announcements,
             statuses=self.source_config.statuses,
@@ -121,7 +123,11 @@ class IrisSourceAdapter(BaseSourceAdapter):
             return await scrape_detail_with_client(self._detail_client, detail_url)
 
         # context manager 밖에서 호출된 경우 — 임시 클라이언트 사용
-        return await scrape_detail(detail_url, settings=self.settings)
+        return await scrape_detail(
+            detail_url,
+            settings=self.settings,
+            list_view_url=self.source_config.base_url,
+        )
 
 
 __all__ = ["IrisSourceAdapter"]
