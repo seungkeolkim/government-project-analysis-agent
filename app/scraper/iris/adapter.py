@@ -4,19 +4,8 @@
 감싸는 adapter 클래스. HTTP 클라이언트를 생성·관리하며, list/detail 스크래퍼의
 private helper 를 외부에 노출하지 않는다.
 
-TODO [IRIS 접수예정·마감 수집 시작 시]:
-    현재 scrape_list 는 '접수중' 상태의 공고만 반환한다.
-    접수예정·마감 수집을 추가할 때 다음 사항을 함께 처리해야 한다:
-
-    1. list_scraper.scrape_list 에 status_filter 파라미터 추가
-       (예: status_filter="접수예정" / "마감" / None=전체)
-    2. 반환되는 row 의 status 값이 AnnouncementStatus Enum(접수중/접수예정/마감)으로
-       정규화되어야 한다. 현재 IRIS API 가 반환하는 상태값 문자열과 Enum 값을 매핑하는
-       로직을 list_scraper 또는 이 어댑터에서 처리한다.
-    3. 상태 전이(예: 접수예정 → 접수중) 가 발생하면 repository.upsert_announcement 가
-       action="status_transitioned" 을 반환한다. CLI(_log_upsert_action)에서
-       WARNING 으로 기록되며, 실제 검증 및 추가 처리(알림 등)를 이때 구현한다.
-    4. docs/status_transition_todo.md 참고.
+접수예정·접수중·마감 3개 상태를 순차 수집한다. 수집 대상 상태는
+source_config.statuses 에서 읽어오며, sources.yaml 에 고정 설정한다.
 """
 
 from __future__ import annotations
@@ -60,20 +49,28 @@ class IrisSourceAdapter(BaseSourceAdapter):
             logger.debug("IrisSourceAdapter: HTTP 클라이언트 닫힘")
 
     async def scrape_list(self, *, max_pages: int) -> list[dict[str, Any]]:
-        """IRIS AJAX API 로 '접수중' 공고 목록을 수집한다.
+        """IRIS AJAX API 로 접수예정·접수중·마감 공고 목록을 순차 수집한다.
+
+        source_config.statuses 에 지정된 순서대로 각 상태를 수집하며,
+        source_config.max_announcements 상한에 도달하면 조기 종료한다.
 
         list_scraper 가 반환하는 'iris_announcement_id' 키를 DB 범용 키
         'source_announcement_id' 로 정규화하고, 'source_type' 을 추가한다.
 
         Args:
-            max_pages: 순회할 최대 페이지 수.
+            max_pages: 상태별 순회할 최대 페이지 수.
 
         Returns:
             정규화된 공고 메타 dict 리스트.
         """
         from app.scraper.iris.list_scraper import scrape_list
 
-        raw_rows = await scrape_list(settings=self.settings, max_pages=max_pages)
+        raw_rows = await scrape_list(
+            settings=self.settings,
+            max_pages=max_pages,
+            max_announcements=self.source_config.max_announcements,
+            statuses=self.source_config.statuses,
+        )
 
         normalized_rows: list[dict[str, Any]] = []
         for row in raw_rows:

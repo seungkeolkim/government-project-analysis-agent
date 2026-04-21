@@ -5,11 +5,11 @@
 
 ## 현재 상태
 
-- **수집 범위**: IRIS 접수중 공고만 수집한다.
-- **발생 가능 여부**: 현재 수집 범위 내에서는 공고 상태가 바뀌는 케이스가 발생하지 않는다.
-- **구현 상태**: `status_transitioned` 분기 코드는 존재하지만 실제 검증된 적 없음.
+- **수집 범위**: IRIS 접수예정·접수중·마감 3개 상태 전체 수집 (순차 루프, `ancmPrg` 파라미터).
+- **발생 가능 여부**: 3개 상태 수집 범위에서 동일 공고가 다른 상태로 재등장하면 발생한다.
+- **구현 상태**: `status_transitioned` 분기 정상 운영 경로로 전환됨 (in-place UPDATE, INFO 로그).
 
-## 상태 전이 분기 (현재 미검증 경로)
+## 상태 전이 분기
 
 `app/db/repository.upsert_announcement` 의 4-branch 중 (c) 분기:
 
@@ -19,7 +19,7 @@
   → action="status_transitioned", needs_detail_scraping=True
 ```
 
-`app/cli._log_upsert_action` 에서 `action="status_transitioned"` 일 때 **WARNING** 로그를 남긴다.
+`app/cli._log_upsert_action` 에서 `action="status_transitioned"` 일 때 **INFO** 로그를 남긴다.
 
 ## 발동 조건
 
@@ -31,18 +31,18 @@
 | 접수중 → 마감 | 마감 목록을 수집할 때 동일 ID 재등장 |
 | 접수중 → 접수예정 | 거의 없지만 공고 정정 등으로 발생 가능 |
 
-## IRIS 접수예정·마감 수집 시작 시
+## IRIS 접수예정·마감 수집 — 구현 완료 항목
 
-`app/scraper/iris/adapter.py` 상단 TODO 참조.
+[00012]에서 구현 완료:
 
-1. `list_scraper.scrape_list` 에 상태 필터 파라미터 추가 (접수예정 / 마감 / 전체)
-2. IRIS API 응답의 상태 문자열 → `AnnouncementStatus` Enum 매핑 검증
+1. [완료] `list_scraper.scrape_list` 에 상태 필터 파라미터 추가 — `ancmPrg=ancmPre|ancmIng|ancmEnd` 3개 상태 순차 루프
+2. [완료] IRIS API 응답의 상태 문자열 → `AnnouncementStatus` Enum 매핑 검증 — `_map_api_record_to_dict`에서 `status_label` 직접 주입
 3. `status_transitioned` 경로가 실제로 발생하는지 소량 데이터로 먼저 검증
 4. CLI 에서 상태 전이 감지 시 추가 처리(알림, 별도 로그 등) 필요 여부 판단
 
 검증 방법 예시:
 ```bash
-# 소수 페이지만 수집 후 WARNING 로그 확인
+# 소수 페이지만 수집 후 INFO 로그 확인
 python -m app.cli run --max-pages 2 --skip-detail --log-level DEBUG
 ```
 

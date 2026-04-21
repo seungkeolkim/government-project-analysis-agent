@@ -44,6 +44,11 @@ class SourceConfig(BaseModel):
     max_announcements: Optional[int] = Field(default=None, gt=0)
     """소스당 최대 공고 수. None 이면 CLI 인자 또는 코드 default 를 따른다."""
 
+    statuses: list[str] = Field(
+        default_factory=lambda: ["접수예정", "접수중", "마감"]
+    )
+    """수집할 공고 상태 한글 라벨 목록. 어댑터가 순서대로 순회한다."""
+
     extra: dict[str, Any] = Field(default_factory=dict)
     """소스 어댑터 전용 추가 파라미터. 어댑터가 직접 읽는다."""
 
