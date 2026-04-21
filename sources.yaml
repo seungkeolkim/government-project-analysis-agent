@@ -13,10 +13,14 @@ sources:
       - 마감
 
   - id: NTIS
-    enabled: false
+    enabled: true
     # 목록 POST 엔드포인트 (docs/ntis_site_exploration.md §1)
     base_url: https://www.ntis.go.kr/rndgate/eg/un/ra/mng.do
     request_delay_sec: 2.0
+    # 마감 공고가 74,809건에 달하므로 기본값을 보수적으로 설정한다 (탐사 §1).
+    # 필요 시 CLI --max-pages / --max-announcements 로 일시 확장 가능.
+    max_pages: 5
+    max_announcements: 100
     statuses:
       - 접수예정
       - 접수중
