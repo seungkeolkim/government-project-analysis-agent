@@ -53,9 +53,16 @@ uvicorn app.web.main:app --host 0.0.0.0 --port 8000
 docker compose --profile scrape run --rm scraper
 ```
 
+인자를 생략하면 소스당 최대 **10 페이지 · 200 건** 이 수집된다(코드 default).
+`sources.yaml` 에 소스별 `max_pages` / `max_announcements` 를 설정하면 그 값이 우선 적용된다.
+**CLI 인자는 `docker compose run` 뒤에 바로 붙이면 된다** — `python -m app.cli run` 을 직접 입력하지 않아도 된다.
+
+우선순위: **CLI 인자 > sources.yaml 소스별 설정 > 코드 default (10페이지 / 200건)**
+
 ### 기본 실행 (전체 소스, 로컬)
 
 ```bash
+# 인자 생략 시: 소스당 최대 10페이지 · 200건
 python -m app.cli run
 ```
 
@@ -63,8 +70,8 @@ python -m app.cli run
 
 | 옵션 | 설명 | 예시 |
 |---|---|---|
-| `--max-pages N` | 소스당 최대 페이지 수 (0=안전상한 50) | `--max-pages 3` |
-| `--max-announcements N` | 소스당 최대 공고 수 (0=무제한) | `--max-announcements 20` |
+| `--max-pages N` | 소스당 최대 페이지 수 (1 이상). 미지정 시 sources.yaml → 코드 default(10) | `--max-pages 3` |
+| `--max-announcements N` | 소스당 최대 공고 수 (1 이상). 미지정 시 sources.yaml → 코드 default(200) | `--max-announcements 20` |
 | `--skip-detail` | 목록만 수집, 상세 페이지 생략 | `--skip-detail` |
 | `--skip-attachments` | 목록·상세 수집은 정상 실행, 첨부파일 다운로드만 생략 | `--skip-attachments` |
 | `--dry-run` | DB 쓰기 없이 수집 검증만 | `--dry-run` |
@@ -73,15 +80,39 @@ python -m app.cli run
 
 ### 활용 예시
 
+**Docker (인자를 run 뒤에 직접 붙임):**
+
 ```bash
+# 기본값으로 전체 수집 (소스당 최대 10페이지 · 200건)
+docker compose --profile scrape run --rm scraper
+
+# 빠른 검증 — 1페이지만 드라이런
+docker compose --profile scrape run --rm scraper --max-pages 1 --dry-run
+
+# 페이지·공고 수 직접 지정
+docker compose --profile scrape run --rm scraper --max-pages 5 --max-announcements 100
+
+# IRIS만 소량 수집 (상세 생략)
+docker compose --profile scrape run --rm scraper --source IRIS --max-pages 2 --skip-detail
+
+# 첨부파일 다운로드 없이 목록·상세만 수집
+docker compose --profile scrape run --rm scraper --skip-attachments
+
+# 디버그 로그로 전체 수집
+docker compose --profile scrape run --rm scraper --log-level DEBUG
+```
+
+**로컬 (python -m app.cli run):**
+
+```bash
+# 기본값으로 전체 수집 (소스당 최대 10페이지 · 200건)
+python -m app.cli run
+
 # 빠른 검증 — 1페이지만 드라이런
 python -m app.cli run --max-pages 1 --dry-run
 
-# IRIS만 소량 수집 (상세 생략)
-python -m app.cli run --source IRIS --max-pages 2 --skip-detail
-
-# 전체 수집 (목록·상세·첨부파일 다운로드 포함, 기본 동작)
-python -m app.cli run
+# 페이지·공고 수 직접 지정
+python -m app.cli run --max-pages 5 --max-announcements 100
 
 # 첨부파일 다운로드 없이 목록·상세만 수집
 python -m app.cli run --skip-attachments
@@ -131,7 +162,7 @@ ORDER BY id;
 ### 정상 수집 시 주요 로그
 
 ```
-INFO  목록 수집 시작: source=IRIS max_pages=50
+INFO  목록 수집 시작: source=IRIS max_pages=10
 INFO  목록 수집 완료: source=IRIS 42건
 INFO  [1/42] 공고 처리: source=IRIS id=12345
 INFO  신규 공고 등록: source=IRIS id=12345
@@ -213,7 +244,7 @@ sqlite3 ./data/db/app.sqlite3 "DELETE FROM announcements WHERE is_current = 0;"
 
 ### 공고 목록이 비어 있다
 
-1. `python -m app.cli run --max-pages 1 --log-level DEBUG` 로 수집 시도
+1. `python -m app.cli run --max-pages 1 --log-level DEBUG` 로 수집 시도 (Docker: `docker compose --profile scrape run --rm scraper --max-pages 1 --log-level DEBUG`)
 2. `목록 수집 완료: source=IRIS 0건` 이면 IRIS 사이트 응답 이상 → 브라우저에서 직접 확인
 3. DB에 데이터는 있는데 웹 UI에 안 보이면 → `is_current=1` 조건 확인
 
@@ -307,5 +338,6 @@ WHERE announcement_id = {공고_id};
 ### 업데이트 후 확인
 
 - [ ] `python -m app.db.init_db` 로 마이그레이션 적용 확인
-- [ ] `python -m app.cli run --max-pages 1 --dry-run` 으로 기본 동작 확인
+- [ ] `docker compose --profile scrape run --rm scraper --max-pages 1 --dry-run` 으로 기본 동작 확인
+  - 로컬: `python -m app.cli run --max-pages 1 --dry-run`
 - [ ] 웹 UI 로그인 페이지 정상 렌더링 확인
