@@ -9,11 +9,12 @@
 
 1. [초기 설치 요약](#초기-설치-요약)
 2. [스크래퍼 실행 방법](#스크래퍼-실행-방법)
-3. [증분 수집 동작 설명](#증분-수집-동작-설명)
-4. [로그 해석](#로그-해석)
-5. [DB 관리](#db-관리)
-6. [트러블슈팅](#트러블슈팅)
-7. [정기 운영 체크리스트](#정기-운영-체크리스트)
+3. [NTIS 수집 운영 특이사항](#ntis-수집-운영-특이사항)
+4. [증분 수집 동작 설명](#증분-수집-동작-설명)
+5. [로그 해석](#로그-해석)
+6. [DB 관리](#db-관리)
+7. [트러블슈팅](#트러블슈팅)
+8. [정기 운영 체크리스트](#정기-운영-체크리스트)
 
 ---
 
@@ -119,6 +120,38 @@ python -m app.cli run --skip-attachments
 
 # 디버그 로그로 전체 수집
 python -m app.cli run --log-level DEBUG
+```
+
+---
+
+## NTIS 수집 운영 특이사항
+
+### 수집 범위 설정
+
+NTIS 마감 공고가 74,000건+ 에 달하므로 `sources.yaml` 기본값을 보수적으로 설정했다 (5페이지 · 100건).
+전체 수집이 필요하다면 CLI 인자로 직접 확장한다:
+
+```bash
+# 마감 포함 전체 접수예정·접수중·마감 대량 수집 (주의: 시간이 오래 걸림)
+python -m app.cli run --source NTIS --max-pages 50 --max-announcements 5000
+```
+
+NTIS `request_delay_sec` 기본값은 2.0초다. 짧게 줄이면 차단 위험이 있다.
+
+### 첨부파일 다운로드
+
+NTIS 첨부파일은 **httpx POST** 직접 다운로드를 사용한다 (IRIS의 Playwright 경로와 다름).
+Playwright 브라우저가 미설치된 환경에서도 NTIS 첨부파일은 정상 다운로드된다.
+
+### canonical 매칭 (cross-source 중복 공고)
+
+NTIS 목록 수집 시 공식 공고번호(ancmNo)를 알 수 없어 **fuzzy canonical key** 가 먼저 부여된다.
+상세 수집 완료 후 공고번호가 확보되면 자동으로 **official canonical key** 로 승급된다.
+IRIS와 동일 공고인 경우 같은 `canonical_group_id` 로 묶인다.
+
+canonical 승급이 이뤄진 경우 로그에 아래 메시지가 출력된다:
+```
+INFO  canonical 재계산 완료(fuzzy→official): source=NTIS id=… ancm_no=…
 ```
 
 ---

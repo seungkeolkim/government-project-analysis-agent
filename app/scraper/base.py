@@ -15,10 +15,13 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.config import Settings
 from app.sources.config_schema import SourceConfig
+
+if TYPE_CHECKING:
+    from app.scraper.attachment_downloader import AttachmentLinkInfo
 
 
 class BaseSourceAdapter(ABC):
@@ -84,6 +87,34 @@ class BaseSourceAdapter(ABC):
         Returns:
             공고 메타 dict 리스트. 수집 결과가 없으면 빈 리스트.
         """
+
+    def build_download_referer(self, source_announcement_id: str) -> str:
+        """첨부파일 다운로드 요청에 사용할 Referer URL 을 반환한다.
+
+        기본 구현은 빈 문자열을 반환한다. 각 소스 어댑터가 오버라이드하여
+        소스별 상세 페이지 URL 패턴을 제공한다.
+
+        Args:
+            source_announcement_id: 공고의 소스 고유 ID (URL 쿼리 파라미터로 사용).
+
+        Returns:
+            Referer 헤더값으로 쓸 URL 문자열. 없으면 빈 문자열.
+        """
+        return ""
+
+    def extract_attachment_links(self, detail_html: str) -> list["AttachmentLinkInfo"]:
+        """detail_html 에서 첨부파일 링크 정보를 추출한다.
+
+        기본 구현은 빈 리스트를 반환한다. 각 소스 어댑터가 오버라이드하여
+        소스별 파싱 로직을 제공한다.
+
+        Args:
+            detail_html: 공고 상세 페이지 HTML (detail_scraper 가 저장한 섹션).
+
+        Returns:
+            AttachmentLinkInfo 목록.
+        """
+        return []
 
     @abstractmethod
     async def scrape_detail(self, detail_url: str) -> dict[str, Any]:

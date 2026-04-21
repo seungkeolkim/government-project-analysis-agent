@@ -1,7 +1,7 @@
-"""IRIS 첨부파일 다운로더 모듈.
+"""공고 첨부파일 다운로더 모듈.
 
-Playwright headless 브라우저를 주 다운로드 경로로, httpx 직접 GET을 폴백으로 사용하여
-공고의 첨부파일을 다운로드하고 로컬 파일시스템에 저장한다.
+Playwright headless 브라우저를 주 다운로드 경로로(IRIS), httpx 직접 요청을 폴백/전용
+경로로(NTIS) 사용하여 공고의 첨부파일을 다운로드하고 로컬 파일시스템에 저장한다.
 
 ## 다운로드 플로우 (IRIS)
 1. `detail_html`에서 `div.add_file_list a.file_down` 요소를 BeautifulSoup으로 파싱하여
@@ -10,6 +10,12 @@ Playwright headless 브라우저를 주 다운로드 경로로, httpx 직접 GET
    브라우저 다운로드 API로 파일을 수신한다.
 3. Playwright가 실패(브라우저 기동 불가, 요소 없음, 타임아웃 등)하면
    httpx로 `fileDownload.do?atchDocId=...&atchFileId=...`를 GET하여 폴백한다.
+
+## 다운로드 플로우 (NTIS)
+1. `detail_html`에서 `fn_fileDownload(wfUid, roTextUid)` onclick 패턴을 파싱한다.
+2. httpx POST `/rndgate/eg/cmm/file/download.do` 로 직접 다운로드한다.
+   Playwright 없이 httpx만 사용한다.
+
 4. 성공한 파일은 sha256을 계산하여 반환한다.
    이미 동일 경로에 파일이 존재하면 재다운로드 없이 sha256만 계산해 반환한다.
 
@@ -30,7 +36,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 from urllib.parse import quote
 
 import httpx
@@ -46,6 +52,9 @@ from app.scraper.iris.list_scraper import (
     HTTP_READ_TIMEOUT_SEC,
     IRIS_BASE_DOMAIN,
 )
+
+if TYPE_CHECKING:
+    from app.scraper.base import BaseSourceAdapter
 
 # ──────────────────────────────────────────────────────────────
 # IRIS 첨부파일 관련 상수
@@ -89,13 +98,19 @@ _DOWNLOAD_READ_TIMEOUT_MULTIPLIER: int = 4
 
 @dataclass
 class AttachmentLinkInfo:
-    """detail_html에서 파싱한 첨부파일 링크 한 건."""
+    """detail_html에서 파싱한 첨부파일 링크 한 건.
+
+    download_method="POST" 이면 post_data 를 form body 로 전송한다.
+    download_method="GET" 이면 download_url 로 단순 GET 한다.
+    """
 
     atc_doc_id: str
     atc_file_id: str
     original_filename: str
     file_size_bytes: Optional[int]
     download_url: str
+    download_method: Literal["GET", "POST"] = "GET"
+    post_data: Optional[dict[str, str]] = None
 
 
 @dataclass
@@ -144,21 +159,19 @@ def _compute_sha256(file_path: Path) -> str:
 
 def _build_download_http_client(
     settings: Settings,
-    source_announcement_id: str,
+    referer_url: str,
 ) -> httpx.AsyncClient:
     """첨부파일 다운로드용 httpx.AsyncClient를 생성한다.
 
-    Referer를 IRIS 상세 페이지 URL로 설정하여 브라우저에서 클릭한 것처럼 보이게 한다.
+    Args:
+        settings:    전역 설정 (user_agent 포함).
+        referer_url: 다운로드 요청에 붙일 Referer 헤더값. 어댑터가 소스별로 제공한다.
     """
     timeout = httpx.Timeout(
         connect=HTTP_CONNECT_TIMEOUT_SEC,
         read=HTTP_READ_TIMEOUT_SEC * _DOWNLOAD_READ_TIMEOUT_MULTIPLIER,
         write=10.0,
         pool=10.0,
-    )
-    referer_url = (
-        f"{IRIS_BASE_DOMAIN}/contents/retrieveBsnsAncmView.do"
-        f"?ancmId={source_announcement_id}"
     )
     headers = {
         "User-Agent": settings.user_agent or DEFAULT_USER_AGENT,
@@ -167,6 +180,14 @@ def _build_download_http_client(
         "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
     }
     return httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=True)
+
+
+# adapter=None 레거시 경로용 기본 IRIS Referer 생성 헬퍼
+def _iris_referer_url(source_announcement_id: str) -> str:
+    return (
+        f"{IRIS_BASE_DOMAIN}/contents/retrieveBsnsAncmView.do"
+        f"?ancmId={source_announcement_id}"
+    )
 
 
 def _build_success_entry(
@@ -204,9 +225,10 @@ async def _download_single_via_httpx(
     link_info: AttachmentLinkInfo,
     save_path: Path,
 ) -> DownloadResult:
-    """httpx 스트리밍 GET으로 단일 첨부파일을 다운로드하여 save_path에 저장한다.
+    """httpx 스트리밍 GET 또는 POST 로 단일 첨부파일을 다운로드하여 save_path에 저장한다.
 
     응답 Content-Type이 text/html이면 다운로드 실패(세션 만료/리다이렉트)로 간주한다.
+    link_info.download_method 가 "POST" 이면 link_info.post_data 를 form body 로 전송한다.
 
     Args:
         client:    공유 httpx.AsyncClient.
@@ -220,12 +242,22 @@ async def _download_single_via_httpx(
 
     try:
         logger.info(
-            "httpx 다운로드 시도: file={} url={}",
+            "httpx 다운로드 시도: file={} method={} url={}",
             link_info.original_filename,
+            link_info.download_method,
             link_info.download_url,
         )
 
-        async with client.stream("GET", link_info.download_url) as response:
+        if link_info.download_method == "POST":
+            stream_ctx = client.stream(
+                "POST",
+                link_info.download_url,
+                data=link_info.post_data or {},
+            )
+        else:
+            stream_ctx = client.stream("GET", link_info.download_url)
+
+        async with stream_ctx as response:
             response.raise_for_status()
 
             # HTML 응답은 세션 만료/리다이렉트로 판단하여 즉시 실패 처리
@@ -545,16 +577,19 @@ async def scrape_attachments_for_announcement(
     announcement: Announcement,
     *,
     settings: Optional[Settings] = None,
+    adapter: Optional["BaseSourceAdapter"] = None,
 ) -> AttachmentScrapeResult:
     """공고 한 건의 첨부파일을 모두 다운로드하고 수집 결과를 반환한다.
 
     단계:
-        1. detail_html에서 첨부 링크 목록을 추출한다.
+        1. adapter.extract_attachment_links(detail_html) 로 링크 목록을 추출한다.
+           adapter 가 없으면 module-level extract_attachment_links(IRIS 전용)으로 폴백한다.
         2. 이미 저장 경로에 파일이 존재하면 재다운로드 없이 sha256만 계산하여 반환한다.
-        3. 없는 파일은 Playwright headless(주 경로)로 다운로드한다.
-           detail_url이 없으면 Playwright를 건너뛰고 즉시 httpx 폴백으로 진행한다.
+        3. download_method="GET" 인 링크는 Playwright headless(주 경로)로 다운로드한다.
+           detail_url이 없으면 Playwright를 건너뛰고 즉시 httpx GET 폴백으로 진행한다.
         4. Playwright 실패 건은 httpx 직접 GET으로 폴백한다.
-        5. 성공/실패 결과를 AttachmentScrapeResult로 반환한다.
+        5. download_method="POST" 인 링크는 Playwright 없이 httpx POST 로 직접 다운로드한다.
+        6. 성공/실패 결과를 AttachmentScrapeResult로 반환한다.
 
     DB 작업(upsert_attachment, attachment_errors 갱신)은 호출자가 담당한다.
 
@@ -563,6 +598,7 @@ async def scrape_attachments_for_announcement(
                       detail_html이 채워져 있어야 첨부를 수집할 수 있다.
                       detail_url이 없으면 Playwright를 건너뛰고 httpx만 시도한다.
         settings:     주입할 Settings. 없으면 get_settings()를 사용한다.
+        adapter:      소스 어댑터. 있으면 adapter.extract_attachment_links() 로 링크 추출.
 
     Returns:
         AttachmentScrapeResult (announcement_id, success_entries, error_entries).
@@ -583,8 +619,14 @@ async def scrape_attachments_for_announcement(
         )
         return result
 
-    # 1. 링크 추출
-    attachment_links = extract_attachment_links(announcement.detail_html)
+    # 1. 링크 추출 — adapter.extract_attachment_links 위임 (소스별 파싱 로직은 adapter 책임)
+    if adapter is None:
+        logger.warning(
+            "adapter 없음 — 첨부파일 링크 추출 불가: announcement_id={}",
+            announcement.id,
+        )
+        return result
+    attachment_links = adapter.extract_attachment_links(announcement.detail_html)
     if not attachment_links:
         logger.debug("첨부파일 없음 (링크 0건): announcement_id={}", announcement.id)
         return result
@@ -636,63 +678,107 @@ async def scrape_attachments_for_announcement(
         )
         return result
 
-    # 4. Playwright 주 경로 시도
-    #    detail_url 없으면 Playwright 불가 → 즉시 httpx 폴백 대상으로 분류
-    playwright_results: list[DownloadResult] = []
-    if announcement.detail_url:
-        playwright_results = await _download_all_via_playwright(
-            detail_url=announcement.detail_url,
-            attachment_links=pending_links,
-            save_dir=save_dir,
-            settings=effective_settings,
-        )
-    else:
-        logger.warning(
-            "detail_url 없음 → Playwright 건너뛰고 httpx 폴백으로 진행: announcement_id={}",
-            announcement.id,
-        )
-        # 모든 파일을 httpx 폴백 대상으로 표시
-        playwright_results = [
-            DownloadResult(
-                original_filename=link_info.original_filename,
-                stored_path=None,
-                file_size=None,
-                sha256=None,
-                download_url=link_info.download_url,
-                downloaded_at=datetime.now(tz=timezone.utc),
-                success=False,
-                method=None,
-                error_message="detail_url 없음 — Playwright 불가",
-            )
-            for link_info in pending_links
-        ]
+    # 4. 다운로드 방식에 따라 분기
+    #    - download_method="GET"  → Playwright 주 경로(IRIS), httpx GET 폴백
+    #    - download_method="POST" → httpx POST 직접(NTIS), Playwright 없음
 
-    # 5. Playwright 실패 건 → httpx 폴백
-    fallback_indices: list[int] = [
-        i for i, pw_res in enumerate(playwright_results) if not pw_res.success
-    ]
+    # pending_links 와 1:1 대응하는 최종 결과 배열 (초기 None)
+    final_results: list[Optional[DownloadResult]] = [None] * len(pending_links)
 
-    if fallback_indices:
+    # GET 링크 인덱스 / POST 링크 인덱스 분리
+    get_indices = [i for i, lk in enumerate(pending_links) if lk.download_method != "POST"]
+    post_indices = [i for i, lk in enumerate(pending_links) if lk.download_method == "POST"]
+
+    # 소스별 Referer: adapter 있으면 물어보고, 없으면 IRIS 기본값으로 폴백
+    download_referer = (
+        adapter.build_download_referer(announcement.source_announcement_id)
+        if adapter is not None
+        else _iris_referer_url(announcement.source_announcement_id)
+    )
+    logger.debug(
+        "첨부파일 다운로드 Referer: announcement_id={} referer={}",
+        announcement.id,
+        download_referer,
+    )
+
+    # 4a. POST 링크 → httpx POST 직접 다운로드
+    if post_indices:
         async with _build_download_http_client(
             effective_settings,
-            announcement.source_announcement_id,
-        ) as httpx_client:
-            for fallback_idx in fallback_indices:
-                link_info = pending_links[fallback_idx]
+            download_referer,
+        ) as httpx_post_client:
+            for post_idx in post_indices:
+                link_info = pending_links[post_idx]
                 save_path = save_dir / sanitize_filename(link_info.original_filename)
-
-                httpx_result = await _download_single_via_httpx(
-                    httpx_client, link_info, save_path
+                final_results[post_idx] = await _download_single_via_httpx(
+                    httpx_post_client, link_info, save_path
                 )
-                # Playwright 실패 결과를 httpx 결과로 교체
-                playwright_results[fallback_idx] = httpx_result
-
-                # 마지막 폴백 파일이 아니면 지연 적용
-                if fallback_idx != fallback_indices[-1]:
+                if post_idx != post_indices[-1]:
                     await asyncio.sleep(random.uniform(*_FILE_DOWNLOAD_JITTER_SEC))
 
-    # 6. 최종 결과 집계 (pending_links 와 playwright_results 는 길이가 동일)
-    for link_info, final_result in zip(pending_links, playwright_results):
+    # 4b. GET 링크 → Playwright 주 경로 시도
+    if get_indices:
+        get_links = [pending_links[i] for i in get_indices]
+
+        playwright_results: list[DownloadResult]
+        if announcement.detail_url:
+            playwright_results = await _download_all_via_playwright(
+                detail_url=announcement.detail_url,
+                attachment_links=get_links,
+                save_dir=save_dir,
+                settings=effective_settings,
+            )
+        else:
+            logger.warning(
+                "detail_url 없음 → Playwright 건너뛰고 httpx 폴백으로 진행: announcement_id={}",
+                announcement.id,
+            )
+            playwright_results = [
+                DownloadResult(
+                    original_filename=lk.original_filename,
+                    stored_path=None,
+                    file_size=None,
+                    sha256=None,
+                    download_url=lk.download_url,
+                    downloaded_at=datetime.now(tz=timezone.utc),
+                    success=False,
+                    method=None,
+                    error_message="detail_url 없음 — Playwright 불가",
+                )
+                for lk in get_links
+            ]
+
+        # 5. Playwright 실패 건 → httpx GET 폴백
+        fallback_sub_indices = [
+            sub_i for sub_i, pw_res in enumerate(playwright_results) if not pw_res.success
+        ]
+        if fallback_sub_indices:
+            async with _build_download_http_client(
+                effective_settings,
+                download_referer,
+            ) as httpx_client:
+                for sub_i in fallback_sub_indices:
+                    link_info = get_links[sub_i]
+                    save_path = save_dir / sanitize_filename(link_info.original_filename)
+                    playwright_results[sub_i] = await _download_single_via_httpx(
+                        httpx_client, link_info, save_path
+                    )
+                    if sub_i != fallback_sub_indices[-1]:
+                        await asyncio.sleep(random.uniform(*_FILE_DOWNLOAD_JITTER_SEC))
+
+        for sub_i, orig_idx in enumerate(get_indices):
+            final_results[orig_idx] = playwright_results[sub_i]
+
+    # 6. 최종 결과 집계 (pending_links 와 final_results 는 길이가 동일)
+    for link_info, final_result in zip(pending_links, final_results):
+        if final_result is None:
+            result.error_entries.append({
+                "original_filename": link_info.original_filename,
+                "atc_file_id": link_info.atc_file_id,
+                "error": "처리되지 않음 (내부 오류)",
+                "attempted_at": datetime.now(tz=timezone.utc).isoformat(),
+            })
+            continue
         if final_result.success:
             result.success_entries.append(
                 _build_success_entry(

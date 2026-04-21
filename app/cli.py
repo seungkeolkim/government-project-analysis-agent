@@ -68,6 +68,7 @@ from app.db.init_db import init_db
 from app.db.repository import (
     UpsertResult,
     get_announcement_by_id,
+    recompute_canonical_with_ancm_no,
     upsert_announcement,
     upsert_announcement_detail,
     upsert_attachment,
@@ -130,6 +131,10 @@ def _build_announcement_payload(row_metadata: dict[str, Any]) -> dict[str, Any]:
     """어댑터가 반환한 row 메타를 repository.upsert_announcement payload 로 변환한다.
 
     어댑터는 source_announcement_id / source_type 키를 이미 정규화하여 반환한다.
+
+    ancm_no: IRIS 는 목록 단계에서 공식 공고번호(ancmNo)를 row 에 담아 반환한다.
+             NTIS 는 목록 단계에서 알 수 없으므로 None 이다(상세 수집 후 subtask 8 에서 재계산).
+             두 경우 모두 이 함수가 소스 무관하게 패스스루하여 repository 로 전달한다.
     """
     return {
         "source_announcement_id": row_metadata["source_announcement_id"],
@@ -140,6 +145,9 @@ def _build_announcement_payload(row_metadata: dict[str, Any]) -> dict[str, Any]:
         "received_at": _parse_datetime_text(row_metadata.get("received_at_text")),
         "deadline_at": _parse_datetime_text(row_metadata.get("deadline_at_text")),
         "detail_url": row_metadata.get("detail_url"),
+        # repository._apply_canonical 이 canonical_key 계산에 사용하는 공식 공고번호.
+        # 소스 무관하게 row_metadata 에서 꺼내 패스스루한다.
+        "ancm_no": row_metadata.get("ancm_no"),
         "raw_metadata": {
             "list_row": {
                 key: value
@@ -161,6 +169,7 @@ async def _scrape_and_store_attachments(
     source_type: str,
     source_announcement_id: str,
     settings: Settings,
+    adapter: Optional[BaseSourceAdapter] = None,
 ) -> tuple[int, int, int]:
     """공고 한 건의 첨부파일을 수집하여 DB 에 저장하고 (성공, 실패, 스킵) 카운트를 반환한다.
 
@@ -200,6 +209,7 @@ async def _scrape_and_store_attachments(
     att_result = await scrape_attachments_for_announcement(
         announcement_for_scraping,
         settings=settings,
+        adapter=adapter,
     )
 
     success_count = 0
@@ -425,6 +435,31 @@ async def _run_source_announcements(
                         "상세 수집 완료(ok): source={} id={}",
                         source_type, source_announcement_id,
                     )
+                    # NTIS 전용: 상세 파싱에서 공식 공고번호가 확보된 경우 canonical 재계산.
+                    # 목록 단계에서는 공고번호를 알 수 없어 fuzzy canonical 이 부여되었으므로
+                    # 여기서 official key 로 승급하여 cross-source 매칭 정확도를 높인다.
+                    ntis_ancm_no: Optional[str] = detail_result.get("ntis_ancm_no")
+                    if ntis_ancm_no:
+                        try:
+                            with session_scope() as session:
+                                recomputed = recompute_canonical_with_ancm_no(
+                                    session,
+                                    source_announcement_id,
+                                    source_type=source_type,
+                                    ancm_no=ntis_ancm_no,
+                                )
+                            if recomputed:
+                                logger.info(
+                                    "canonical 재계산 완료(fuzzy→official): "
+                                    "source={} id={} ancm_no={}",
+                                    source_type, source_announcement_id, ntis_ancm_no,
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                "canonical 재계산 실패(스킵, 공고 수집은 유지됨): "
+                                "source={} id={} ({}: {})",
+                                source_type, source_announcement_id, type(exc).__name__, exc,
+                            )
                 else:
                     detail_failure_count += 1
                     logger.warning(
@@ -447,6 +482,7 @@ async def _run_source_announcements(
                     source_type=source_type,
                     source_announcement_id=source_announcement_id,
                     settings=settings,
+                    adapter=adapter,
                 )
                 attachment_success_count += att_success
                 attachment_failure_count += att_failure
