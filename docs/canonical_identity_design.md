@@ -275,6 +275,34 @@ ALTER TABLE announcements
 
 ---
 
+### 최종 선택 — 실제 구현 컬럼명 (00013-4 확정)
+
+**`canonical_projects` 테이블** (`app/db/models.py: CanonicalProject`)
+
+| 컬럼 | 타입 | 제약 | 설명 |
+|------|------|------|------|
+| `id` | INTEGER | PK AUTOINCREMENT | 내부 PK |
+| `canonical_key` | VARCHAR(256) | NOT NULL UNIQUE | 정규화된 canonical key |
+| `key_scheme` | VARCHAR(16) | NOT NULL | `'official'` 또는 `'fuzzy'` |
+| `representative_title` | TEXT | NULL 허용 | 최초 수집 시 저장된 대표 공고명 |
+| `representative_agency` | VARCHAR(255) | NULL 허용 | 최초 수집된 주관기관명 |
+| `created_at` | DATETIME | NOT NULL | 그룹 최초 생성 시각(UTC) |
+| `updated_at` | DATETIME | NOT NULL | 최종 갱신 시각(UTC) |
+
+**`announcements` 테이블 추가 컬럼** (`app/db/models.py: Announcement`)
+
+| 컬럼 | 타입 | 제약 | 설명 |
+|------|------|------|------|
+| `canonical_group_id` | INTEGER | NULL 허용, FK → `canonical_projects.id` ON DELETE SET NULL | 소속 그룹 PK |
+| `canonical_key` | VARCHAR(256) | NULL 허용 | canonical_key 비정규화 복사본 (JOIN-free 조회용) |
+| `canonical_key_scheme` | VARCHAR(16) | NULL 허용 | `'official'` 또는 `'fuzzy'` |
+
+- `canonical_group_id` NULL → 아직 canonical 매칭 미완료 (기존 데이터 backfill 전)
+- `is_current=False` 이력 row 도 `canonical_group_id` 보유. `new_version` 분기 시 승계 로직은 00013-5에서 구현.
+- migration 은 `app/db/migration.py` 단계 5·6으로 멱등 적용 (기존 DB 자동 업그레이드).
+
+---
+
 ## 7. 미결 사항 (00013-3 이후 결정)
 
 - `ancmNo` 정규화 후 같은 ancmNo를 가진 IRIS ancmId들을 하나의 canonical group으로 묶을지, 각각 별개 group으로 둘지 (현재 권고: 같은 ancmNo → 같은 group, ancmId별 row는 announcements에 유지)
