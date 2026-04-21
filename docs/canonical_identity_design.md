@@ -1,7 +1,7 @@
 # Canonical Identity 설계 (00013)
 
 > 최종 작성: 2026-04-21  
-> 상태: 초안 (00013-1 산출물 — NTIS 섹션은 00013-2 에서 추가)
+> 상태: 탐사 완료 초안 (00013-1: IRIS 탐사, 00013-2: NTIS 탐사 추가)
 
 ---
 
@@ -64,37 +64,132 @@ pbofrTpSeNmLst, rcveSttSeNmLst, pbofrTpSeLst, rcveStt
 
 > **IRIS의 외부 공식 식별자는 `ancmNo` (공고번호)이다.**  
 > 단, 1:1 고유 키가 아니라 "공고 묶음" 단위이므로,  
-> canonical_key = `IRIS:{ancmNo_normalized}` 형태로 사용하면 *그룹* 단위 중복 처리가 가능하다.  
+> canonical_key = `official:{ancmNo_normalized}` 형태로 사용하면 *그룹* 단위 중복 처리가 가능하다 (cross-source prefix 정책은 §4-1 참조).  
 > `ancmId` 수준의 1:1 매칭에는 기존 `source_announcement_id`를 그대로 사용한다.
 
 ---
 
-## 3. canonical_key 설계 방향
+## 3. NTIS 공식 식별자 탐사 결과
 
-### 3-1. 공식 키 (official scheme)
+탐사 일시: 2026-04-21  
+탐사 방법: NTIS 국가R&D통합공고 목록 HTML 파싱 + 상세 페이지(`/rndgate/eg/un/ra/view.do?roRndUid=...`) 텍스트 추출
 
-`ancmNo`가 있으면 정규화 후 source prefix를 붙여 canonical_key로 사용한다.
+### 3-1. NTIS 목록·상세 구조
+
+**목록 페이지**: `https://www.ntis.go.kr/rndgate/eg/un/ra/mng.do`  
+응답 방식: **HTML 렌더링** (IRIS와 달리 JSON API 없음)  
+목록 표시 필드:
+
+| 필드 | 예시 | 비고 |
+|------|------|------|
+| 순번 | `76599` | 목록 표시용 순번. sequential. URL 파라미터 아님 |
+| 현황 | `접수중` | 접수예정/접수중/마감 |
+| 공고명 | `2026년도 한-스페인 공동연구사업 신규과제 공모` | 제목 |
+| 부처명 | `과학기술정보통신부` | 주관부처 |
+| 접수일 | `2026.04.17` | |
+| 마감일 | `2026.05.19` | |
+| checkbox `value` | `1262378` | **= roRndUid** (상세 페이지 URL 파라미터) |
+
+**상세 페이지**: `/rndgate/eg/un/ra/view.do?roRndUid={roRndUid}`
+
+상세 페이지에 표시되는 구조화 필드:
+
+| 라벨 | 예시 | 비고 |
+|------|------|------|
+| 공고형태 | `통합공고` | 통합공고 vs 개별공고 |
+| 부처명 | `과학기술정보통신부` | |
+| 공고기관명 | `한국연구재단` | |
+| 공고일 | `2026.04.17` | |
+| 접수일 | `2026.04.17` | |
+| 마감일 | `2026.05.19` | |
+| 공고유형 | `본공고` | 본공고/재공고 |
+| 공고금액 | `15 억원` | |
+| 사업명 | `국가간협력기반조성` | |
+
+**공식 공고번호 위치**: 구조화 필드 없음. 상세 페이지 공고 본문 텍스트에 포함.  
+예) `'과학기술정보통신부 공고 제 2026-0455 호'` (공백·줄바꿈 포함)
+
+### 3-2. NTIS 공식 식별자 후보 분석
+
+| 필드 | 예시 | 판정 |
+|------|------|------|
+| `roRndUid` | `1262378` | NTIS 내부 primary key. `source_announcement_id`로 사용 예정 |
+| `순번` | `76599` | 누적 sequential ID. source_announcement_id 후보이나 roRndUid가 더 명확한 PK |
+| 공식 공고번호 | `'과학기술정보통신부 공고 제 2026-0455 호'` | **상세 HTML 본문 텍스트에 포함.** 구조화 필드 없음 |
+| `과제관리번호` | — | 사업공고 단계에서 미부여. IRIS와 동일하게 없음 |
+
+### 3-3. Cross-source 교차 검증 (샘플 1건)
+
+동일 공고: **2026년도 한-스페인 공동연구사업 신규과제 공모**
+
+| 항목 | IRIS | NTIS |
+|------|------|------|
+| 내부 ID | `ancmId=020640` | `roRndUid=1262378` (순번 76599) |
+| 공식 공고번호 | `ancmNo='과학기술정보통신부 공고 제2026-0455호'` (구조화 필드) | 상세 본문 텍스트 `'과학기술정보통신부 공고 제 2026-0455 호'` |
+| 주관기관 | `한국연구재단` | `한국연구재단` |
+| 접수기간 | `2026.04.17 ~ 2026.05.19` | `2026.04.17 ~ 2026.05.19` |
+| IRIS 연동 | — | 상세 페이지에 **"IRIS 바로가기 ▶"** 링크 + "자세한 내용은 IRIS 사업공고에서 확인" 안내 |
+
+**결론**: 공고번호 값이 완전히 일치 (공백·포맷 차이 제외). 정규화(공백 제거) 시 cross-source 매칭 가능.
+
+### 3-4. NTIS 공고 수집 방식의 함의
+
+NTIS 통합공고는 IRIS를 원본으로 참조하므로 다음과 같은 계층이 성립한다:
 
 ```
-canonical_key = f"{source_prefix}:{normalized_ancm_no}"
-예) "IRIS:산업통상부공고제2026-298호"
+IRIS (원본) ←── NTIS 통합공고 ("IRIS 바로가기 ▶")
 ```
 
-**`ancmNo` 정규화 규칙 (후보)**
+- **NTIS 통합공고**: IRIS ancmNo와 매핑 가능. ancmNo 기반 canonical_key로 cross-source 그룹핑.
+- **NTIS 개별공고**: IRIS와 무관한 독립 공고. ancmNo 파싱이 어려우면 fuzzy key 사용.
+- NTIS에서 공고번호를 구조화 필드로 추출하려면 상세 HTML 본문 텍스트 파싱 필요 (정규식: `[부처명]\s*공고\s*제\s*[\d\-]+\s*호`).
+
+### 3-5. 결론
+
+> **NTIS의 공식 공고번호는 별도 구조화 필드 없이 상세 HTML 본문 텍스트에 포함된다.**  
+> 목록 API JSON도 없어 HTML 파싱이 필수다.  
+> IRIS와 동일한 공고번호를 공유하므로 정규화 후 cross-source 매칭이 가능하나,  
+> **1차 canonical_key는 IRIS ancmNo 기반(구조화 필드)을 신뢰 기준으로 삼고,**  
+> NTIS는 `roRndUid`(= source_announcement_id)를 이미 알려진 canonical group에 연결하는 방식이 안전하다.
+
+---
+
+## 4. canonical_key 설계 방향
+
+### 4-1. 공식 키 (official scheme)
+
+공고번호(`ancmNo`)가 있으면 정규화 후 `official:` prefix를 붙여 canonical_key로 사용한다.
+
+```
+canonical_key = f"official:{normalized_ancm_no}"
+예) "official:과학기술정보통신부공고제2026-0455호"
+```
+
+**source_prefix 정책 결정 (NTIS 탐사 반영)**
+
+IRIS와 NTIS가 동일한 공고번호를 공유함이 확인되었다 (§3-3). 따라서:
+- 공고번호에 이미 부처명이 포함되어 있어 `IRIS:` / `NTIS:` 소스 prefix는 불필요.
+- 대신 `official:` prefix로 소스 무관하게 통일한다.
+- IRIS에서 `ancmNo` 필드로 직접 추출하거나, NTIS 상세 본문 파싱으로 추출한 번호를 동일 정규화 후 같은 키로 매핑.
+
+**`ancmNo` 정규화 규칙**
 1. 모든 공백 제거
 2. 전각 문자 → 반각 변환
 3. 구분자 통일: ` - `, `－`, `–` → `-`
 4. 소문자 통일 (한글은 해당 없음)
 5. 접두어 패턴 제거 불필요 (부처명이 canonical 판별에 유효 정보이므로 유지)
 
-**source_prefix 정책 (초안)**
-- IRIS: `IRIS`
-- NTIS: `NTIS` (00013-2 탐사 후 cross-source 일치 여부 결정)
-- cross-source 공통 공고번호가 확인되면 부처명 기반 prefix로 통일 가능 (`MOE:`, `MSIT:` 등)
+**예시 정규화**
 
-### 3-2. fuzzy 키 (fuzzy scheme, fallback)
+| 원문 | 정규화 결과 |
+|------|------------|
+| `'과학기술정보통신부 공고 제 2026-0455 호'` | `'과학기술정보통신부공고제2026-0455호'` |
+| `'과학기술정보통신부 공고 제 2026 - 0411호'` | `'과학기술정보통신부공고제2026-0411호'` |
+| `'산업통상부 공고 제2026-298호'` | `'산업통상부공고제2026-298호'` |
 
-`ancmNo`가 없거나 신뢰할 수 없는 경우의 fallback.
+### 4-2. fuzzy 키 (fuzzy scheme, fallback)
+
+공고번호가 없거나 파싱 불가인 경우의 fallback.
 
 ```
 canonical_key = f"fuzzy:{normalized_title}:{normalized_agency}:{deadline_year}"
@@ -105,12 +200,12 @@ canonical_key = f"fuzzy:{normalized_title}:{normalized_agency}:{deadline_year}"
 - `normalized_agency`: 주관기관명 공백 제거, 법인격 접미사(`(재)`, `주식회사` 등) 제거
 - `deadline_year`: 접수마감일 연도 4자리 (없으면 `0000`)
 
-### 3-3. scheme 판별 우선순위
+### 4-3. scheme 판별 우선순위
 
-```
-if ancmNo is not None and ancmNo.strip():
+```python
+if ancm_no and ancm_no.strip():
     scheme = "official"
-    canonical_key = f"{source_prefix}:{normalize_ancm_no(ancmNo)}"
+    canonical_key = f"official:{normalize_ancm_no(ancm_no)}"
 else:
     scheme = "fuzzy"
     canonical_key = f"fuzzy:{normalize_title(title)}:{normalize_agency(agency)}:{deadline_year}"
@@ -120,7 +215,7 @@ else:
 
 ---
 
-## 4. Schema 옵션 비교
+## 5. Schema 옵션 비교
 
 | | (A) announcements 컬럼 추가 | (B) canonical_projects 별도 테이블 |
 |---|---|---|
@@ -132,13 +227,14 @@ else:
 
 ---
 
-## 5. 권고 결정 (초안)
+## 6. 권고 결정
 
 ### Schema: (B) canonical_projects 테이블
 
-**선택 근거**
+**선택 근거 (NTIS 탐사 결과 반영)**
 - IRIS 탐사에서 `ancmNo`가 N:1(여러 ancmId → 하나의 ancmNo)임이 확인됨 → 그룹 엔티티를 1st-class로 두는 것이 자연스러움
-- NTIS 등 추가 소스 대응 시, `canonical_projects` row 1개가 여러 소스의 공고를 아우르는 구조로 자연스럽게 확장됨
+- NTIS 탐사에서 동일 공고가 양쪽 포털에 존재함이 확인됨 → `canonical_projects` row 1개가 IRIS·NTIS 양쪽 `announcements` row를 아우르는 구조가 자연스러움
+- `canonical_key = 'official:과학기술정보통신부공고제2026-0455호'` 하나로 IRIS(020640)·NTIS(1262378) 두 row를 묶는 그룹 엔티티 필요
 - 향후 UI에서 canonical 그룹 단위로 검색·표시할 때 GROUP BY 대신 FK JOIN으로 직접 처리 가능
 - 복잡도 트레이드오프: 마이그레이션이 (A) 대비 약간 복잡하지만, 기존 `announcements` 스키마 변경은 FK 컬럼 추가 1개로 제한됨
 
@@ -179,9 +275,23 @@ ALTER TABLE announcements
 
 ---
 
-## 6. 미결 사항 (00013-2 이후 결정)
+## 7. 미결 사항 (00013-3 이후 결정)
 
-- NTIS 공고 식별자 필드 포맷 (공고번호 표기 방식이 IRIS와 일치하는가?)
-- cross-source canonical_key prefix 정책 확정 (소스별 prefix vs 부처 코드 기반)
 - `ancmNo` 정규화 후 같은 ancmNo를 가진 IRIS ancmId들을 하나의 canonical group으로 묶을지, 각각 별개 group으로 둘지 (현재 권고: 같은 ancmNo → 같은 group, ancmId별 row는 announcements에 유지)
 - 재공고(재공고 여부=Y) 처리: 동일 ancmNo 재사용 여부 확인 후 결정
+- NTIS 상세 HTML 본문에서 공고번호 파싱 정규식 정교화 (패턴: `[부처명]\s*공고\s*제\s*[\d\-]+\s*호`) — NTIS 수집 구현 task에서 확정
+- NTIS `roRndUid` vs `순번` 중 `source_announcement_id` 채택 결정 (현재 권고: `roRndUid` — URL PK로 더 명확)
+
+---
+
+## 8. IRIS·NTIS 식별자 비교 요약표
+
+| 항목 | IRIS | NTIS |
+|------|------|------|
+| 내부 ID | `ancmId` | `roRndUid` |
+| 목록 응답 방식 | JSON (POST AJAX) | HTML 렌더링 |
+| 공식 공고번호 | `ancmNo` (구조화 필드, 항상 존재) | 상세 본문 텍스트에 포함 (별도 필드 없음) |
+| 과제관리번호 | 없음 (선정 후 부여) | 없음 (선정 후 부여) |
+| source_announcement_id | `ancmId` | `roRndUid` |
+| canonical_key 추출 용이성 | ★★★ 높음 — 필드 직접 사용 | ★☆☆ 낮음 — HTML 파싱 필요 |
+| cross-source 연결 | — | 상세에 "IRIS 바로가기" 링크 |
