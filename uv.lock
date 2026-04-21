@@ -119,6 +119,11 @@ dev = [
     { name = "ruff" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "ruff" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.12,<5.0" },
@@ -139,6 +144,9 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.29,<1.0" },
 ]
 provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "ruff", specifier = ">=0.15.11" }]
 
 [[package]]
 name = "greenlet"
