@@ -28,10 +28,14 @@ from app.db.init_db import init_db
 from app.db.models import Announcement, AnnouncementStatus
 from app.db.repository import (
     count_announcements,
+    count_canonical_groups,
     get_announcement_by_id,
     get_attachment_by_id,
     get_attachments_by_announcement,
+    get_available_source_ids,
+    get_group_size_map,
     list_announcements,
+    list_canonical_groups,
 )
 from app.db.session import SessionLocal
 
@@ -44,6 +48,9 @@ STATIC_DIR: Path = Path(__file__).resolve().parent / "static"
 
 DEFAULT_PAGE_SIZE: int = 20
 MAX_PAGE_SIZE: int = 100
+
+# 허용되는 정렬 기준 값 (repository._ALLOWED_SORT_VALUES 와 일치해야 한다).
+_ALLOWED_SORT_VALUES: tuple[str, ...] = ("received_desc", "deadline_asc", "title_asc")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -65,11 +72,15 @@ def get_session() -> Iterator[Session]:
 # ──────────────────────────────────────────────────────────────
 
 
-def _serialize_announcement(announcement: Announcement) -> dict[str, Any]:
+def _serialize_announcement(announcement: Announcement, *, group_size: int = 1) -> dict[str, Any]:
     """Announcement ORM 인스턴스를 JSON 직렬화 가능한 dict 로 변환한다.
 
     datetime 은 ISO-8601 문자열로 고정하고, Enum 은 한글 value 로 보존한다.
     detail_html 은 용량이 크므로 목록 API 에서는 제외한다(상세 API 전용).
+
+    Args:
+        announcement: 직렬화할 Announcement 인스턴스.
+        group_size:   동일 canonical 그룹 내 is_current=True 공고 수(자신 포함). 기본 1.
     """
     return {
         "id": announcement.id,
@@ -91,6 +102,9 @@ def _serialize_announcement(announcement: Announcement) -> dict[str, Any]:
         "detail_fetch_status": announcement.detail_fetch_status,
         "scraped_at": announcement.scraped_at.isoformat(),
         "updated_at": announcement.updated_at.isoformat(),
+        "canonical_group_id": announcement.canonical_group_id,
+        "canonical_key": announcement.canonical_key,
+        "group_size": group_size,
     }
 
 
@@ -122,6 +136,55 @@ def _coerce_status_query(raw_status: Optional[str]) -> Optional[AnnouncementStat
         ) from exc
 
 
+def _coerce_source_query(
+    raw_source: Optional[str],
+    available_sources: list[str],
+) -> Optional[str]:
+    """쿼리스트링 source 값을 검증한다.
+
+    허용 입력:
+        - None / 빈 문자열 → None (전체 조회).
+        - sources.yaml 에 등록된 source_id 문자열.
+
+    그 외 값은 400 으로 거절한다.
+
+    Args:
+        raw_source:        쿼리스트링 source 값.
+        available_sources: sources.yaml 에서 읽어 온 허용 소스 ID 목록.
+    """
+    if raw_source is None:
+        return None
+    stripped = raw_source.strip()
+    if not stripped:
+        return None
+    if stripped in available_sources:
+        return stripped
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=f"알 수 없는 소스: {stripped!r}. 허용: {', '.join(available_sources)}",
+    )
+
+
+def _coerce_sort_query(raw_sort: Optional[str]) -> str:
+    """쿼리스트링 sort 값을 검증하고 정규화한다.
+
+    허용 입력:
+        - None / 빈 문자열 → 'received_desc' (기본값).
+        - 'received_desc' / 'deadline_asc' / 'title_asc'.
+
+    그 외 값은 400 으로 거절한다.
+    """
+    if raw_sort is None or not raw_sort.strip():
+        return "received_desc"
+    stripped = raw_sort.strip()
+    if stripped not in _ALLOWED_SORT_VALUES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"알 수 없는 정렬 값: {stripped!r}. 허용: {', '.join(_ALLOWED_SORT_VALUES)}",
+        )
+    return stripped
+
+
 # ──────────────────────────────────────────────────────────────
 # 앱 팩토리
 # ──────────────────────────────────────────────────────────────
@@ -135,6 +198,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     effective_settings = settings or get_settings()
     effective_settings.ensure_runtime_paths()
     init_db()
+
+    # sources.yaml 에서 소스 목록을 한 번만 읽어 라우트 클로저에 공유한다.
+    available_source_ids: list[str] = get_available_source_ids()
 
     TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -163,6 +229,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         request: Request,
         status_param: Optional[str] = Query(default=None, alias="status"),
         search: Optional[str] = Query(default=None),
+        source: Optional[str] = Query(default=None),
+        sort: Optional[str] = Query(default=None),
+        group: str = Query(default="off"),
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
         session: Session = Depends(get_session),
@@ -170,40 +239,114 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         """공고 목록 HTML 페이지.
 
         쿼리 파라미터:
-            - status:    `접수중` / `접수예정` / `마감` 중 하나. 생략 시 전체.
-            - search:    제목/기관명 부분일치 검색어.
+            - status:    접수중 / 접수예정 / 마감 중 하나. 생략 시 전체.
+            - search:    제목 부분일치(LIKE) 검색어.
+            - source:    소스 유형(IRIS / NTIS 등). 생략 시 전체.
+            - sort:      정렬 기준. received_desc(기본) / deadline_asc / title_asc.
+            - group:     'on' 이면 canonical 묶어 보기 모드. 기본 'off'.
             - page:      1-based 페이지 번호.
             - page_size: 페이지 크기(최대 MAX_PAGE_SIZE).
         """
         status_enum = _coerce_status_query(status_param)
+        source_str = _coerce_source_query(source, available_source_ids)
+        sort_str = _coerce_sort_query(sort)
+        group_on = group.strip().lower() == "on"
         safe_offset = (page - 1) * page_size
-        announcement_items = list_announcements(
-            session,
-            status=status_enum,
-            limit=page_size,
-            offset=safe_offset,
-            search=search,
-        )
-        total_count = count_announcements(
-            session,
-            status=status_enum,
-            search=search,
-        )
-        total_pages = ceil(total_count / page_size) if total_count > 0 else 1
 
-        return templates.TemplateResponse(
-            request,
-            "list.html",
-            {
-                "announcements": announcement_items,
-                "total": total_count,
-                "page": page,
-                "page_size": page_size,
-                "total_pages": total_pages,
-                "status": status_param or "",
-                "search": search or "",
-            },
-        )
+        if group_on:
+            # ── 묶어 보기 모드: canonical 그룹 단위 ─────────────────────────────
+            groups = list_canonical_groups(
+                session,
+                status=status_enum,
+                source=source_str,
+                search=search,
+                sort=sort_str,
+                limit=page_size,
+                offset=safe_offset,
+            )
+            total_count = count_canonical_groups(
+                session,
+                status=status_enum,
+                source=source_str,
+                search=search,
+            )
+            total_pages = ceil(total_count / page_size) if total_count > 0 else 1
+
+            return templates.TemplateResponse(
+                request,
+                "list.html",
+                {
+                    "group_mode": True,
+                    "groups": groups,
+                    "ann_with_sizes": [],
+                    "total": total_count,
+                    "page": page,
+                    "page_size": page_size,
+                    "total_pages": total_pages,
+                    "status": status_param or "",
+                    "search": search or "",
+                    "source": source or "",
+                    "sort": sort_str,
+                    "group": "on",
+                    "available_sources": available_source_ids,
+                },
+            )
+        else:
+            # ── 분리 표시 모드 (기본): 각 소스 row 개별 표시 ───────────────────
+            announcement_items = list_announcements(
+                session,
+                status=status_enum,
+                limit=page_size,
+                offset=safe_offset,
+                search=search,
+                source=source_str,
+                sort=sort_str,
+            )
+
+            # group_size 일괄 조회 (N+1 방지)
+            cgids = {
+                ann.canonical_group_id
+                for ann in announcement_items
+                if ann.canonical_group_id is not None
+            }
+            group_size_map = get_group_size_map(session, cgids)
+            ann_with_sizes = [
+                (
+                    ann,
+                    group_size_map.get(ann.canonical_group_id, 1)
+                    if ann.canonical_group_id is not None
+                    else 1,
+                )
+                for ann in announcement_items
+            ]
+
+            total_count = count_announcements(
+                session,
+                status=status_enum,
+                search=search,
+                source=source_str,
+            )
+            total_pages = ceil(total_count / page_size) if total_count > 0 else 1
+
+            return templates.TemplateResponse(
+                request,
+                "list.html",
+                {
+                    "group_mode": False,
+                    "groups": [],
+                    "ann_with_sizes": ann_with_sizes,
+                    "total": total_count,
+                    "page": page,
+                    "page_size": page_size,
+                    "total_pages": total_pages,
+                    "status": status_param or "",
+                    "search": search or "",
+                    "source": source or "",
+                    "sort": sort_str,
+                    "group": "off",
+                    "available_sources": available_source_ids,
+                },
+            )
 
     # ──────────────────────────────────────────────────────────
     # HTML: 공고 상세 페이지
@@ -294,46 +437,102 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     def list_announcements_api(
         status_param: Optional[str] = Query(default=None, alias="status"),
         search: Optional[str] = Query(default=None),
+        source: Optional[str] = Query(default=None),
+        sort: Optional[str] = Query(default=None),
+        group: str = Query(default="off"),
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
         session: Session = Depends(get_session),
     ) -> dict[str, Any]:
         """공고 목록을 JSON 으로 반환한다.
 
+        쿼리 파라미터:
+            - status:    접수중 / 접수예정 / 마감. 생략 시 전체.
+            - search:    제목 부분일치(LIKE) 검색어.
+            - source:    소스 유형(IRIS / NTIS 등). 생략 시 전체.
+            - sort:      received_desc(기본) / deadline_asc / title_asc.
+            - group:     'on' 이면 canonical 묶어 보기 모드. 기본 'off'.
+            - page / page_size: 페이지네이션.
+
         응답 스키마:
             {
-              "items":       [ {announcement ...}, ... ],
-              "total":       전체 건수,
+              "items":       [ {announcement + group_size + canonical_key ...}, ... ],
+              "total":       전체 건수(또는 그룹 수),
               "page":        현재 페이지(1-based),
               "page_size":   페이지 크기,
-              "total_pages": 전체 페이지 수
+              "total_pages": 전체 페이지 수,
+              "group_mode":  bool
             }
         """
         status_enum = _coerce_status_query(status_param)
+        source_str = _coerce_source_query(source, available_source_ids)
+        sort_str = _coerce_sort_query(sort)
+        group_on = group.strip().lower() == "on"
         safe_offset = (page - 1) * page_size
-        announcement_items = list_announcements(
-            session,
-            status=status_enum,
-            limit=page_size,
-            offset=safe_offset,
-            search=search,
-        )
-        total_count = count_announcements(
-            session,
-            status=status_enum,
-            search=search,
-        )
-        total_pages = ceil(total_count / page_size) if total_count > 0 else 0
+
+        if group_on:
+            groups = list_canonical_groups(
+                session,
+                status=status_enum,
+                source=source_str,
+                search=search,
+                sort=sort_str,
+                limit=page_size,
+                offset=safe_offset,
+            )
+            total_count = count_canonical_groups(
+                session,
+                status=status_enum,
+                source=source_str,
+                search=search,
+            )
+            total_pages = ceil(total_count / page_size) if total_count > 0 else 0
+            items = [
+                _serialize_announcement(gr.representative, group_size=gr.group_size)
+                for gr in groups
+            ]
+        else:
+            announcement_items = list_announcements(
+                session,
+                status=status_enum,
+                limit=page_size,
+                offset=safe_offset,
+                search=search,
+                source=source_str,
+                sort=sort_str,
+            )
+            cgids = {
+                ann.canonical_group_id
+                for ann in announcement_items
+                if ann.canonical_group_id is not None
+            }
+            group_size_map = get_group_size_map(session, cgids)
+            total_count = count_announcements(
+                session,
+                status=status_enum,
+                search=search,
+                source=source_str,
+            )
+            total_pages = ceil(total_count / page_size) if total_count > 0 else 0
+            items = [
+                _serialize_announcement(
+                    ann,
+                    group_size=(
+                        group_size_map.get(ann.canonical_group_id, 1)
+                        if ann.canonical_group_id is not None
+                        else 1
+                    ),
+                )
+                for ann in announcement_items
+            ]
 
         return {
-            "items": [
-                _serialize_announcement(announcement)
-                for announcement in announcement_items
-            ],
+            "items": items,
             "total": total_count,
             "page": page,
             "page_size": page_size,
             "total_pages": total_pages,
+            "group_mode": group_on,
         }
 
     return fastapi_app
@@ -351,4 +550,5 @@ __all__ = [
     "STATIC_DIR",
     "DEFAULT_PAGE_SIZE",
     "MAX_PAGE_SIZE",
+    "_ALLOWED_SORT_VALUES",
 ]

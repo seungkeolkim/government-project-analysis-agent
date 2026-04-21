@@ -51,14 +51,18 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from loguru import logger
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.canonical import compute_canonical_key
 from app.db.models import Announcement, AnnouncementStatus, Attachment, CanonicalProject
+from app.sources.config_schema import load_sources_config
 
 # 공고에서 사용자가 payload 로 덮어쓰지 말아야 하는 자동 관리 컬럼들.
 _ANNOUNCEMENT_PROTECTED_FIELDS: frozenset[str] = frozenset({"id", "scraped_at", "updated_at"})
+
+# 허용되는 정렬 기준 값.
+_ALLOWED_SORT_VALUES: frozenset[str] = frozenset({"received_desc", "deadline_asc", "title_asc"})
 
 # 공고 payload 에 허용되는 컬럼 목록(화이트리스트).
 _ANNOUNCEMENT_ALLOWED_FIELDS: frozenset[str] = frozenset(
@@ -210,6 +214,111 @@ def _coerce_status(value: Any) -> AnnouncementStatus:
                 f"알 수 없는 공고 상태값: {value!r}. 허용값: {[m.value for m in AnnouncementStatus]}"
             ) from exc
     raise TypeError(f"status 는 AnnouncementStatus 또는 str 이어야 합니다. 입력 타입: {type(value).__name__}")
+
+
+@dataclass
+class CanonicalGroupRow:
+    """canonical 그룹 단위 묶어보기 결과 단위.
+
+    list_canonical_groups() 가 반환하는 원소 타입.
+    canonical_group_id 가 있는 공고는 그룹별 대표 1건으로 묶이고,
+    canonical_group_id 가 없는 고아 공고는 group_size=1 로 개별 단독 표현된다.
+    """
+
+    canonical_group_id: int | None
+    canonical_key: str | None
+    representative: Announcement
+    group_size: int  # 그룹 내 is_current=True 공고 수 (고아는 1)
+
+
+def _apply_common_filters(
+    statement: Any,
+    status: AnnouncementStatus | None,
+    source: str | None,
+    search: str | None,
+) -> Any:
+    """공통 필터(상태·소스·제목 검색)를 statement 에 적용한다.
+
+    WHERE 절을 누적 방식으로 추가한다.
+    이 함수는 is_current=True 조건을 추가하지 않는다 — 호출자가 직접 추가한다.
+
+    Args:
+        statement: SQLAlchemy select 또는 count statement.
+        status:    AnnouncementStatus Enum, None 이면 전체.
+        source:    source_type 문자열, None 이면 전체.
+        search:    제목 부분일치 검색어, None 이면 검색 없음.
+
+    Returns:
+        WHERE 절이 추가된 statement.
+    """
+    if status is not None:
+        statement = statement.where(Announcement.status == status)
+    if source is not None:
+        statement = statement.where(Announcement.source_type == source)
+    if search is not None:
+        normalized = search.strip()
+        if normalized:
+            # 사용자 원문: '제목 검색: SQL LIKE 부분일치로 충분' — title 단독 LIKE
+            statement = statement.where(Announcement.title.ilike(f"%{normalized}%"))
+    return statement
+
+
+def _apply_sort_order(statement: Any, sort: str) -> Any:
+    """정렬 조건을 statement 에 적용한다.
+
+    Args:
+        statement: SQLAlchemy select statement.
+        sort:      정렬 기준. received_desc | deadline_asc | title_asc.
+
+    Returns:
+        ORDER BY 절이 추가된 statement.
+    """
+    if sort == "deadline_asc":
+        # deadline_at NULL 은 뒤로
+        return statement.order_by(
+            (Announcement.deadline_at.is_(None)).asc(),
+            Announcement.deadline_at.asc(),
+            Announcement.id.desc(),
+        )
+    elif sort == "title_asc":
+        return statement.order_by(
+            Announcement.title.asc(),
+            Announcement.id.desc(),
+        )
+    else:
+        # received_desc (기본): 수집일 최신순, received_at NULL 은 뒤로
+        return statement.order_by(
+            (Announcement.received_at.is_(None)).asc(),  # NULL → 뒤로
+            Announcement.received_at.desc(),
+            Announcement.id.desc(),
+        )
+
+
+def _group_row_sort_key(ann: Announcement, sort: str) -> tuple:
+    """Python 정렬용 비교 키를 반환한다.
+
+    list_canonical_groups 에서 그룹 대표 Announcement 를 기준으로 정렬할 때 사용한다.
+
+    Args:
+        ann:  정렬 기준 Announcement (canonical 그룹 대표 또는 고아 공고).
+        sort: 정렬 기준 문자열. received_desc | deadline_asc | title_asc.
+
+    Returns:
+        Python sorted() 에 전달할 수 있는 비교 가능한 tuple.
+    """
+    if sort == "deadline_asc":
+        d = ann.deadline_at
+        # None → 맨 뒤 (float("inf"))
+        ts = d.timestamp() if d is not None else float("inf")
+        return (ts, -ann.id)
+    elif sort == "title_asc":
+        return (ann.title or "", -ann.id)
+    else:
+        # received_desc: 최신(큰 timestamp) 우선, None → 맨 뒤
+        r = ann.received_at
+        if r is None:
+            return (1, float("inf"), -ann.id)
+        return (0, -r.timestamp(), -ann.id)
 
 
 def _filter_payload(payload: Mapping[str, Any], allowed: frozenset[str]) -> dict[str, Any]:
@@ -542,46 +651,37 @@ def list_announcements(
     limit: int = 50,
     offset: int = 0,
     search: str | None = None,
+    source: str | None = None,
+    sort: str = "received_desc",
 ) -> list[Announcement]:
     """공고 목록을 조회한다 (현재 버전 is_current=True 한정).
 
-    정렬:
-        - `deadline_at ASC NULLS LAST` 로 마감이 임박한 공고가 먼저 오게 한다.
-        - 동률이면 `id DESC` 로 최근 수집된 공고를 우선한다.
+    정렬 (sort 파라미터):
+        - 'received_desc' (기본): 수집일(received_at) 최신순. NULL 은 뒤로.
+        - 'deadline_asc':         마감일 임박순. NULL 은 뒤로.
+        - 'title_asc':            공고명 가나다순.
+
+    기존 호출부 호환성:
+        새 파라미터(source, sort)는 기본값을 가지므로 기존 호출은 변경 없이 동작한다.
 
     Args:
         session: 호출자가 제어하는 SQLAlchemy 세션.
-        status: `AnnouncementStatus` 또는 그 문자열 값으로 필터. `None` 이면 전체.
-        limit: 페이지 크기. 1 이상이어야 한다.
-        offset: 건너뛸 레코드 수(페이지네이션).
-        search: 제목/기관명에 대한 부분일치(LIKE) 검색어. 공백은 무시(strip).
+        status:  AnnouncementStatus 또는 문자열 필터. None 이면 전체.
+        limit:   페이지 크기. 1 이상이어야 한다.
+        offset:  건너뛸 레코드 수(페이지네이션).
+        search:  제목 부분일치(LIKE) 검색어. 공백은 무시(strip).
+        source:  source_type 필터. None 이면 전체.
+        sort:    정렬 기준. 허용값: received_desc | deadline_asc | title_asc.
 
     Returns:
-        조건에 맞는 `Announcement` 리스트 (is_current=True 만 포함).
+        조건에 맞는 Announcement 리스트 (is_current=True 만 포함).
     """
     # is_current=True 만 표시한다 — 이력(구버전) row 는 목록에 노출하지 않는다.
     statement = select(Announcement).where(Announcement.is_current.is_(True))
 
-    if status is not None:
-        statement = statement.where(Announcement.status == _coerce_status(status))
-
-    if search is not None:
-        normalized_search = search.strip()
-        if normalized_search:
-            like_pattern = f"%{normalized_search}%"
-            statement = statement.where(
-                or_(
-                    Announcement.title.ilike(like_pattern),
-                    Announcement.agency.ilike(like_pattern),
-                )
-            )
-
-    # deadline_at NULL 값은 뒤로 보낸다.
-    statement = statement.order_by(
-        (Announcement.deadline_at.is_(None)).asc(),
-        Announcement.deadline_at.asc(),
-        Announcement.id.desc(),
-    )
+    status_enum = _coerce_status(status) if status is not None else None
+    statement = _apply_common_filters(statement, status_enum, source, search)
+    statement = _apply_sort_order(statement, sort)
 
     safe_limit = max(int(limit), 1)
     safe_offset = max(int(offset), 0)
@@ -594,28 +694,257 @@ def count_announcements(
     session: Session,
     status: AnnouncementStatus | str | None = None,
     search: str | None = None,
+    source: str | None = None,
 ) -> int:
-    """`list_announcements` 와 동일 조건의 전체 개수를 반환한다 (is_current=True 한정).
+    """list_announcements 와 동일 조건의 전체 개수를 반환한다 (is_current=True 한정).
 
     목록 페이지네이션에서 '총 N건' 표시/페이지 수 계산에 사용한다.
+
+    Args:
+        session: 호출자가 제어하는 SQLAlchemy 세션.
+        status:  상태 필터. None 이면 전체.
+        search:  제목 부분일치 검색어. None 이면 검색 없음.
+        source:  source_type 필터. None 이면 전체.
+
+    Returns:
+        조건에 맞는 공고 수.
     """
-    statement = select(func.count()).select_from(Announcement).where(Announcement.is_current.is_(True))
+    statement = (
+        select(func.count()).select_from(Announcement).where(Announcement.is_current.is_(True))
+    )
 
-    if status is not None:
-        statement = statement.where(Announcement.status == _coerce_status(status))
-
-    if search is not None:
-        normalized_search = search.strip()
-        if normalized_search:
-            like_pattern = f"%{normalized_search}%"
-            statement = statement.where(
-                or_(
-                    Announcement.title.ilike(like_pattern),
-                    Announcement.agency.ilike(like_pattern),
-                )
-            )
+    status_enum = _coerce_status(status) if status is not None else None
+    statement = _apply_common_filters(statement, status_enum, source, search)
 
     return int(session.execute(statement).scalar_one())
+
+
+def get_group_size_map(session: Session, canonical_group_ids: set[int]) -> dict[int, int]:
+    """canonical_group_id 별 is_current=True 공고 수를 한 번의 쿼리로 반환한다.
+
+    N+1 쿼리 없이 그룹별 배지 표시(동일 과제 N건)를 위한 집계에 사용한다.
+
+    Args:
+        session:              호출자가 제어하는 SQLAlchemy 세션.
+        canonical_group_ids:  조회할 canonical_group_id 집합.
+
+    Returns:
+        {canonical_group_id: count} 매핑. 데이터 없으면 빈 dict.
+    """
+    if not canonical_group_ids:
+        return {}
+    rows = session.execute(
+        select(
+            Announcement.canonical_group_id,
+            func.count(Announcement.id).label("cnt"),
+        )
+        .where(
+            Announcement.is_current.is_(True),
+            Announcement.canonical_group_id.in_(canonical_group_ids),
+        )
+        .group_by(Announcement.canonical_group_id)
+    ).all()
+    return {row[0]: row[1] for row in rows}
+
+
+def list_canonical_groups(
+    session: Session,
+    status: AnnouncementStatus | str | None = None,
+    source: str | None = None,
+    search: str | None = None,
+    sort: str = "received_desc",
+    limit: int = 50,
+    offset: int = 0,
+) -> list[CanonicalGroupRow]:
+    """canonical 그룹 단위로 공고 목록을 조회한다 (묶어 보기 모드).
+
+    canonical_group_id 가 있는 공고는 그룹별 대표 1건으로 묶고,
+    canonical_group_id 가 없는 고아 공고는 개별 단독 그룹으로 나열한다.
+
+    대표 선택 기준: received_at 최신순, 동률이면 id 최신순.
+    필터(status/source/search)는 대표 공고의 속성에 적용된다.
+    group_size 는 그룹 전체의 is_current=True 공고 수(필터 무관)이다.
+
+    정렬과 페이지네이션은 두 쿼리(그룹 대표 + 고아) 결과를 Python에서 합산 후 적용한다.
+
+    Args:
+        session: 호출자가 제어하는 SQLAlchemy 세션.
+        status:  상태 필터(대표 공고 기준). None 이면 전체.
+        source:  소스 유형 필터(대표 공고 기준). None 이면 전체.
+        search:  제목 부분일치 검색어(대표 공고 기준). None 이면 검색 없음.
+        sort:    정렬 기준. received_desc | deadline_asc | title_asc.
+        limit:   결과 최대 건수(페이지네이션).
+        offset:  건너뛸 건수(페이지네이션).
+
+    Returns:
+        CanonicalGroupRow 리스트. 정렬·페이지네이션 적용됨.
+    """
+    status_enum = _coerce_status(status) if status is not None else None
+
+    # ── window function 서브쿼리: 그룹별 대표 선택 + group_size 집계 ─────────────
+    # row_number() 로 그룹 내 대표를 선택하고, count() 로 그룹 전체 크기를 구한다.
+    ranked_subq = (
+        select(
+            Announcement.id.label("ann_id"),
+            Announcement.canonical_group_id.label("gid"),
+            func.count(Announcement.id)
+            .over(partition_by=Announcement.canonical_group_id)
+            .label("grp_size"),
+            func.row_number()
+            .over(
+                partition_by=Announcement.canonical_group_id,
+                order_by=[
+                    (Announcement.received_at.is_(None)).asc(),  # NULL 뒤로
+                    Announcement.received_at.desc(),
+                    Announcement.id.desc(),
+                ],
+            )
+            .label("rn"),
+        )
+        .where(
+            Announcement.is_current.is_(True),
+            Announcement.canonical_group_id.is_not(None),
+        )
+        .subquery()
+    )
+
+    # rn=1 인 대표 행만 추린다.
+    rep_subq = (
+        select(
+            ranked_subq.c.ann_id,
+            ranked_subq.c.gid,
+            ranked_subq.c.grp_size,
+        )
+        .where(ranked_subq.c.rn == 1)
+        .subquery()
+    )
+
+    # 대표 Announcement 조인 + 사용자 필터 적용
+    grouped_stmt = select(Announcement, rep_subq.c.grp_size).join(
+        rep_subq, Announcement.id == rep_subq.c.ann_id
+    )
+    grouped_stmt = _apply_common_filters(grouped_stmt, status_enum, source, search)
+    grouped_rows: list[tuple[Announcement, int]] = list(
+        session.execute(grouped_stmt).all()
+    )
+
+    # ── 고아 공고 (canonical_group_id IS NULL): 각각 단독 그룹 ─────────────────
+    orphan_stmt = select(Announcement).where(
+        Announcement.is_current.is_(True),
+        Announcement.canonical_group_id.is_(None),
+    )
+    orphan_stmt = _apply_common_filters(orphan_stmt, status_enum, source, search)
+    orphan_rows: list[Announcement] = list(session.execute(orphan_stmt).scalars().all())
+
+    # ── 합산 → Python 정렬 → 페이지네이션 ──────────────────────────────────────
+    all_rows: list[CanonicalGroupRow] = [
+        CanonicalGroupRow(
+            canonical_group_id=ann.canonical_group_id,
+            canonical_key=ann.canonical_key,
+            representative=ann,
+            group_size=cnt,
+        )
+        for ann, cnt in grouped_rows
+    ] + [
+        CanonicalGroupRow(
+            canonical_group_id=None,
+            canonical_key=None,
+            representative=ann,
+            group_size=1,
+        )
+        for ann in orphan_rows
+    ]
+
+    all_rows.sort(key=lambda row: _group_row_sort_key(row.representative, sort))
+
+    safe_offset = max(int(offset), 0)
+    safe_limit = max(int(limit), 1)
+    return all_rows[safe_offset : safe_offset + safe_limit]
+
+
+def count_canonical_groups(
+    session: Session,
+    status: AnnouncementStatus | str | None = None,
+    source: str | None = None,
+    search: str | None = None,
+) -> int:
+    """list_canonical_groups 와 동일 조건의 전체 그룹 수를 반환한다.
+
+    페이지네이션에서 총 그룹 수 계산에 사용한다.
+
+    Args:
+        session: 호출자가 제어하는 SQLAlchemy 세션.
+        status:  상태 필터(대표 공고 기준). None 이면 전체.
+        source:  소스 유형 필터(대표 공고 기준). None 이면 전체.
+        search:  제목 부분일치 검색어(대표 공고 기준). None 이면 검색 없음.
+
+    Returns:
+        조건에 맞는 canonical 그룹 수 (고아 공고 + 그룹 대표 합산).
+    """
+    status_enum = _coerce_status(status) if status is not None else None
+
+    # 그룹 대표 수 — ranked_subq 재사용
+    ranked_subq = (
+        select(
+            Announcement.id.label("ann_id"),
+            Announcement.canonical_group_id.label("gid"),
+            func.row_number()
+            .over(
+                partition_by=Announcement.canonical_group_id,
+                order_by=[
+                    (Announcement.received_at.is_(None)).asc(),
+                    Announcement.received_at.desc(),
+                    Announcement.id.desc(),
+                ],
+            )
+            .label("rn"),
+        )
+        .where(
+            Announcement.is_current.is_(True),
+            Announcement.canonical_group_id.is_not(None),
+        )
+        .subquery()
+    )
+    rep_subq = (
+        select(ranked_subq.c.ann_id, ranked_subq.c.gid)
+        .where(ranked_subq.c.rn == 1)
+        .subquery()
+    )
+
+    grouped_count_stmt = (
+        select(func.count())
+        .select_from(Announcement)
+        .join(rep_subq, Announcement.id == rep_subq.c.ann_id)
+    )
+    grouped_count_stmt = _apply_common_filters(grouped_count_stmt, status_enum, source, search)
+    grouped_count = int(session.execute(grouped_count_stmt).scalar_one())
+
+    # 고아 공고 수
+    orphan_count_stmt = (
+        select(func.count())
+        .select_from(Announcement)
+        .where(
+            Announcement.is_current.is_(True),
+            Announcement.canonical_group_id.is_(None),
+        )
+    )
+    orphan_count_stmt = _apply_common_filters(orphan_count_stmt, status_enum, source, search)
+    orphan_count = int(session.execute(orphan_count_stmt).scalar_one())
+
+    return grouped_count + orphan_count
+
+
+def get_available_source_ids() -> list[str]:
+    """sources.yaml 에 등록된 전체 소스 ID 목록을 반환한다.
+
+    활성화(enabled=True) 여부와 무관하게 모든 소스를 반환한다.
+    필터 UI 에서 소스 목록을 동적으로 생성할 때 사용한다.
+
+    Returns:
+        소스 ID 문자열 목록. 예: ['IRIS', 'NTIS']
+    """
+    config = load_sources_config()
+    return [source.id for source in config.sources]
 
 
 # ── 첨부파일(Attachment) UPSERT 키 기준 허용 필드 ────────────────────────────────────
@@ -767,12 +1096,17 @@ def get_attachments_by_announcement(
 
 __all__ = [
     "UpsertResult",
+    "CanonicalGroupRow",
     "upsert_announcement",
     "upsert_announcement_detail",
     "recompute_canonical_with_ancm_no",
     "get_announcement_by_id",
     "list_announcements",
     "count_announcements",
+    "get_group_size_map",
+    "list_canonical_groups",
+    "count_canonical_groups",
+    "get_available_source_ids",
     "upsert_attachment",
     "get_attachment_by_id",
     "get_attachment_by_announcement_and_filename",
