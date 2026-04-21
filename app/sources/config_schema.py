@@ -38,6 +38,12 @@ class SourceConfig(BaseModel):
     request_delay_sec: float = Field(default=1.5, ge=0.0)
     """요청 간 최소 지연(초). 차단 방지 목적."""
 
+    max_pages: Optional[int] = Field(default=None, gt=0)
+    """소스당 최대 페이지 수. None 이면 CLI 인자 또는 코드 default 를 따른다."""
+
+    max_announcements: Optional[int] = Field(default=None, gt=0)
+    """소스당 최대 공고 수. None 이면 CLI 인자 또는 코드 default 를 따른다."""
+
     extra: dict[str, Any] = Field(default_factory=dict)
     """소스 어댑터 전용 추가 파라미터. 어댑터가 직접 읽는다."""
 

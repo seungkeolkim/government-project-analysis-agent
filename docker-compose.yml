@@ -58,9 +58,10 @@ services:
       - ./data:/app/data
       - ./app:/app/app
     # '접수중' 목록을 수집하고 DB에 적재한다.
-    # 인자 오버라이드 예시:
-    #   docker compose --profile scrape run --rm scraper python -m app.cli run --max-pages 1 --dry-run
-    command:
+    # docker compose run 뒤에 CLI 인자를 바로 붙일 수 있다:
+    #   docker compose --profile scrape run --rm scraper --max-pages 10 --max-announcements 200
+    # entrypoint 를 list 형태로 명시해야 compose 가 추가 인자를 올바르게 append 한다.
+    entrypoint:
       - python
       - -m
       - app.cli

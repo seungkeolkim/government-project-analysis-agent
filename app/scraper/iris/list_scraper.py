@@ -70,8 +70,8 @@ RESPONSE_PAGINATION_KEY: str = "paginationInfo"
 # 페이지네이션 내 전체 페이지 수 키
 PAGINATION_TOTAL_PAGE_KEY: str = "totalPageCount"
 
-# 한 번의 수집에서 순회할 최대 페이지 수 (무한 루프 방어 상한)
-DEFAULT_MAX_PAGES: int = 50
+# list_scraper 직접 호출 시 사용하는 기본 상한 (오케스트레이터는 항상 명시적으로 전달함)
+DEFAULT_MAX_PAGES: int = 10
 
 # HTTP 재시도 기본 상수
 DEFAULT_MAX_ATTEMPTS: int = 3
