@@ -101,6 +101,51 @@ class NtisSourceAdapter(BaseSourceAdapter):
         logger.debug("NtisSourceAdapter.scrape_list: {}건 정규화 완료", len(normalized_rows))
         return normalized_rows
 
+    def build_download_referer(self, source_announcement_id: str) -> str:
+        """NTIS 공고 상세 페이지 URL 을 Referer 로 반환한다."""
+        from app.scraper.ntis.list_scraper import NTIS_BASE_DOMAIN
+        return f"{NTIS_BASE_DOMAIN}/rndgate/eg/un/ra/view.do?roRndUid={source_announcement_id}"
+
+    def extract_attachment_links(self, detail_html: str) -> list:
+        """NTIS 상세 HTML 에서 첨부파일 링크를 추출한다.
+
+        fn_fileDownload(wfUid, roTextUid) onclick 패턴을 파싱하여
+        httpx POST 방식의 AttachmentLinkInfo 목록을 반환한다.
+        """
+        from app.scraper.attachment_downloader import AttachmentLinkInfo
+        from app.scraper.ntis.detail_scraper import DOWNLOAD_ONCLICK_PATTERN
+        from app.scraper.ntis.list_scraper import NTIS_BASE_DOMAIN
+
+        NTIS_FILE_DOWNLOAD_ENDPOINT = (
+            NTIS_BASE_DOMAIN + "/rndgate/eg/cmm/file/download.do"
+        )
+
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(detail_html, "html.parser")
+
+        links: list[AttachmentLinkInfo] = []
+        for a_tag in soup.find_all("a"):
+            onclick = a_tag.get("onclick") or ""
+            m = DOWNLOAD_ONCLICK_PATTERN.search(onclick)
+            if m is None:
+                continue
+            wf_uid = m.group(1)
+            ro_text_uid = m.group(2)
+            filename = a_tag.get_text(strip=True) or f"attachment_{wf_uid}"
+            links.append(
+                AttachmentLinkInfo(
+                    atc_doc_id=wf_uid,
+                    atc_file_id=ro_text_uid,
+                    original_filename=filename,
+                    file_size_bytes=None,
+                    download_url=NTIS_FILE_DOWNLOAD_ENDPOINT,
+                    download_method="POST",
+                    post_data={"wfUid": wf_uid, "roTextUid": ro_text_uid},
+                )
+            )
+
+        return links
+
     async def scrape_detail(self, detail_url: str) -> dict[str, Any]:
         """NTIS 공고 상세 페이지를 수집한다.
 

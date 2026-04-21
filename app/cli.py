@@ -168,6 +168,7 @@ async def _scrape_and_store_attachments(
     source_type: str,
     source_announcement_id: str,
     settings: Settings,
+    adapter: Optional[BaseSourceAdapter] = None,
 ) -> tuple[int, int, int]:
     """공고 한 건의 첨부파일을 수집하여 DB 에 저장하고 (성공, 실패, 스킵) 카운트를 반환한다.
 
@@ -207,6 +208,7 @@ async def _scrape_and_store_attachments(
     att_result = await scrape_attachments_for_announcement(
         announcement_for_scraping,
         settings=settings,
+        adapter=adapter,
     )
 
     success_count = 0
@@ -454,6 +456,7 @@ async def _run_source_announcements(
                     source_type=source_type,
                     source_announcement_id=source_announcement_id,
                     settings=settings,
+                    adapter=adapter,
                 )
                 attachment_success_count += att_success
                 attachment_failure_count += att_failure

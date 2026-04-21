@@ -84,6 +84,22 @@ class IrisSourceAdapter(BaseSourceAdapter):
         logger.debug("IrisSourceAdapter.scrape_list: {}건 정규화 완료", len(normalized_rows))
         return normalized_rows
 
+    def build_download_referer(self, source_announcement_id: str) -> str:
+        """IRIS 공고 상세 페이지 URL 을 Referer 로 반환한다."""
+        from app.scraper.iris.list_scraper import IRIS_BASE_DOMAIN
+        return (
+            f"{IRIS_BASE_DOMAIN}/contents/retrieveBsnsAncmView.do"
+            f"?ancmId={source_announcement_id}"
+        )
+
+    def extract_attachment_links(self, detail_html: str) -> list:
+        """IRIS 상세 HTML 에서 첨부파일 링크를 추출한다.
+
+        div.add_file_list a.file_down 선택자로 IRIS 첨부 링크를 파싱한다.
+        """
+        from app.scraper.attachment_downloader import extract_attachment_links as _iris_extract
+        return _iris_extract(detail_html)
+
     async def scrape_detail(self, detail_url: str) -> dict[str, Any]:
         """IRIS 공고 상세 페이지를 수집한다.
 
