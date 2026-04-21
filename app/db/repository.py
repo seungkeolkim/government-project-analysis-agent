@@ -47,43 +47,118 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Literal, Optional
+from datetime import UTC, datetime
+from typing import Any, Literal
 
+from loguru import logger
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from app.db.models import Announcement, AnnouncementStatus, Attachment
+from app.canonical import compute_canonical_key
+from app.db.models import Announcement, AnnouncementStatus, Attachment, CanonicalProject
 
 # 공고에서 사용자가 payload 로 덮어쓰지 말아야 하는 자동 관리 컬럼들.
 _ANNOUNCEMENT_PROTECTED_FIELDS: frozenset[str] = frozenset({"id", "scraped_at", "updated_at"})
 
 # 공고 payload 에 허용되는 컬럼 목록(화이트리스트).
-_ANNOUNCEMENT_ALLOWED_FIELDS: frozenset[str] = frozenset({
-    "source_announcement_id",
-    "source_type",
-    "title",
-    "agency",
-    "status",
-    "received_at",
-    "deadline_at",
-    "detail_url",
-    "raw_metadata",
-})
+_ANNOUNCEMENT_ALLOWED_FIELDS: frozenset[str] = frozenset(
+    {
+        "source_announcement_id",
+        "source_type",
+        "title",
+        "agency",
+        "status",
+        "received_at",
+        "deadline_at",
+        "detail_url",
+        "raw_metadata",
+    }
+)
 
 # 상세 수집 결과 업데이트 시 허용되는 컬럼 목록.
-_DETAIL_ALLOWED_FIELDS: frozenset[str] = frozenset({
-    "detail_html",
-    "detail_text",
-    "detail_fetched_at",
-    "detail_fetch_status",
-})
+_DETAIL_ALLOWED_FIELDS: frozenset[str] = frozenset(
+    {
+        "detail_html",
+        "detail_text",
+        "detail_fetched_at",
+        "detail_fetch_status",
+    }
+)
 
 # 변경 감지 비교 대상 필드.
 # - title, status, deadline_at: 공고를 특정하는 핵심 필드
 # - agency: 주관 기관 변경도 의미 있는 내용 변화로 판정
 # received_at 은 의도적으로 제외 (접수예정 시 미기재 후 보완 패턴이 흔함)
 _CHANGE_DETECTION_FIELDS: tuple[str, ...] = ("title", "status", "deadline_at", "agency")
+
+
+def _apply_canonical(
+    session: Session,
+    announcement: Announcement,
+    *,
+    ancm_no: str | None,
+    clean_payload: dict[str, Any],
+) -> None:
+    """canonical_key 를 계산하고 CanonicalProject 를 조회/생성하여 announcement 에 적용한다.
+
+    예외 격리: 내부 오류 발생 시 canonical_group_id=NULL 을 유지한 채 경고 로그만 남긴다.
+    공고 단위 UPSERT 흐름이 canonical 실패로 중단되지 않도록 보장한다.
+
+    Args:
+        session:       호출자 세션 (flush 포함, commit 은 호출자 책임).
+        announcement:  canonical 필드를 적용할 Announcement 인스턴스.
+        ancm_no:       IRIS 공식 공고번호(ancmNo). None 이면 fuzzy fallback 사용.
+        clean_payload: _filter_payload 후 status 정규화가 완료된 payload dict.
+                       title / agency / deadline_at 추출에 사용한다.
+    """
+    try:
+        official_key_candidates = [ancm_no] if ancm_no else []
+        result = compute_canonical_key(
+            official_key_candidates=official_key_candidates,
+            title=clean_payload.get("title") or "",
+            agency=clean_payload.get("agency"),
+            deadline_at=clean_payload.get("deadline_at"),
+        )
+
+        # canonical_key 로 기존 CanonicalProject 를 조회한다.
+        cp = session.execute(
+            select(CanonicalProject).where(CanonicalProject.canonical_key == result.canonical_key)
+        ).scalar_one_or_none()
+
+        if cp is None:
+            # 신규 canonical group 생성 — representative 정보는 최초 수집 시각 기준으로 저장.
+            cp = CanonicalProject(
+                canonical_key=result.canonical_key,
+                key_scheme=result.canonical_scheme,
+                representative_title=clean_payload.get("title"),
+                representative_agency=clean_payload.get("agency"),
+            )
+            session.add(cp)
+            session.flush()  # PK(cp.id) 확보
+            logger.debug(
+                "canonical 신규 그룹 생성: key={} scheme={} group_id={}",
+                result.canonical_key,
+                result.canonical_scheme,
+                cp.id,
+            )
+        else:
+            logger.debug(
+                "canonical 기존 그룹 매칭: key={} group_id={}",
+                result.canonical_key,
+                cp.id,
+            )
+
+        announcement.canonical_group_id = cp.id
+        announcement.canonical_key = result.canonical_key
+        announcement.canonical_key_scheme = result.canonical_scheme
+        session.flush()
+
+    except Exception as exc:
+        logger.warning(
+            "canonical 매칭 실패 — canonical_group_id=NULL 유지 (announcement.id={}): {}",
+            announcement.id,
+            exc,
+        )
 
 
 @dataclass
@@ -132,8 +207,7 @@ def _coerce_status(value: Any) -> AnnouncementStatus:
             return AnnouncementStatus[value]
         except KeyError as exc:
             raise ValueError(
-                f"알 수 없는 공고 상태값: {value!r}. "
-                f"허용값: {[m.value for m in AnnouncementStatus]}"
+                f"알 수 없는 공고 상태값: {value!r}. 허용값: {[m.value for m in AnnouncementStatus]}"
             ) from exc
     raise TypeError(f"status 는 AnnouncementStatus 또는 str 이어야 합니다. 입력 타입: {type(value).__name__}")
 
@@ -166,7 +240,7 @@ def _normalize_for_comparison(value: Any) -> Any:
     if isinstance(value, datetime):
         if value.tzinfo is not None:
             # tz-aware → naive UTC 로 변환 (비교 전용, 저장 데이터 불변)
-            return value.astimezone(timezone.utc).replace(tzinfo=None)
+            return value.astimezone(UTC).replace(tzinfo=None)
         return value
     if type(value) is str:
         return value.strip()
@@ -233,6 +307,10 @@ def upsert_announcement(session: Session, payload: Mapping[str, Any]) -> UpsertR
     source_announcement_id = payload["source_announcement_id"]
     source_type = payload["source_type"]
 
+    # ancm_no: IRIS 공식 공고번호(ancmNo). _ANNOUNCEMENT_ALLOWED_FIELDS 밖이므로
+    # canonical 계산에만 쓰고 announcements 컬럼에는 직접 기록하지 않는다.
+    ancm_no: str | None = payload.get("ancm_no") or None
+
     # 허용 컬럼만 추출 + status 정규화.
     clean_payload = _filter_payload(payload, _ANNOUNCEMENT_ALLOWED_FIELDS)
     if "status" in clean_payload:
@@ -252,6 +330,7 @@ def upsert_announcement(session: Session, payload: Mapping[str, Any]) -> UpsertR
         announcement = Announcement(**clean_payload, is_current=True)
         session.add(announcement)
         session.flush()
+        _apply_canonical(session, announcement, ancm_no=ancm_no, clean_payload=clean_payload)
         return UpsertResult(
             announcement=announcement,
             action="created",
@@ -266,6 +345,9 @@ def upsert_announcement(session: Session, payload: Mapping[str, Any]) -> UpsertR
     if not changed_fields:
         # 상세가 아직 수집되지 않은 row 는 detail scraping 이 필요하다.
         needs_detail = existing.detail_fetched_at is None
+        # canonical_group_id 가 아직 없으면 기회적으로 채운다 (backfill 전 기존 데이터).
+        if existing.canonical_group_id is None:
+            _apply_canonical(session, existing, ancm_no=ancm_no, clean_payload=clean_payload)
         return UpsertResult(
             announcement=existing,
             action="unchanged",
@@ -280,6 +362,9 @@ def upsert_announcement(session: Session, payload: Mapping[str, Any]) -> UpsertR
         # detail_url 이 함께 내려온 경우 갱신한다 (동일 공고, URL 불변이 보통이지만 방어적으로).
         if "detail_url" in clean_payload:
             existing.detail_url = clean_payload["detail_url"]
+        # canonical_group_id 가 아직 없으면 채운다. 이미 있으면 건드리지 않는다.
+        if existing.canonical_group_id is None:
+            _apply_canonical(session, existing, ancm_no=ancm_no, clean_payload=clean_payload)
         session.flush()
         return UpsertResult(
             announcement=existing,
@@ -289,12 +374,33 @@ def upsert_announcement(session: Session, payload: Mapping[str, Any]) -> UpsertR
         )
 
     # ── (d) 내용 변경: 이력 보존 — 기존 row 봉인 + 신규 row INSERT ─────────────
+    # 기존 row 의 canonical_group_id 를 신규 row 에 승계한다 (같은 공고의 이력이므로 같은 그룹).
+    inherited_canonical_group_id = existing.canonical_group_id
+    inherited_canonical_key = existing.canonical_key
+    inherited_canonical_key_scheme = existing.canonical_key_scheme
+
     existing.is_current = False
     # 신규 row 에는 payload 값 + is_current=True 를 설정한다.
     # scraped_at 은 새 수집 시각으로 기록한다 (모델 default=_utcnow 가 처리).
     new_announcement = Announcement(**clean_payload, is_current=True)
     session.add(new_announcement)
     session.flush()
+
+    if inherited_canonical_group_id is not None:
+        # 구 row 의 canonical group 을 그대로 승계한다.
+        new_announcement.canonical_group_id = inherited_canonical_group_id
+        new_announcement.canonical_key = inherited_canonical_key
+        new_announcement.canonical_key_scheme = inherited_canonical_key_scheme
+        session.flush()
+        logger.debug(
+            "canonical 승계(new_version): key={} group_id={}",
+            inherited_canonical_key,
+            inherited_canonical_group_id,
+        )
+    else:
+        # 구 row 에 canonical 이 없었으면 신규 row 에 대해 새로 계산한다.
+        _apply_canonical(session, new_announcement, ancm_no=ancm_no, clean_payload=clean_payload)
+
     return UpsertResult(
         announcement=new_announcement,
         action="new_version",
@@ -306,7 +412,7 @@ def upsert_announcement(session: Session, payload: Mapping[str, Any]) -> UpsertR
 def get_announcement_by_id(
     session: Session,
     announcement_id: int,
-) -> Optional[Announcement]:
+) -> Announcement | None:
     """내부 PK(`id`)로 공고 한 건을 조회한다.
 
     is_current 필터 없이 PK 로 직접 접근하므로 과거 버전(이력) 레코드도 반환할 수 있다.
@@ -329,7 +435,7 @@ def upsert_announcement_detail(
     detail_fields: Mapping[str, Any],
     *,
     source_type: str = "IRIS",
-) -> Optional[Announcement]:
+) -> Announcement | None:
     """공고 한 건의 상세 수집 결과 필드를 갱신한다.
 
     is_current=True 인 현재 버전 row 만 대상으로 한다.
@@ -367,10 +473,10 @@ def upsert_announcement_detail(
 
 def list_announcements(
     session: Session,
-    status: Optional[AnnouncementStatus | str] = None,
+    status: AnnouncementStatus | str | None = None,
     limit: int = 50,
     offset: int = 0,
-    search: Optional[str] = None,
+    search: str | None = None,
 ) -> list[Announcement]:
     """공고 목록을 조회한다 (현재 버전 is_current=True 한정).
 
@@ -421,16 +527,14 @@ def list_announcements(
 
 def count_announcements(
     session: Session,
-    status: Optional[AnnouncementStatus | str] = None,
-    search: Optional[str] = None,
+    status: AnnouncementStatus | str | None = None,
+    search: str | None = None,
 ) -> int:
     """`list_announcements` 와 동일 조건의 전체 개수를 반환한다 (is_current=True 한정).
 
     목록 페이지네이션에서 '총 N건' 표시/페이지 수 계산에 사용한다.
     """
-    statement = select(func.count()).select_from(Announcement).where(
-        Announcement.is_current.is_(True)
-    )
+    statement = select(func.count()).select_from(Announcement).where(Announcement.is_current.is_(True))
 
     if status is not None:
         statement = statement.where(Announcement.status == _coerce_status(status))
@@ -449,19 +553,20 @@ def count_announcements(
     return int(session.execute(statement).scalar_one())
 
 
-
 # ── 첨부파일(Attachment) UPSERT 키 기준 허용 필드 ────────────────────────────────────
 # downloaded_at 은 NOT NULL 이므로 payload 에 항상 포함해야 한다.
-_ATTACHMENT_ALLOWED_FIELDS: frozenset[str] = frozenset({
-    "announcement_id",
-    "original_filename",
-    "stored_path",
-    "file_ext",
-    "file_size",
-    "download_url",
-    "sha256",
-    "downloaded_at",
-})
+_ATTACHMENT_ALLOWED_FIELDS: frozenset[str] = frozenset(
+    {
+        "announcement_id",
+        "original_filename",
+        "stored_path",
+        "file_ext",
+        "file_size",
+        "download_url",
+        "sha256",
+        "downloaded_at",
+    }
+)
 
 
 def upsert_attachment(
@@ -531,7 +636,7 @@ def upsert_attachment(
 def get_attachment_by_id(
     session: Session,
     attachment_id: int,
-) -> Optional[Attachment]:
+) -> Attachment | None:
     """내부 PK 로 첨부파일 레코드를 조회한다.
 
     Args:
@@ -548,7 +653,7 @@ def get_attachment_by_announcement_and_filename(
     session: Session,
     announcement_id: int,
     original_filename: str,
-) -> Optional[Attachment]:
+) -> Attachment | None:
     """공고 ID와 원본 파일명으로 첨부파일 레코드를 조회한다.
 
     존재하지 않으면 None 을 반환한다.

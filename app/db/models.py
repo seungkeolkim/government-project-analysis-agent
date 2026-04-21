@@ -25,9 +25,9 @@ Alembic 은 도입하지 않으며, 초기 DDL 은 `init_db.py` 의 `create_all`
 
 from __future__ import annotations
 
-import enum
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime
+from enum import StrEnum
+from typing import Any
 
 from sqlalchemy import (
     JSON,
@@ -54,7 +54,7 @@ def _utcnow() -> datetime:
 
     SQLAlchemy 의 default/onupdate 콜러블로 사용한다.
     """
-    return datetime.now(tz=timezone.utc)
+    return datetime.now(tz=UTC)
 
 
 class Base(DeclarativeBase):
@@ -65,7 +65,7 @@ class Base(DeclarativeBase):
     """
 
 
-class AnnouncementStatus(str, enum.Enum):
+class AnnouncementStatus(StrEnum):
     """사업공고의 접수 상태.
 
     값은 한글 원문을 그대로 사용하여 화면 표시와 1:1 매칭되도록 한다.
@@ -74,6 +74,82 @@ class AnnouncementStatus(str, enum.Enum):
     RECEIVING = "접수중"
     SCHEDULED = "접수예정"
     CLOSED = "마감"
+
+
+class CanonicalProject(Base):
+    """canonical 그룹 엔티티.
+
+    동일 과제가 여러 포털(IRIS·NTIS) 또는 같은 포털 내 재등록으로 복수의
+    Announcement row 로 수집될 때 이를 하나의 논리적 "과제"로 묶는 그룹 레코드.
+
+    canonical_key 는 UNIQUE 제약을 가지며, 공고번호(official scheme) 또는
+    제목·기관·마감연도 조합(fuzzy scheme) 중 하나로 구성된다.
+    구체적인 키 생성 로직은 `app.canonical.compute_canonical_key` 참조.
+
+    관계:
+        announcements: 이 그룹에 속한 Announcement row 목록 (1:N).
+    """
+
+    __tablename__ = "canonical_projects"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # 정규화된 canonical key — source 무관하게 유일. UNIQUE 인덱스.
+    canonical_key: Mapped[str] = mapped_column(
+        String(256),
+        nullable=False,
+        unique=True,
+        doc="정규화된 canonical key. 예: 'official:과학기술정보통신부공고제2026-0455호'",
+    )
+
+    # 키 생성 방식: 'official' 또는 'fuzzy'
+    key_scheme: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        doc="'official': 공고번호 기반, 'fuzzy': 제목·기관·연도 조합 fallback.",
+    )
+
+    # 대표 공고명 (최초 수집 시 저장)
+    representative_title: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="최초 수집된 공고 제목. 그룹의 대표 표시 문자열.",
+    )
+
+    # 대표 주관기관명 (최초 수집 시 저장)
+    representative_agency: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        doc="최초 수집된 주관기관명.",
+    )
+
+    # 최초 생성 시각
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        doc="canonical group 이 최초로 생성된 시각(UTC).",
+    )
+
+    # 최종 갱신 시각
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+        doc="레코드가 마지막으로 갱신된 시각(UTC).",
+    )
+
+    # 역관계: 이 그룹에 속한 Announcement row 목록
+    announcements: Mapped[list[Announcement]] = relationship(
+        "Announcement",
+        back_populates="canonical_project",
+        lazy="selectin",
+    )
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현을 반환한다."""
+        return f"<CanonicalProject id={self.id} scheme={self.key_scheme!r} key={self.canonical_key[:40]!r}>"
 
 
 class Announcement(Base):
@@ -123,7 +199,7 @@ class Announcement(Base):
     )
 
     # 주관/공고 기관명 (일부 공고는 미표기일 수 있어 nullable)
-    agency: Mapped[Optional[str]] = mapped_column(
+    agency: Mapped[str | None] = mapped_column(
         String(255),
         nullable=True,
         doc="주관/공고 기관명. 없으면 NULL.",
@@ -143,14 +219,14 @@ class Announcement(Base):
     )
 
     # 접수 시작 시각 (알 수 없으면 NULL)
-    received_at: Mapped[Optional[datetime]] = mapped_column(
+    received_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
         doc="접수 시작 시각(UTC). 공고에 명시된 경우에만 채워진다.",
     )
 
     # 접수 마감 시각
-    deadline_at: Mapped[Optional[datetime]] = mapped_column(
+    deadline_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
         index=True,
@@ -158,7 +234,7 @@ class Announcement(Base):
     )
 
     # 상세 페이지 URL
-    detail_url: Mapped[Optional[str]] = mapped_column(
+    detail_url: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,
         doc="공고 상세 페이지 URL.",
@@ -169,28 +245,28 @@ class Announcement(Base):
     #   rm -f data/db/app.sqlite3 && python -m app.cli run
 
     # 공고 상세 영역(div.tstyle_view)의 원본 HTML. 없으면 NULL.
-    detail_html: Mapped[Optional[str]] = mapped_column(
+    detail_html: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,
         doc="상세 페이지 본문 HTML(div.tstyle_view 섹션). detail_scraper 가 채운다.",
     )
 
     # 상세 HTML에서 추출한 정제 텍스트. 생략 가능하며 없으면 NULL.
-    detail_text: Mapped[Optional[str]] = mapped_column(
+    detail_text: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,
         doc="detail_html 에서 BeautifulSoup 으로 추출한 가독성 텍스트.",
     )
 
     # 상세 수집 완료 시각 (UTC)
-    detail_fetched_at: Mapped[Optional[datetime]] = mapped_column(
+    detail_fetched_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
         doc="detail_scraper 가 상세 페이지를 수집 완료한 시각(UTC).",
     )
 
     # 상세 수집 결과 상태: 'ok' / 'empty' / 'error'
-    detail_fetch_status: Mapped[Optional[str]] = mapped_column(
+    detail_fetch_status: Mapped[str | None] = mapped_column(
         String(16),
         nullable=True,
         doc="상세 수집 결과 상태. 'ok': 본문 확인, 'empty': 본문 없음, 'error': 수집 실패.",
@@ -234,8 +310,45 @@ class Announcement(Base):
         doc="현재 유효 버전 여부. False 이면 이력(구버전) 레코드.",
     )
 
+    # ── canonical identity 레이어 ────────────────────────────────────────────
+    # canonical_group_id: 이 공고가 속한 CanonicalProject 의 PK.
+    #   NULL 허용 — 아직 canonical 매칭이 완료되지 않은 레코드(backfill 전 기존 데이터).
+    #   이력(is_current=False) row 도 동일 canonical_group_id 를 보유한다.
+    #   new_version 분기에서 신규 row 생성 시 이전 row 의 canonical_group_id 를 승계하는
+    #   로직은 repository 계층(00013-5)에서 구현한다.
+    canonical_group_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("canonical_projects.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        doc="소속 CanonicalProject PK. NULL 이면 아직 canonical 매칭 미완료.",
+    )
+
+    # canonical_key: CanonicalProject.canonical_key 의 비정규화 복사본.
+    #   JOIN 없이 canonical_key 로 직접 조회할 때 사용한다.
+    canonical_key: Mapped[str | None] = mapped_column(
+        String(256),
+        nullable=True,
+        index=True,
+        doc="canonical_group 의 정규화 키(비정규화). JOIN 없는 조회용.",
+    )
+
+    # canonical_key_scheme: 'official' 또는 'fuzzy'.
+    canonical_key_scheme: Mapped[str | None] = mapped_column(
+        String(16),
+        nullable=True,
+        doc="'official' 또는 'fuzzy'. canonical_key 생성 방식.",
+    )
+
+    # canonical_project 로의 N:1 관계
+    canonical_project: Mapped[CanonicalProject | None] = relationship(
+        "CanonicalProject",
+        back_populates="announcements",
+        lazy="selectin",
+    )
+
     # 첨부파일과의 1:N 관계. 공고 삭제 시 첨부 레코드도 함께 삭제한다.
-    attachments: Mapped[list["Attachment"]] = relationship(
+    attachments: Mapped[list[Attachment]] = relationship(
         "Attachment",
         back_populates="announcement",
         cascade="all, delete-orphan",
@@ -294,21 +407,21 @@ class Attachment(Base):
     )
 
     # 바이트 단위 파일 크기 (알 수 없으면 NULL)
-    file_size: Mapped[Optional[int]] = mapped_column(
+    file_size: Mapped[int | None] = mapped_column(
         BigInteger,
         nullable=True,
         doc="바이트 단위 파일 크기. 다운로드 실패/부분 저장 시 NULL.",
     )
 
     # 원본 다운로드 URL (POST 기반 다운로드는 NULL 가능)
-    download_url: Mapped[Optional[str]] = mapped_column(
+    download_url: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,
         doc="원본 다운로드 URL. IRIS 가 POST 다운로드만 제공하면 NULL.",
     )
 
     # 파일 전체의 SHA-256 해시 (hex 64자)
-    sha256: Mapped[Optional[str]] = mapped_column(
+    sha256: Mapped[str | None] = mapped_column(
         String(64),
         nullable=True,
         doc="파일 전체의 SHA-256 해시(hex). 중복/변경 판정용.",
@@ -347,4 +460,5 @@ __all__ = [
     "Announcement",
     "AnnouncementStatus",
     "Attachment",
+    "CanonicalProject",
 ]
