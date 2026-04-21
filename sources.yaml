@@ -1,7 +1,40 @@
-# 공고 수집 소스 설정
+# 공고 수집 설정
+# 실행: docker compose --profile scrape run --rm scraper
+# CLI 인자 없이 이 파일과 .env 로 모든 동작을 제어한다.
+
+# ──────────────────────────────────────────────────────────────
+# 전역 수집 실행 설정
+# ──────────────────────────────────────────────────────────────
+scrape:
+  # 실행할 소스 ID 목록. 비어 있으면 아래 sources 중 enabled: true 인 소스 전체를 실행한다.
+  # 특정 소스만 실행하려면 예: active_sources: [NTIS]
+  active_sources: []
+
+  # 소스당 최대 페이지 수.
+  # null 이면 소스별 max_pages 설정 → 코드 default(10) 순으로 사용.
+  max_pages: null
+
+  # 소스당 최대 공고 수.
+  # null 이면 소스별 max_announcements 설정 → 코드 default(200) 순으로 사용.
+  max_announcements: null
+
+  # 상세 페이지 수집 건너뜀 여부 (true 이면 목록 적재만 수행)
+  skip_detail: false
+
+  # 첨부파일 다운로드 건너뜀 여부
+  skip_attachments: false
+
+  # DB 쓰기 건너뜀 여부 (수집 동작만 검증할 때 사용)
+  dry_run: false
+
+  # 로그 레벨 오버라이드. null 이면 .env 의 LOG_LEVEL 사용.
+  # log_level: DEBUG
+
+# ──────────────────────────────────────────────────────────────
+# 소스별 크롤링 설정
 # enabled: true 인 소스만 크롤러 실행 시 활성화된다.
 # 각 소스 id 는 app/sources/constants.py 의 SOURCE_TYPE_* 상수와 일치해야 한다.
-
+# ──────────────────────────────────────────────────────────────
 sources:
   - id: IRIS
     enabled: true
@@ -18,7 +51,7 @@ sources:
     base_url: https://www.ntis.go.kr/rndgate/eg/un/ra/mng.do
     request_delay_sec: 2.0
     # 마감 공고가 74,809건에 달하므로 기본값을 보수적으로 설정한다 (탐사 §1).
-    # 필요 시 CLI --max-pages / --max-announcements 로 일시 확장 가능.
+    # 필요 시 최상단 scrape.max_pages / scrape.max_announcements 또는 이 값을 수정하여 일시 확장 가능.
     max_pages: 5
     max_announcements: 100
     statuses:

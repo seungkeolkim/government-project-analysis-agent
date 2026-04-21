@@ -69,6 +69,9 @@ from app.config import Settings, get_settings
 # IRIS 기본 도메인
 IRIS_BASE_DOMAIN: str = "https://www.iris.go.kr"
 
+# 목록 뷰 페이지 경로 (HTTP Referer 헤더 설정에 사용 — sources.yaml 의 IRIS base_url 과 일치)
+LIST_VIEW_PATH: str = "/contents/retrieveBsnsAncmBtinSituListView.do"
+
 # 목록 AJAX 엔드포인트 (View 없는 버전 = 순수 데이터 API)
 LIST_API_PATH: str = "/contents/retrieveBsnsAncmBtinSituList.do"
 
@@ -146,11 +149,16 @@ async def _sleep_with_jitter(base_delay_sec: float) -> None:
     await asyncio.sleep(safe_base + jitter_sec)
 
 
-def _build_http_client(settings: Settings) -> httpx.AsyncClient:
+def _build_http_client(settings: Settings, list_view_url: str) -> httpx.AsyncClient:
     """IRIS 요청용 httpx.AsyncClient를 생성한다.
 
     - Referer와 Accept-Language로 브라우저 요청처럼 위장한다.
     - 타임아웃은 connect/read 분리 적용한다.
+
+    Args:
+        settings:      전역 설정 (user_agent 등).
+        list_view_url: Referer 헤더에 설정할 목록 뷰 페이지 URL.
+                       sources.yaml 의 IRIS base_url 에서 가져온다.
     """
     effective_user_agent = settings.user_agent or DEFAULT_USER_AGENT
     timeout = httpx.Timeout(
@@ -165,7 +173,7 @@ def _build_http_client(settings: Settings) -> httpx.AsyncClient:
         "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "X-Requested-With": "XMLHttpRequest",
-        "Referer": settings.base_url,
+        "Referer": list_view_url,
         "Origin": IRIS_BASE_DOMAIN,
     }
     return httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=True)
@@ -335,6 +343,7 @@ def _resolve_statuses(statuses: Sequence[str]) -> list[tuple[str, str]]:
 async def scrape_list(
     *,
     settings: Settings | None = None,
+    list_view_url: str | None = None,
     max_pages: int = DEFAULT_MAX_PAGES,
     max_announcements: int | None = None,
     statuses: Sequence[str] = DEFAULT_STATUSES,
@@ -356,6 +365,9 @@ async def scrape_list(
 
     Args:
         settings:          주입할 Settings. 없으면 get_settings()를 사용한다.
+        list_view_url:     HTTP Referer 에 설정할 IRIS 목록 뷰 페이지 URL.
+                           sources.yaml 의 IRIS base_url 을 전달한다.
+                           None 이면 IRIS_BASE_DOMAIN + LIST_VIEW_PATH 로 구성한다.
         max_pages:         상태별 순회 안전 상한. 기본값 DEFAULT_MAX_PAGES.
         max_announcements: 전체 누적 건수 상한. None이면 상한 없음.
         statuses:          수집할 상태 한글 라벨 목록.
@@ -369,6 +381,7 @@ async def scrape_list(
         httpx.RequestError:    재시도 한도 내에서도 연결에 실패한 경우.
     """
     effective_settings = settings or get_settings()
+    effective_list_view_url = list_view_url or f"{IRIS_BASE_DOMAIN}{LIST_VIEW_PATH}"
     base_request_delay_sec = effective_settings.request_delay_sec
     safe_max_pages = max(int(max_pages), 1)
 
@@ -381,7 +394,7 @@ async def scrape_list(
     # 상한 도달 여부 플래그 — 내부 루프가 외부 루프를 종료하는 데 사용한다.
     limit_reached = False
 
-    async with _build_http_client(effective_settings) as client:
+    async with _build_http_client(effective_settings, effective_list_view_url) as client:
         for status_index, (status_label, status_code) in enumerate(status_pairs):
             if limit_reached:
                 break
@@ -483,6 +496,7 @@ async def scrape_list(
 __all__ = [
     "scrape_list",
     "IRIS_BASE_DOMAIN",
+    "LIST_VIEW_PATH",
     "LIST_API_PATH",
     "DETAIL_VIEW_PATH",
     "STATUS_FILTER_PARAM",

@@ -45,8 +45,15 @@ RUN playwright install --with-deps chromium
 #    compose 의 ./data 볼륨이 이를 덮어쓰지만, 단독 컨테이너 실행 시에도 동작하도록 준비한다.
 RUN mkdir -p /app/data/db /app/data/downloads
 
+# 6) 엔트리포인트 스크립트.
+#    sources.yaml per-run copy 격리 및 SOURCES_CONFIG_PATH 주입을 담당한다.
+COPY docker/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
 # FastAPI 로컬 웹 UI 노출 포트.
 EXPOSE 8000
+
+ENTRYPOINT ["/app/entrypoint.sh"]
 
 # 기본 CMD: FastAPI 로컬 웹 UI 기동.
 CMD ["uvicorn", "app.web.main:app", "--host", "0.0.0.0", "--port", "8000"]

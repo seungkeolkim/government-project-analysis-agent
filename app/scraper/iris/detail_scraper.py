@@ -36,24 +36,25 @@ from app.scraper.iris.list_scraper import (
     HTTP_CONNECT_TIMEOUT_SEC,
     HTTP_READ_TIMEOUT_SEC,
     IRIS_BASE_DOMAIN,
+    LIST_VIEW_PATH,
     PAGE_JITTER_RANGE_SEC,
     RETRY_BACKOFF_BASE_SEC,
-)
-
-# 상세 페이지 Referer: 목록 뷰 URL (브라우저처럼 보이기 위해)
-DETAIL_REFERER_URL: str = (
-    "https://www.iris.go.kr/contents/retrieveBsnsAncmBtinSituListView.do"
 )
 
 # 상세 본문을 감싸는 섹션 CSS 선택자
 DETAIL_CONTENT_SELECTOR: str = "div.tstyle_view"
 
 
-def _build_detail_http_client(settings: Settings) -> httpx.AsyncClient:
+def _build_detail_http_client(settings: Settings, list_view_url: str) -> httpx.AsyncClient:
     """상세 페이지 조회용 httpx.AsyncClient 를 생성한다.
 
     목록 스크래퍼와 동일한 User-Agent/Accept-Language 를 사용하되,
-    Accept 는 HTML 문서용으로, Referer 는 목록 페이지 URL 로 설정한다.
+    Accept 는 HTML 문서용으로, Referer 는 목록 뷰 페이지 URL 로 설정한다.
+
+    Args:
+        settings:      전역 설정 (user_agent 등).
+        list_view_url: Referer 헤더에 설정할 IRIS 목록 뷰 페이지 URL.
+                       sources.yaml 의 IRIS base_url 에서 가져온다.
     """
     effective_user_agent = settings.user_agent or DEFAULT_USER_AGENT
     timeout = httpx.Timeout(
@@ -66,7 +67,7 @@ def _build_detail_http_client(settings: Settings) -> httpx.AsyncClient:
         "User-Agent": effective_user_agent,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
-        "Referer": DETAIL_REFERER_URL,
+        "Referer": list_view_url,
     }
     return httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=True)
 
@@ -163,6 +164,7 @@ async def scrape_detail(
     detail_url: str,
     *,
     settings: Optional[Settings] = None,
+    list_view_url: Optional[str] = None,
 ) -> dict[str, Any]:
     """IRIS 공고 상세 페이지를 수집해 결과 dict 를 반환한다.
 
@@ -170,8 +172,11 @@ async def scrape_detail(
     `scrape_detail_with_client` 를 사용해 클라이언트를 재사용한다.
 
     Args:
-        detail_url: 공고 상세 페이지 전체 URL (https://...).
-        settings:   주입할 Settings. 없으면 get_settings() 를 사용한다.
+        detail_url:    공고 상세 페이지 전체 URL (https://...).
+        settings:      주입할 Settings. 없으면 get_settings() 를 사용한다.
+        list_view_url: HTTP Referer 에 설정할 IRIS 목록 뷰 페이지 URL.
+                       sources.yaml 의 IRIS base_url 을 전달한다.
+                       None 이면 IRIS_BASE_DOMAIN + LIST_VIEW_PATH 로 구성한다.
 
     Returns:
         {
@@ -182,7 +187,8 @@ async def scrape_detail(
         }
     """
     effective_settings = settings or get_settings()
-    async with _build_detail_http_client(effective_settings) as client:
+    effective_list_view_url = list_view_url or f"{IRIS_BASE_DOMAIN}{LIST_VIEW_PATH}"
+    async with _build_detail_http_client(effective_settings, effective_list_view_url) as client:
         return await scrape_detail_with_client(client, detail_url)
 
 
@@ -260,5 +266,4 @@ __all__ = [
     "scrape_detail",
     "scrape_detail_with_client",
     "DETAIL_CONTENT_SELECTOR",
-    "DETAIL_REFERER_URL",
 ]
