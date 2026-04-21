@@ -1,7 +1,7 @@
-"""사업공고 스크래퍼 오케스트레이터 CLI.
+"""사업공고 스크래퍼 오케스트레이터.
 
-sources.yaml 에 정의된 활성 소스를 순회하여 공고 목록·상세·첨부파일을 수집하고 DB 에 적재한다.
-각 소스는 `app/scraper/registry.get_adapter()` 가 반환하는 어댑터로 실행된다.
+sources.yaml 의 scrape 섹션과 sources 목록을 읽어 공고 수집을 실행한다.
+모든 실행 파라미터는 sources.yaml 과 .env 를 통해 제어하며, CLI 인자는 사용하지 않는다.
 
 현재 구현 상태:
     - IRIS: 완전 구현 (list + detail + attachment 수집). 접수예정·접수중·마감 3개 상태 수집.
@@ -21,31 +21,20 @@ sources.yaml 에 정의된 활성 소스를 순회하여 공고 목록·상세·
     상태만 변경된 경우 in-place UPDATE, title/deadline_at/agency 도 함께 바뀐 경우 이력 보존
     (기존 row 봉인 + 신규 INSERT). docs/status_transition_todo.md 참고.
 
-활성화된 흐름:
-    (1) init_db 로 스키마 보장 (기존 DB 재사용, create_all 멱등)
-    (2) sources.yaml 에서 활성 소스 목록 로드
-    (3) 소스별로 어댑터를 생성하고 목록·상세·첨부 수집 후 DB 적재
-    (4) 소스 단위 예외 격리 — 한 소스 실패가 다른 소스를 중단시키지 않는다
+실행 설정 (sources.yaml 의 scrape: 섹션):
+    active_sources: 실행할 소스 ID 목록. 비어 있으면 enabled=true 소스 전체 실행.
+    max_pages:       소스당 최대 페이지 수 (null → 소스별 설정 → 코드 default 10).
+    max_announcements: 소스당 최대 공고 수 (null → 소스별 설정 → 코드 default 200).
+    skip_detail:     True 면 상세 수집 건너뜀.
+    skip_attachments: True 면 첨부파일 다운로드 건너뜀.
+    dry_run:         True 면 DB 쓰기 건너뜀.
+    log_level:       로그 레벨 오버라이드 (null → .env LOG_LEVEL).
 
-호출 형태:
-    python -m app.cli run [--max-pages N] [--max-announcements N]
-                          [--skip-detail] [--skip-attachments] [--dry-run]
-                          [--log-level LEVEL] [--source SOURCE_ID]
-
-옵션:
-    --max-pages N          각 소스에서 순회할 최대 페이지 수 (양의 정수).
-                           미지정 → sources.yaml 소스별 설정 → 코드 default(10).
-    --max-announcements N  소스당 UPSERT 할 최대 공고 수 (양의 정수).
-                           미지정 → sources.yaml 소스별 설정 → 코드 default(200).
-    --skip-detail          상세 페이지 수집을 건너뛴다(목록 적재만 수행).
-    --skip-attachments     첨부파일 다운로드를 건너뛴다. 목록·상세만 수집한다.
-    --dry-run              DB 쓰기를 건너뛰고 수집만 검증한다.
-    --log-level LEVEL      로그 레벨 일회성 오버라이드(기본: settings.log_level).
-    --source SOURCE_ID     sources.yaml 의 enabled 설정을 무시하고 지정 소스만 실행.
-                           예: --source NTIS (stub 동작 확인용)
+실행 형태:
+    docker compose --profile scrape run --rm scraper
 
 우선순위:
-    CLI 인자 > sources.yaml 소스별 설정 > 코드 내부 default (max_pages=10, max_announcements=200)
+    sources.yaml scrape 섹션 > sources.yaml 소스별 설정 > 코드 내부 default
 
 종료 코드:
     0  : 정상(처리한 공고 수가 0 건이어도 정상 종료)
@@ -55,7 +44,6 @@ sources.yaml 에 정의된 활성 소스를 순회하여 공고 목록·상세·
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import sys
 from datetime import datetime, timezone
@@ -78,8 +66,12 @@ from app.logging_setup import configure_logging
 from app.scraper.attachment_downloader import scrape_attachments_for_announcement
 from app.scraper.base import BaseSourceAdapter
 from app.scraper.registry import get_adapter
-from app.sources.config_schema import SourceConfig, load_sources_config
-from app.sources.constants import SOURCE_TYPE_IRIS
+from app.sources.config_schema import (
+    ScrapeRunConfig,
+    SourceConfig,
+    SourcesConfig,
+    load_sources_config,
+)
 
 # ──────────────────────────────────────────────────────────────
 # 상수
@@ -279,8 +271,8 @@ async def _run_source_announcements(
         settings:          전역 설정 (request_delay_sec 등).
         max_pages:         목록 페이지 순회 상한 (양의 정수).
         max_announcements: 소스당 최대 처리 공고 수 (양의 정수).
-        skip_detail:       True 면 모든 상세 수집을 건너뛴다(--skip-detail 플래그).
-        skip_attachments:  True 면 첨부파일 다운로드를 건너뛴다(--skip-attachments 플래그).
+        skip_detail:       True 면 모든 상세 수집을 건너뛴다 (sources.yaml scrape.skip_detail).
+        skip_attachments:  True 면 첨부파일 다운로드를 건너뛴다 (sources.yaml scrape.skip_attachments).
         dry_run:           True 면 DB 쓰기를 건너뛴다.
 
     Returns:
@@ -560,65 +552,51 @@ def _log_upsert_action(
 
 
 def _resolve_active_sources(
-    source_override: Optional[str],
-    settings: Settings,
+    scrape_config: ScrapeRunConfig,
+    sources_cfg: SourcesConfig,
 ) -> list[SourceConfig]:
     """실행할 소스 목록을 결정한다.
 
-    - source_override 가 지정되면 해당 소스만 실행 (enabled 설정 무시).
-    - 지정하지 않으면 sources.yaml 의 enabled=true 소스를 실행한다.
-    - sources.yaml 이 없거나 활성 소스가 없으면 IRIS 를 fallback 으로 사용한다.
+    - scrape_config.active_sources 가 지정되면 해당 소스만 실행 (enabled 설정 무시).
+    - 비어 있으면 sources.yaml 의 enabled=True 소스를 모두 실행한다.
+    - sources.yaml 에 없는 소스 ID 는 ERROR 로그 후 건너뛴다.
     """
-    sources_cfg = load_sources_config()
+    if scrape_config.active_sources:
+        result = []
+        for source_id in scrape_config.active_sources:
+            source_config = sources_cfg.get_source(source_id)
+            if source_config is None:
+                logger.error(
+                    "sources.yaml 에 '{}' 소스가 없습니다. 이 소스는 건너뜁니다.",
+                    source_id,
+                )
+            else:
+                result.append(source_config)
+        return result
 
-    if source_override:
-        # yaml 에서 해당 소스를 찾고, 없으면 최소 설정으로 생성
-        source_config = sources_cfg.get_source(source_override)
-        if source_config is None:
-            logger.warning(
-                "sources.yaml 에 '{}' 소스가 없습니다. base_url=settings.base_url 로 임시 생성합니다.",
-                source_override,
-            )
-            source_config = SourceConfig(id=source_override, base_url=settings.base_url)
-        return [source_config]
-
-    active_sources = sources_cfg.get_enabled_sources()
-    if not active_sources:
-        logger.warning(
-            "sources.yaml 에 활성 소스가 없습니다. IRIS fallback 을 사용합니다."
-        )
-        fallback = sources_cfg.get_source(SOURCE_TYPE_IRIS)
-        if fallback is None:
-            fallback = SourceConfig(id=SOURCE_TYPE_IRIS, base_url=settings.base_url)
-        return [fallback]
-
-    return active_sources
+    return sources_cfg.get_enabled_sources()
 
 
 async def _orchestrate(
     *,
     settings: Settings,
-    max_pages: Optional[int],
-    max_announcements: Optional[int],
-    skip_detail: bool,
-    skip_attachments: bool,
-    dry_run: bool,
-    source_override: Optional[str],
+    scrape_config: ScrapeRunConfig,
+    sources_cfg: SourcesConfig,
 ) -> dict[str, Any]:
     """소스 목록 → 소스별 공고 수집 → DB 적재 흐름을 수행하고 통계 dict 를 반환한다.
 
-    max_pages / max_announcements 는 CLI 에서 명시된 경우 Optional[int] 로 전달된다.
-    각 소스 루프에서 CLI > sources.yaml > 코드 default 우선순위로 유효 상한을 결정한다.
+    max_pages / max_announcements 는 sources.yaml scrape 섹션에서 읽는다.
+    각 소스 루프에서 scrape 섹션 > sources.yaml 소스별 > 코드 default 우선순위로 유효 상한을 결정한다.
 
     부트스트랩 실패(init_db)는 호출자로 전파한다.
     소스 단위 예외는 격리 — 한 소스 실패가 다른 소스를 중단시키지 않는다.
     """
     # (1) DB 스키마 보장
-    logger.info("DB 초기화 시작 — dry_run={}", dry_run)
+    logger.info("DB 초기화 시작 — dry_run={}", scrape_config.dry_run)
     init_db()
 
     # (2) 활성 소스 목록 결정
-    active_sources = _resolve_active_sources(source_override, settings)
+    active_sources = _resolve_active_sources(scrape_config, sources_cfg)
     logger.info("활성 소스: {}", [s.id for s in active_sources])
 
     # (3) 소스별 실행 및 통계 집계
@@ -634,14 +612,14 @@ async def _orchestrate(
     total_attachment_skipped = 0
 
     for source_config in active_sources:
-        # CLI > sources.yaml > 코드 default 우선순위로 유효 상한 결정
+        # scrape 섹션 > sources.yaml 소스별 > 코드 default 우선순위로 유효 상한 결정
         effective_max_pages: int = (
-            max_pages if max_pages is not None
+            scrape_config.max_pages if scrape_config.max_pages is not None
             else (source_config.max_pages if source_config.max_pages is not None
                   else CODE_DEFAULT_MAX_PAGES)
         )
         effective_max_announcements: int = (
-            max_announcements if max_announcements is not None
+            scrape_config.max_announcements if scrape_config.max_announcements is not None
             else (source_config.max_announcements if source_config.max_announcements is not None
                   else CODE_DEFAULT_MAX_ANNOUNCEMENTS)
         )
@@ -658,9 +636,9 @@ async def _orchestrate(
                     settings=settings,
                     max_pages=effective_max_pages,
                     max_announcements=effective_max_announcements,
-                    skip_detail=skip_detail,
-                    skip_attachments=skip_attachments,
-                    dry_run=dry_run,
+                    skip_detail=scrape_config.skip_detail,
+                    skip_attachments=scrape_config.skip_attachments,
+                    dry_run=scrape_config.dry_run,
                 )
         except Exception as exc:
             logger.exception(
@@ -715,135 +693,42 @@ async def _orchestrate(
 
 
 # ──────────────────────────────────────────────────────────────
-# argparse / CLI 진입점
+# 진입점
 # ──────────────────────────────────────────────────────────────
 
 
-def _positive_int(value: str) -> int:
-    """argparse type 콜백 — 1 이상의 정수만 허용한다."""
-    try:
-        int_value = int(value)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"정수가 아닙니다: {value!r}")
-    if int_value <= 0:
-        raise argparse.ArgumentTypeError(f"1 이상의 정수여야 합니다: {int_value}")
-    return int_value
-
-
-def _build_arg_parser() -> argparse.ArgumentParser:
-    """CLI 인자 파서를 생성한다."""
-    root_parser = argparse.ArgumentParser(
-        prog="python -m app.cli",
-        description="사업공고 목록 수집 및 DB 적재 CLI",
-    )
-    subparsers = root_parser.add_subparsers(dest="subcommand", required=True)
-
-    run_parser = subparsers.add_parser(
-        "run",
-        help="공고 목록을 수집하고 DB 에 적재한다.",
-    )
-    run_parser.add_argument(
-        "--max-pages",
-        type=_positive_int,
-        default=None,
-        metavar="N",
-        help=(
-            "소스당 목록 순회 최대 페이지 수 (1 이상 정수). "
-            f"미지정 시 sources.yaml 설정 → 코드 default({CODE_DEFAULT_MAX_PAGES}) 순으로 사용."
-        ),
-    )
-    run_parser.add_argument(
-        "--max-announcements",
-        type=_positive_int,
-        default=None,
-        metavar="N",
-        help=(
-            "소스당 UPSERT 최대 공고 수 (1 이상 정수). "
-            f"미지정 시 sources.yaml 설정 → 코드 default({CODE_DEFAULT_MAX_ANNOUNCEMENTS}) 순으로 사용."
-        ),
-    )
-    run_parser.add_argument(
-        "--skip-detail",
-        action="store_true",
-        help="상세 페이지 수집을 건너뛴다(목록 적재만 수행).",
-    )
-    run_parser.add_argument(
-        "--skip-attachments",
-        action="store_true",
-        help=(
-            "첨부파일 다운로드를 건너뛴다. "
-            "목록·상세 수집은 정상 실행되며 파일 다운로드 단계만 생략한다."
-        ),
-    )
-    run_parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="DB 쓰기를 건너뛰고 수집만 검증한다.",
-    )
-    run_parser.add_argument(
-        "--log-level",
-        default=None,
-        choices=("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"),
-        help="이번 실행에만 적용할 로그 레벨(기본: settings.log_level).",
-    )
-    run_parser.add_argument(
-        "--source",
-        default=None,
-        metavar="SOURCE_ID",
-        help=(
-            "sources.yaml 의 enabled 설정을 무시하고 지정 소스만 실행한다. "
-            "예: --source IRIS, --source NTIS (stub 동작 확인용)"
-        ),
-    )
-
-    return root_parser
-
-
-def _resolve_settings(log_level_override: Optional[str]) -> Settings:
-    """현재 실행에 사용할 Settings 를 결정한다.
-
-    --log-level 이 지정된 경우 Settings 의 log_level 을 in-place 로 덮어쓴다.
-    원본 환경/.env 파일은 변경하지 않는다.
-    """
-    settings = get_settings()
-    if log_level_override:
-        settings.log_level = log_level_override.upper()
-    return settings
-
-
-async def _async_main(argv: list[str]) -> int:
-    """async 진입점.
+async def _async_main() -> int:
+    """async 진입점. sources.yaml 의 scrape 설정을 읽어 수집을 실행한다.
 
     Returns:
         프로세스 종료 코드. 0 이 정상.
     """
-    parser = _build_arg_parser()
-    parsed_args = parser.parse_args(argv)
+    sources_cfg = load_sources_config()
+    scrape_config = sources_cfg.scrape
 
-    settings = _resolve_settings(parsed_args.log_level)
+    settings = get_settings()
+    # sources.yaml 의 log_level 이 지정된 경우 in-place 로 덮어쓴다.
+    if scrape_config.log_level:
+        settings.log_level = scrape_config.log_level
     configure_logging(settings)
     settings.ensure_runtime_paths()
 
     logger.info(
-        "scrape 실행 시작: max_pages={} max_announcements={} "
-        "skip_detail={} skip_attachments={} dry_run={} source={}",
-        parsed_args.max_pages,
-        parsed_args.max_announcements,
-        parsed_args.skip_detail,
-        parsed_args.skip_attachments,
-        parsed_args.dry_run,
-        parsed_args.source or "(sources.yaml 활성 소스)",
+        "scrape 실행 시작: active_sources={} max_pages={} max_announcements={} "
+        "skip_detail={} skip_attachments={} dry_run={}",
+        scrape_config.active_sources or "(enabled 소스 전체)",
+        scrape_config.max_pages,
+        scrape_config.max_announcements,
+        scrape_config.skip_detail,
+        scrape_config.skip_attachments,
+        scrape_config.dry_run,
     )
 
     try:
         summary = await _orchestrate(
             settings=settings,
-            max_pages=parsed_args.max_pages,
-            max_announcements=parsed_args.max_announcements,
-            skip_detail=parsed_args.skip_detail,
-            skip_attachments=parsed_args.skip_attachments,
-            dry_run=parsed_args.dry_run,
-            source_override=parsed_args.source,
+            scrape_config=scrape_config,
+            sources_cfg=sources_cfg,
         )
     except Exception as bootstrap_exc:
         logger.exception(
@@ -883,7 +768,7 @@ def main() -> None:
     SIGINT(Ctrl+C) 를 받으면 종료 코드 130 으로 종료한다.
     """
     try:
-        exit_code = asyncio.run(_async_main(sys.argv[1:]))
+        exit_code = asyncio.run(_async_main())
     except KeyboardInterrupt:
         logger.warning("사용자 중단(SIGINT) 감지 — 종료 코드 130")
         sys.exit(130)

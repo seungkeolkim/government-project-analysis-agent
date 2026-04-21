@@ -16,12 +16,15 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.config import PROJECT_ROOT
 
 # sources.yaml 기본 위치
 DEFAULT_SOURCES_CONFIG_PATH: Path = PROJECT_ROOT / "sources.yaml"
+
+# per-run 복사본 경로를 주입할 환경변수 이름 (00016-3 entrypoint copy 격리에서 사용)
+SOURCES_CONFIG_PATH_ENV_VAR: str = "SOURCES_CONFIG_PATH"
 
 
 class SourceCredentials(BaseModel):
@@ -79,10 +82,10 @@ class SourceConfig(BaseModel):
     """요청 간 최소 지연(초). 차단 방지 목적."""
 
     max_pages: Optional[int] = Field(default=None, gt=0)
-    """소스당 최대 페이지 수. None 이면 CLI 인자 또는 코드 default 를 따른다."""
+    """소스당 최대 페이지 수. None 이면 scrape.max_pages 또는 코드 default 를 따른다."""
 
     max_announcements: Optional[int] = Field(default=None, gt=0)
-    """소스당 최대 공고 수. None 이면 CLI 인자 또는 코드 default 를 따른다."""
+    """소스당 최대 공고 수. None 이면 scrape.max_announcements 또는 코드 default 를 따른다."""
 
     statuses: list[str] = Field(
         default_factory=lambda: ["접수예정", "접수중", "마감"]
@@ -112,10 +115,59 @@ class SourceConfig(BaseModel):
         return SourceCredentials.from_env(self.id)
 
 
+class ScrapeRunConfig(BaseModel):
+    """전역 수집 실행 설정 (sources.yaml 의 scrape: 섹션).
+
+    모든 실행 파라미터는 CLI 인자 대신 이 스키마를 통해 제어한다.
+    docker compose --profile scrape run --rm scraper 실행 시 이 값이 적용된다.
+    """
+
+    active_sources: list[str] = Field(default_factory=list)
+    """실행할 소스 ID 목록. 비어 있으면 enabled=True 인 소스 전체를 실행한다.
+    예: [NTIS] → NTIS 만 실행, [] → enabled 소스 전체 실행."""
+
+    max_pages: Optional[int] = Field(default=None, gt=0)
+    """소스당 최대 페이지 수. None 이면 소스별 설정 → 코드 default(10) 순으로 사용."""
+
+    max_announcements: Optional[int] = Field(default=None, gt=0)
+    """소스당 최대 공고 수. None 이면 소스별 설정 → 코드 default(200) 순으로 사용."""
+
+    skip_detail: bool = False
+    """True 면 상세 페이지 수집을 건너뛴다 (목록 적재만 수행)."""
+
+    skip_attachments: bool = False
+    """True 면 첨부파일 다운로드를 건너뛴다. 목록·상세 수집은 정상 실행된다."""
+
+    dry_run: bool = False
+    """True 면 DB 쓰기를 건너뛴다 (수집만 검증할 때 사용)."""
+
+    log_level: Optional[str] = None
+    """로그 레벨 오버라이드 (DEBUG/INFO/WARNING/ERROR/CRITICAL).
+    None 이면 .env 의 LOG_LEVEL 을 사용한다."""
+
+    @field_validator("log_level")
+    @classmethod
+    def _normalize_log_level(cls, value: Optional[str]) -> Optional[str]:
+        """로그 레벨을 대문자로 정규화하고 허용된 값인지 검증한다."""
+        if value is None:
+            return None
+        allowed = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+        normalized = value.upper()
+        if normalized not in allowed:
+            raise ValueError(
+                f"log_level 은 {sorted(allowed)} 중 하나여야 합니다. 입력값: {value!r}"
+            )
+        return normalized
+
+
 class SourcesConfig(BaseModel):
     """sources.yaml 파일 최상위 스키마."""
 
+    scrape: ScrapeRunConfig = Field(default_factory=ScrapeRunConfig)
+    """전역 수집 실행 설정."""
+
     sources: list[SourceConfig] = Field(default_factory=list)
+    """소스별 크롤링 설정 목록."""
 
     def get_enabled_sources(self) -> list[SourceConfig]:
         """활성화된 소스 목록을 반환한다."""
@@ -132,16 +184,24 @@ class SourcesConfig(BaseModel):
 def load_sources_config(path: Path | str | None = None) -> SourcesConfig:
     """YAML 파일을 읽어 SourcesConfig 를 반환한다.
 
-    path 가 None 이면 DEFAULT_SOURCES_CONFIG_PATH 를 사용한다.
+    path 우선순위:
+    1. 인자로 전달된 path
+    2. 환경변수 SOURCES_CONFIG_PATH (per-run 복사본 경로 주입에 사용)
+    3. 프로젝트 루트 기본값 (sources.yaml)
+
     파일이 없거나 비어 있으면 빈 SourcesConfig 를 반환한다(예외를 일으키지 않는다).
 
     Args:
-        path: sources.yaml 경로. None 이면 프로젝트 루트 기본값 사용.
+        path: sources.yaml 경로. None 이면 환경변수 → 프로젝트 루트 기본값 순으로 결정.
 
     Returns:
         파싱된 SourcesConfig 인스턴스.
     """
-    config_path = Path(path) if path else DEFAULT_SOURCES_CONFIG_PATH
+    if path is None:
+        env_path = os.environ.get(SOURCES_CONFIG_PATH_ENV_VAR)
+        config_path = Path(env_path) if env_path else DEFAULT_SOURCES_CONFIG_PATH
+    else:
+        config_path = Path(path)
 
     if not config_path.exists():
         return SourcesConfig()
@@ -158,7 +218,9 @@ def load_sources_config(path: Path | str | None = None) -> SourcesConfig:
 __all__ = [
     "SourceCredentials",
     "SourceConfig",
+    "ScrapeRunConfig",
     "SourcesConfig",
     "load_sources_config",
     "DEFAULT_SOURCES_CONFIG_PATH",
+    "SOURCES_CONFIG_PATH_ENV_VAR",
 ]

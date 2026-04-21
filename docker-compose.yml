@@ -1,11 +1,12 @@
-# IRIS 사업공고 스크래퍼 로컬 실행용 docker compose 정의.
+# 사업공고 스크래퍼 로컬 실행용 docker compose 정의.
 #
 # 서비스 구성:
 #   - app:     FastAPI 기반 로컬 웹 UI. `docker compose up app` 으로 기동한다.
 #              포트 8000 을 호스트에 노출한다.
-#   - scraper: httpx 기반 목록 수집 CLI. 장시간 상주 프로세스가 아니라
+#   - scraper: 목록·상세·첨부 수집 워커. 장시간 상주 프로세스가 아니라
 #              필요할 때만 1회 실행하는 형태이므로 `profiles: [scrape]` 로 분리한다.
 #              실행: docker compose --profile scrape run --rm scraper
+#              실행 파라미터는 sources.yaml 의 scrape: 섹션에서 제어한다.
 #
 # 볼륨 구성:
 #   - ./data:/app/data  : SQLite DB 파일을 호스트에 영속 보관.
@@ -57,12 +58,9 @@ services:
     volumes:
       - ./data:/app/data
       - ./app:/app/app
-    # '접수중' 목록을 수집하고 DB에 적재한다.
-    # docker compose run 뒤에 CLI 인자를 바로 붙일 수 있다:
-    #   docker compose --profile scrape run --rm scraper --max-pages 10 --max-announcements 200
-    # entrypoint 를 list 형태로 명시해야 compose 가 추가 인자를 올바르게 append 한다.
+    # 수집 파라미터는 sources.yaml 의 scrape: 섹션에서 제어한다.
+    # CLI 인자는 사용하지 않으며, 설정 변경 후 run 을 다시 실행하면 반영된다.
     entrypoint:
       - python
       - -m
       - app.cli
-      - run
