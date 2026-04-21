@@ -7,6 +7,10 @@ sources:
     enabled: true
     base_url: https://www.iris.go.kr/contents/retrieveBsnsAncmBtinSituListView.do
     request_delay_sec: 1.5
+    statuses:
+      - 접수예정
+      - 접수중
+      - 마감
 
   - id: NTIS
     enabled: false
