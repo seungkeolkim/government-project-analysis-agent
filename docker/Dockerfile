@@ -34,6 +34,12 @@ COPY app ./app
 COPY alembic.ini ./
 COPY alembic ./alembic
 
+# 3b) sources.yaml.template 복사.
+#     entrypoint.sh 가 sources.yaml 마운트 없이 기동될 때 폴백으로 사용한다.
+#     실제 sources.yaml 은 compose 의 바인드 마운트가 주입하며, 이 template 은
+#     마운트가 누락된 경우에만 활성화된다.
+COPY sources.yaml.template ./
+
 # 4) 파이썬 의존성 및 패키지 editable 설치.
 #    editable(-e) 로 설치해야 compose 의 ./app 바인드 마운트와 함께
 #    호스트의 소스 변경이 즉시 반영된다.

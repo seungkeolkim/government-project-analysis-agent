@@ -1,3 +1,15 @@
+# ──────────────────────────────────────────────────────────────
+# [TEMPLATE] 이 파일은 템플릿입니다.
+#
+# 초기 설정 방법:
+#   cp -n sources.yaml.template sources.yaml
+#   또는
+#   sh scripts/bootstrap_sources.sh
+#
+# sources.yaml 은 .gitignore 대상이므로 브랜치 전환 시 로컬 수정이 유지됩니다.
+# 이 파일(sources.yaml.template)은 커밋되어 있으며, 로컬 수정 시 덮어쓰지 마세요.
+# ──────────────────────────────────────────────────────────────
+
 # 공고 수집 설정
 # 실행: docker compose --profile scrape run --rm scraper
 # CLI 인자 없이 이 파일과 .env 로 모든 동작을 제어한다.
