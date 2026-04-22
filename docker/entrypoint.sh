@@ -17,6 +17,12 @@ if [ -f "$SOURCES_YAML_MOUNT" ]; then
     export SOURCES_CONFIG_PATH="$_tmpdir/sources.yaml"
 fi
 
+# alembic 명령을 직접 실행할 때는 migration 자동 적용을 건너뛴다
+# (예: docker compose run ... alembic upgrade head — 재귀 방지)
+if [ "${1:-}" != "alembic" ]; then
+    alembic upgrade head || exit 1
+fi
+
 if [ "$#" -gt 0 ]; then
     exec "$@"
 else

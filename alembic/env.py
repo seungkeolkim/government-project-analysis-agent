@@ -27,10 +27,13 @@ alembic_config = context.config
 if alembic_config.config_file_name is not None:
     fileConfig(alembic_config.config_file_name)
 
-# 앱 설정에서 DB URL 을 읽어 alembic config 에 주입한다.
-# alembic.ini 의 sqlalchemy.url 은 비워두고 이 코드가 override 한다.
+# DB URL 주입 전략:
+# - alembic CLI 단독 실행: alembic.ini 의 sqlalchemy.url 이 비어 있으므로 get_settings().db_url 로 채운다.
+# - init_db._build_alembic_config(engine) 경유: 호출자가 이미 URL 을 set_main_option 으로 주입했으므로
+#   덮어쓰지 않는다 (테스트용 엔진·임시 DB 에서도 올바른 URL 이 유지된다).
 _settings = get_settings()
-alembic_config.set_main_option("sqlalchemy.url", _settings.db_url)
+if not alembic_config.get_main_option("sqlalchemy.url"):
+    alembic_config.set_main_option("sqlalchemy.url", _settings.db_url)
 
 # autogenerate 가 ORM 모델과 실제 DB 를 비교할 때 사용하는 메타데이터
 target_metadata = Base.metadata
@@ -42,7 +45,8 @@ def _build_connect_args() -> dict[str, object]:
     SQLite 는 멀티스레드 환경(FastAPI + 스크래퍼)을 위해
     check_same_thread=False 가 필요하다.
     """
-    if _settings.db_url.startswith("sqlite"):
+    url = alembic_config.get_main_option("sqlalchemy.url") or _settings.db_url
+    if url.startswith("sqlite"):
         return {"check_same_thread": False}
     return {}
 
@@ -73,8 +77,9 @@ def run_migrations_online() -> None:
     render_as_batch=True 로 SQLite의 ALTER TABLE 호환성을 보장한다.
     NullPool 을 사용해 migration 완료 후 즉시 연결을 반환한다.
     """
+    db_url = alembic_config.get_main_option("sqlalchemy.url") or _settings.db_url
     connectable = create_engine(
-        _settings.db_url,
+        db_url,
         # migration 전용 연결 — 풀링 불필요
         poolclass=pool.NullPool,
         connect_args=_build_connect_args(),

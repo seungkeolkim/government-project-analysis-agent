@@ -83,12 +83,13 @@ def upgrade() -> None:
         sa.Column("raw_metadata", sa.JSON(), nullable=False),
         sa.Column("scraped_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        # is_current: server_default="1" — models.py 및 migration.py step-3 과 일치
+        # is_current: server_default="true" — SQLite 3.23+ 및 Postgres 양쪽에서 동작
+        # sa.text("1") 은 Postgres BOOLEAN 타입에서 허용되지 않으므로 "true" 사용
         sa.Column(
             "is_current",
             sa.Boolean(),
             nullable=False,
-            server_default=sa.text("1"),
+            server_default=sa.text("true"),
         ),
         sa.Column("canonical_group_id", sa.Integer(), nullable=True),
         sa.Column("canonical_key", sa.String(256), nullable=True),

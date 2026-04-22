@@ -50,8 +50,10 @@ def _build_alembic_config(engine: Engine) -> AlembicConfig:
     """
     alembic_ini_path = PROJECT_ROOT / "alembic.ini"
     config = AlembicConfig(str(alembic_ini_path))
-    # engine.url 을 문자열로 변환 — password masking 되지 않은 원본 URL 필요
-    config.set_main_option("sqlalchemy.url", str(engine.url))
+    # SQLAlchemy 2.x 에서 str(engine.url) 은 비밀번호를 *** 로 마스킹한다.
+    # Alembic 이 실제로 접속할 수 있으려면 원본 URL 이 필요하므로
+    # render_as_string(hide_password=False) 를 사용한다.
+    config.set_main_option("sqlalchemy.url", engine.url.render_as_string(hide_password=False))
     return config
 
 
