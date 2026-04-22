@@ -1,12 +1,17 @@
 """DB 스키마 마이그레이션 헬퍼.
 
-Alembic 없이 컬럼 존재 여부를 확인하여 필요한 DDL 을 실행한다.
-멱등성 보장: 이미 존재하는 컬럼/이름을 재생성하지 않는다.
+.. deprecated::
+    Phase 0 (task 00017) 에서 Alembic 을 도입함으로써 이 함수는 더 이상
+    `init_db.py` 에서 호출되지 않는다.
+    이후 모든 스키마 변경은 `alembic/versions/` 아래 migration 파일로 관리한다.
+    이 모듈은 히스토리 보존 목적으로 삭제하지 않는다.
 
-`init_db.py` 의 `Base.metadata.create_all` 호출 **이전** 에 실행해야
-기존 DB 를 새 스키마로 자동 업그레이드할 수 있다.
+원래 역할 (참고):
+    Alembic 없이 컬럼 존재 여부를 확인하여 필요한 DDL 을 실행했다.
+    6단계의 수작업 DDL 은 현재 운영 DB 에 모두 적용 완료된 상태이며,
+    그 최종 스키마가 `alembic/versions/*_baseline_initial_schema.py` 에 캡처되어 있다.
 
-적용 순서:
+적용 이력 (완료):
     1. iris_announcement_id → source_announcement_id 컬럼 이름 변경
     2. source_type VARCHAR(32) NOT NULL DEFAULT 'IRIS' 컬럼 추가
     3. is_current BOOLEAN NOT NULL DEFAULT 1 컬럼 추가 + 기존 row 초기화
