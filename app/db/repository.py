@@ -11,7 +11,8 @@
     `upsert_announcement` 는 `UpsertResult` 를 반환하며, CLI 오케스트레이터가
     상세 수집 여부를 결정하는 데 사용한다.
 
-    비교 대상 필드: title, status, deadline_at, agency
+    1차 감지 비교 대상 필드 (_CHANGE_DETECTION_FIELDS):
+      title, status, deadline_at, agency
     - title, status, deadline_at: 공고를 특정하는 핵심 3종
     - agency: 주관 기관 변경도 의미 있는 내용 변화로 판정
     - received_at: 미포함 — 접수예정 상태에서 수집 시 미기재 후 보완되는 경우가 많아,
@@ -28,6 +29,8 @@
                needs_detail_scraping=True.
                IRIS 접수예정/접수중/마감 3개 상태 수집이 활성화된 이후 정상 실행 경로.
                예: 접수예정으로 등록된 공고가 다음 수집 시 접수중으로 재등장하는 경우.
+               ※ 리셋(아래) 대상 아님 — 사용자 원문 "status 단독 전이는 기존
+                 in-place UPDATE 유지".
             ※ [NTIS 등 신규 크롤러 구현 시]:
                새 소스 어댑터를 추가할 때 status 값을 AnnouncementStatus Enum 으로
                정규화하는 로직을 반드시 포함해야 한다.
@@ -35,6 +38,24 @@
             → 기존 row is_current=False 봉인 + 신규 row INSERT (is_current=True),
                action="new_version", needs_detail_scraping=True, changed_fields 원본 유지.
                이력이 row 단위로 누적된다.
+               ★ 사용자 라벨링 리셋(_reset_user_state_on_content_change) 을 동일
+                 트랜잭션에서 호출한다 — 봉인된 old row 의 읽음 상태 초기화 +
+                 canonical 의 관련성 판정 이관.
+
+2차 변경 감지 (첨부 sha256 기반):
+    사용자 원문: "UPSERT 시점에 첨부 sha256 모름. 첨부 다운로드 후 2차 변경 감지
+    추가. 2차 감지 시 is_current 순환 + 리셋. 1차는 유지."
+    - `compute_attachment_signature` / `snapshot_announcement_attachments` 로
+      before/after signature 를 캡처.
+    - `detect_attachment_changes(before, after)` 로 변경 여부 판정.
+    - 변경이면 `reapply_version_with_reset(session, announcement_id)` 호출 — 2차 경로는
+      status 단독 변경 분기에서는 트리거되지 않는다 (호출자가 보장).
+
+트랜잭션 규약 (사용자 라벨링 atomic 보장):
+    리셋(_reset_user_state_on_content_change) 은 UPSERT/재배치와 **동일 session**
+    에서 수행된다. 따라서 리셋 중 예외가 발생하고 호출자가 rollback 하면
+    UPSERT 도 함께 롤백된다 — "내용은 새 row 인데 읽음은 그대로" 같은 오염
+    상태가 남지 않는다.
 
 payload 규약:
     - `upsert_announcement(session, payload)` 의 `payload` 는
@@ -45,18 +66,39 @@ payload 규약:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 from loguru import logger
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.canonical import compute_canonical_key
-from app.db.models import Announcement, AnnouncementStatus, Attachment, CanonicalProject
+from app.db.models import (
+    Announcement,
+    AnnouncementStatus,
+    AnnouncementUserState,
+    Attachment,
+    CanonicalProject,
+    RelevanceJudgment,
+    RelevanceJudgmentHistory,
+)
 from app.sources.config_schema import load_sources_config
+
+# RelevanceJudgmentHistory.archive_reason 의 허용값(app-level 상수).
+# DB CHECK 대신 여기서 관리 — 향후 관리자 이관·admin override 추가 시 확장한다.
+_ARCHIVE_REASON_CONTENT_CHANGED: str = "content_changed"
+_ARCHIVE_REASON_USER_OVERWRITE: str = "user_overwrite"
+_ARCHIVE_REASON_ADMIN_OVERRIDE: str = "admin_override"
+_ALLOWED_ARCHIVE_REASONS: frozenset[str] = frozenset(
+    {
+        _ARCHIVE_REASON_CONTENT_CHANGED,
+        _ARCHIVE_REASON_USER_OVERWRITE,
+        _ARCHIVE_REASON_ADMIN_OVERRIDE,
+    }
+)
 
 # 공고에서 사용자가 payload 로 덮어쓰지 말아야 하는 자동 관리 컬럼들.
 _ANNOUNCEMENT_PROTECTED_FIELDS: frozenset[str] = frozenset({"id", "scraped_at", "updated_at"})
@@ -359,23 +401,27 @@ def _normalize_for_comparison(value: Any) -> Any:
 def _detect_changes(
     existing: Announcement,
     clean_payload: dict[str, Any],
+    comparison_fields: Iterable[str] = _CHANGE_DETECTION_FIELDS,
 ) -> frozenset[str]:
     """기존 레코드와 신규 payload 를 비교해 변경된 필드 이름의 집합을 반환한다.
 
-    비교 대상 필드: title, status, deadline_at, agency (_CHANGE_DETECTION_FIELDS 참조).
+    기본 비교 대상: title, status, deadline_at, agency (_CHANGE_DETECTION_FIELDS).
+    `comparison_fields` 인자로 비교 필드 튜플을 교체할 수 있어, 2차 감지나
+    향후 확장 시나리오에서 동일 비교 로직을 재사용할 수 있다.
     payload 에 해당 키가 없으면 해당 필드는 변경 없음으로 판정한다.
     양측 값은 _normalize_for_comparison 으로 정규화한 뒤 비교하여
     datetime tz-naive/aware 불일치 및 문자열 공백 차이로 인한 false-positive 를 제거한다.
 
     Args:
-        existing:      DB 에서 조회한 기존 Announcement 인스턴스 (is_current=True).
-        clean_payload: _filter_payload + status 정규화가 완료된 payload dict.
+        existing:          DB 에서 조회한 기존 Announcement 인스턴스 (is_current=True).
+        clean_payload:     _filter_payload + status 정규화가 완료된 payload dict.
+        comparison_fields: 비교할 필드 이름 목록. 기본값은 1차 감지용 4필드.
 
     Returns:
         변경된 필드 이름의 frozenset. 변경이 없으면 빈 frozenset.
     """
     changed: set[str] = set()
-    for field_name in _CHANGE_DETECTION_FIELDS:
+    for field_name in comparison_fields:
         if field_name not in clean_payload:
             continue
         existing_val = _normalize_for_comparison(getattr(existing, field_name))
@@ -383,6 +429,407 @@ def _detect_changes(
         if existing_val != new_val:
             changed.add(field_name)
     return frozenset(changed)
+
+
+# ── 첨부 signature / 2차 변경 감지 ───────────────────────────────────────────
+# 사용자 원문: "목록→UPSERT→상세→첨부. UPSERT 시점에 첨부 sha256 모름.
+# 해결: 첨부 다운로드 후 2차 변경 감지 추가. 2차 감지 시 is_current 순환 + 리셋.
+# 1차는 유지."
+#
+# 흐름 (CLI 오케스트레이터 책임, subtask 00019-4):
+#   1. 1차 upsert_announcement(session, payload) 호출 (기존 경로 유지)
+#   2. 상세 수집 + 첨부 다운로드 전, compute_attachment_signature(announcement) 로
+#      '다운로드 이전' signature 스냅샷
+#   3. upsert_attachment 반복 호출 (sha256/크기/경로 최신화)
+#   4. session.refresh(announcement, ['attachments']) 후 동일 함수로
+#      'after' signature 획득
+#   5. detect_attachment_changes(before, after) 로 변경 여부 판정
+#   6. 변경이면 reapply_version_with_reset(session, announcement.id,
+#                                          changed_fields=frozenset({'attachments'}))
+#      호출 — is_current 순환 + 사용자 라벨링 리셋을 동일 트랜잭션에서 수행
+
+@dataclass(frozen=True)
+class AttachmentSignature:
+    """공고 첨부의 비교 가능 스냅샷.
+
+    Attributes:
+        count: 전체 첨부 개수 (sha256 유무와 무관).
+        sha256s: 확정된 sha256 hex 문자열 집합. sha256 이 None 인 첨부는
+                 여기서 제외한다 — 다운로드 전 단계에서는 해시가 없을 수 있다.
+        pending_without_sha256: sha256 이 아직 None 인 첨부 개수.
+                                '해시는 모르지만 row 는 존재' 상태를 구분한다.
+    """
+
+    count: int
+    sha256s: frozenset[str]
+    pending_without_sha256: int = 0
+
+
+@dataclass(frozen=True)
+class AttachmentChange:
+    """2차 감지 결과 — before/after AttachmentSignature 비교 산출물.
+
+    Attributes:
+        added: after 에만 있는 sha256 (새로 다운로드된 첨부).
+        removed: before 에만 있는 sha256 (이전 세트에서 사라진 첨부).
+        count_changed: 전체 개수가 달라졌는지.
+
+    `changed` 프로퍼티가 True 이면 2차 리셋 트리거 대상.
+    """
+
+    added: frozenset[str]
+    removed: frozenset[str]
+    count_changed: bool
+
+    @property
+    def changed(self) -> bool:
+        """첨부 기반으로 내용 변경이 감지되었는지 여부를 반환한다."""
+        return bool(self.added) or bool(self.removed) or self.count_changed
+
+
+def compute_attachment_signature(announcement: Announcement) -> AttachmentSignature:
+    """Announcement 인스턴스의 현재 첨부 상태로부터 signature 를 계산한다.
+
+    `announcement.attachments` 관계를 사용한다. 관계가 아직 로드되지 않았으면
+    SQLAlchemy 가 필요한 시점에 쿼리를 발행한다(`lazy='selectin'` 기본).
+    sha256 이 None 인 첨부는 `sha256s` 집합에서 제외하되 개수는 count 에 반영한다.
+
+    Args:
+        announcement: 첨부를 로드할 수 있는 Announcement 인스턴스.
+
+    Returns:
+        AttachmentSignature. 비교에는 `detect_attachment_changes` 를 사용한다.
+    """
+    attachments = list(announcement.attachments or [])
+    sha_set: set[str] = set()
+    pending = 0
+    for attachment in attachments:
+        if attachment.sha256:
+            sha_set.add(attachment.sha256)
+        else:
+            pending += 1
+    return AttachmentSignature(
+        count=len(attachments),
+        sha256s=frozenset(sha_set),
+        pending_without_sha256=pending,
+    )
+
+
+def snapshot_announcement_attachments(
+    session: Session,
+    announcement_id: int,
+) -> AttachmentSignature:
+    """DB 에서 직접 첨부를 조회해 signature 를 만든다.
+
+    ORM 캐시를 우회하고 최신 DB 상태를 집계하므로, 2차 감지의 'after' 스냅샷용으로
+    쓰기 적합하다. 현재/이력 announcement 모두 대상이 될 수 있도록 is_current 조건은
+    걸지 않는다 (호출자가 announcement_id 선택 책임).
+
+    Args:
+        session: 호출자 세션.
+        announcement_id: 대상 Announcement PK.
+
+    Returns:
+        AttachmentSignature.
+    """
+    rows = session.execute(
+        select(Attachment.sha256).where(Attachment.announcement_id == announcement_id)
+    ).all()
+    total = len(rows)
+    sha_set: set[str] = set()
+    pending = 0
+    for (sha,) in rows:
+        if sha:
+            sha_set.add(sha)
+        else:
+            pending += 1
+    return AttachmentSignature(
+        count=total,
+        sha256s=frozenset(sha_set),
+        pending_without_sha256=pending,
+    )
+
+
+def detect_attachment_changes(
+    before: AttachmentSignature,
+    after: AttachmentSignature,
+) -> AttachmentChange:
+    """첨부 signature before/after 를 비교해 2차 감지 결과를 반환한다.
+
+    순수 함수이며 session 을 필요로 하지 않는다. sha256 기반 집합 차집합으로
+    added/removed 를 계산한다. sha256 이 결정되기 전인 첨부는 sha256s 집합에
+    포함되지 않으므로 added/removed 에도 드러나지 않는다 — count_changed 로만
+    감지된다.
+
+    상위 로직 주의:
+        status 단독 변경 분기((c))에서는 이 함수를 호출하지 않는다 — 사용자 원문
+        "status 단독 전이는 기존 in-place UPDATE 유지" 를 따른다.
+
+    Args:
+        before: 첨부 다운로드 이전 signature.
+        after: 첨부 다운로드 이후 signature.
+
+    Returns:
+        AttachmentChange. `.changed` 가 True 이면 2차 리셋 트리거.
+    """
+    return AttachmentChange(
+        added=after.sha256s - before.sha256s,
+        removed=before.sha256s - after.sha256s,
+        count_changed=(before.count != after.count),
+    )
+
+
+# ── 사용자 라벨링 리셋 / 2차 감지용 is_current 순환 ───────────────────────────
+
+def _reset_user_state_on_content_change(
+    session: Session,
+    old_announcement_id: int,
+    *,
+    archive_reason: str = _ARCHIVE_REASON_CONTENT_CHANGED,
+) -> dict[str, int]:
+    """내용 변경으로 봉인된 announcement 의 사용자 라벨링을 리셋한다.
+
+    동작 (모두 호출자 세션 = 동일 트랜잭션 안에서 실행):
+      (a) AnnouncementUserState(announcement_id=old) 전체를 is_read=False,
+          read_at=NULL 로 UPDATE. updated_at 은 onupdate 로 자동 갱신.
+      (b) old_announcement 의 canonical_group_id 를 찾아, 해당 canonical 의
+          RelevanceJudgment 를 RelevanceJudgmentHistory 로 복사 후 원본 삭제.
+          archive_reason 기본 'content_changed', archived_at=_utcnow.
+      (c) FavoriteEntry 는 건드리지 않는다 — 사용자 원문 "FavoriteEntry 유지".
+
+    경계 케이스:
+      - old_announcement 가 DB 에 없으면 조용히 no-op (경고 로그만).
+      - canonical_group_id 가 NULL 이면 (b) 단계 스킵 — 이관할 대상 자체가 없다.
+      - User 가 아직 아무도 없거나 대상 레코드가 없으면 rowcount=0 으로 안전 no-op.
+
+    호출 규약 — 사용자 원문 "변경 시 리셋 (status 단독 제외)":
+      - (d) new_version 분기에서는 반드시 호출한다.
+      - 2차 감지(첨부 기반 변경) reapply 경로에서도 호출한다.
+      - (c) status_transitioned 분기에서는 호출하지 않는다.
+
+    트랜잭션 경계:
+      session.flush() 까지만 수행한다. commit 은 호출자 책임이며,
+      이 함수 실행 도중이나 이후 예외가 발생하면 호출자가 rollback 을 걸면
+      UPSERT(봉인+INSERT) 와 리셋이 함께 롤백된다 — atomic 보장.
+
+    Args:
+        session: 호출자 세션.
+        old_announcement_id: 봉인된(is_current=False) Announcement.id.
+        archive_reason: RelevanceJudgmentHistory.archive_reason 값.
+                       _ALLOWED_ARCHIVE_REASONS 중 하나여야 한다.
+
+    Returns:
+        {"announcement_user_states_reset": N,
+         "relevance_judgments_archived": M} 지표 dict. 감사/로그용.
+
+    Raises:
+        ValueError: archive_reason 이 허용값이 아닐 때.
+    """
+    if archive_reason not in _ALLOWED_ARCHIVE_REASONS:
+        raise ValueError(
+            f"archive_reason 은 {sorted(_ALLOWED_ARCHIVE_REASONS)} 중 하나여야 합니다. "
+            f"입력: {archive_reason!r}"
+        )
+
+    # ── (a) AnnouncementUserState 읽음 리셋 ─────────────────────────────────
+    # User 테이블이 비어있거나 매칭 row 가 없으면 rowcount=0 으로 자연스럽게 no-op.
+    read_reset_result = session.execute(
+        update(AnnouncementUserState)
+        .where(AnnouncementUserState.announcement_id == old_announcement_id)
+        .values(is_read=False, read_at=None)
+    )
+    read_reset_count = int(read_reset_result.rowcount or 0)
+
+    # ── (b) RelevanceJudgment → History 이관 ────────────────────────────────
+    old_announcement = session.get(Announcement, old_announcement_id)
+    if old_announcement is None:
+        logger.warning(
+            "리셋 대상 Announcement 가 DB 에 없음: id={} — (b) 단계 스킵",
+            old_announcement_id,
+        )
+        session.flush()
+        return {
+            "announcement_user_states_reset": read_reset_count,
+            "relevance_judgments_archived": 0,
+        }
+
+    canonical_project_id = old_announcement.canonical_group_id
+    if canonical_project_id is None:
+        # canonical 미연결 공고 → RelevanceJudgment 는 FK 구조상 존재할 수 없으므로 스킵.
+        session.flush()
+        return {
+            "announcement_user_states_reset": read_reset_count,
+            "relevance_judgments_archived": 0,
+        }
+
+    judgments = list(
+        session.execute(
+            select(RelevanceJudgment).where(
+                RelevanceJudgment.canonical_project_id == canonical_project_id
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    archived_count = 0
+    archive_time = _utcnow_for_reset()
+    for judgment in judgments:
+        # 원본 판정 메타를 그대로 복사 — decided_at 은 원본 값 유지.
+        history_row = RelevanceJudgmentHistory(
+            canonical_project_id=judgment.canonical_project_id,
+            user_id=judgment.user_id,
+            verdict=judgment.verdict,
+            reason=judgment.reason,
+            decided_at=judgment.decided_at,
+            archived_at=archive_time,
+            archive_reason=archive_reason,
+        )
+        session.add(history_row)
+        session.delete(judgment)
+        archived_count += 1
+
+    # flush 로 DB 에러(FK 위반 등)를 즉시 드러나게 한다.
+    session.flush()
+
+    if read_reset_count or archived_count:
+        logger.info(
+            "사용자 라벨링 리셋: announcement_id={} canonical={} "
+            "reset_states={} archived_judgments={} reason={}",
+            old_announcement_id,
+            canonical_project_id,
+            read_reset_count,
+            archived_count,
+            archive_reason,
+        )
+
+    return {
+        "announcement_user_states_reset": read_reset_count,
+        "relevance_judgments_archived": archived_count,
+    }
+
+
+def _utcnow_for_reset() -> datetime:
+    """리셋 트랜잭션 안에서 사용할 현재 UTC 시각을 반환한다.
+
+    models._utcnow 와 동일하지만 테스트가 monkeypatch 하기 쉽도록 여기서 래핑한다.
+    """
+    return datetime.now(tz=UTC)
+
+
+def reapply_version_with_reset(
+    session: Session,
+    announcement_id: int,
+    *,
+    changed_fields: frozenset[str] = frozenset({"attachments"}),
+    archive_reason: str = _ARCHIVE_REASON_CONTENT_CHANGED,
+) -> UpsertResult:
+    """is_current 순환 + 사용자 라벨링 리셋을 수행한다 (2차 감지 실행 헬퍼).
+
+    사용자 원문의 "2차 감지 시 is_current 순환 + 리셋" 을 하나의 atomic 헬퍼로
+    구현한다. 1차 감지의 (d) new_version 분기와 동일한 시맨틱이지만, payload 가
+    아니라 **이미 DB 에 있는 현재 row 의 값 그대로** 신규 row 를 복제한다 —
+    첨부 sha256 변경 등 '공고 본문은 같지만 첨부가 바뀐' 케이스에 적합하다.
+
+    동작:
+      1. announcement_id 의 현재 is_current=True row 조회. 없으면 ValueError.
+      2. 기존 row 를 is_current=False 로 봉인.
+      3. 동일 필드값으로 신규 Announcement row INSERT (is_current=True).
+         canonical 3종(group_id/key/key_scheme) 과 detail 관련 필드도 승계.
+         scraped_at 은 신규 시각, updated_at 은 onupdate 로 자동.
+      4. `_reset_user_state_on_content_change(session, old_id)` 호출 —
+         읽음 리셋 + 관련성 판정 이관.
+
+    주의 — 첨부(Attachment) 재배치는 이 함수의 책임이 아니다:
+      Attachment.announcement_id FK 가 old row 에 걸려 있다. is_current=False 로
+      봉인만 하면 첨부는 old row 에 남는다. 2차 감지 호출자(CLI, subtask 00019-4)
+      가 정책에 따라 첨부 재배치(update) 를 수행하거나 그대로 둔다.
+
+    (c) status_transitioned 분기에서는 이 함수를 호출하지 않는다.
+
+    Args:
+        session: 호출자 세션.
+        announcement_id: 현재 is_current=True 여야 하는 Announcement.id.
+        changed_fields: UpsertResult.changed_fields 에 기록할 값.
+                        2차 감지 기본값은 {'attachments'}.
+        archive_reason: RelevanceJudgmentHistory.archive_reason. 기본 'content_changed'.
+
+    Returns:
+        UpsertResult(action='new_version', changed_fields=..., needs_detail_scraping=False).
+        2차 감지 경로에서는 상세는 이미 있으므로 False.
+
+    Raises:
+        ValueError: announcement_id 의 is_current=True row 가 없을 때.
+    """
+    existing = session.execute(
+        select(Announcement).where(
+            Announcement.id == announcement_id,
+            Announcement.is_current.is_(True),
+        )
+    ).scalar_one_or_none()
+
+    if existing is None:
+        raise ValueError(
+            f"reapply 대상 announcement(id={announcement_id}) 의 is_current=True "
+            f"row 를 찾을 수 없습니다."
+        )
+
+    old_announcement_id = existing.id
+
+    # 승계할 필드 값을 먼저 캡처한다 — is_current=False 로 바꾸기 전.
+    snapshot: dict[str, Any] = {
+        "source_announcement_id": existing.source_announcement_id,
+        "source_type": existing.source_type,
+        "title": existing.title,
+        "agency": existing.agency,
+        "status": existing.status,
+        "received_at": existing.received_at,
+        "deadline_at": existing.deadline_at,
+        "detail_url": existing.detail_url,
+        "detail_html": existing.detail_html,
+        "detail_text": existing.detail_text,
+        "detail_fetched_at": existing.detail_fetched_at,
+        "detail_fetch_status": existing.detail_fetch_status,
+        "raw_metadata": dict(existing.raw_metadata or {}),
+    }
+    inherited_canonical_group_id = existing.canonical_group_id
+    inherited_canonical_key = existing.canonical_key
+    inherited_canonical_key_scheme = existing.canonical_key_scheme
+
+    # 기존 row 봉인
+    existing.is_current = False
+
+    # 신규 row INSERT — 동일 필드 + 승계 canonical + is_current=True
+    new_announcement = Announcement(**snapshot, is_current=True)
+    session.add(new_announcement)
+    session.flush()
+
+    new_announcement.canonical_group_id = inherited_canonical_group_id
+    new_announcement.canonical_key = inherited_canonical_key
+    new_announcement.canonical_key_scheme = inherited_canonical_key_scheme
+    session.flush()
+
+    logger.debug(
+        "reapply_version_with_reset: old_id={} new_id={} changed_fields={}",
+        old_announcement_id,
+        new_announcement.id,
+        sorted(changed_fields),
+    )
+
+    # 동일 트랜잭션에서 사용자 라벨링 리셋
+    _reset_user_state_on_content_change(
+        session,
+        old_announcement_id=old_announcement_id,
+        archive_reason=archive_reason,
+    )
+
+    return UpsertResult(
+        announcement=new_announcement,
+        action="new_version",
+        # 2차 경로는 이미 상세/첨부가 채워진 상태에서 호출되므로 재수집 불필요.
+        needs_detail_scraping=False,
+        changed_fields=frozenset(changed_fields),
+    )
 
 
 def upsert_announcement(session: Session, payload: Mapping[str, Any]) -> UpsertResult:
@@ -487,6 +934,7 @@ def upsert_announcement(session: Session, payload: Mapping[str, Any]) -> UpsertR
     inherited_canonical_group_id = existing.canonical_group_id
     inherited_canonical_key = existing.canonical_key
     inherited_canonical_key_scheme = existing.canonical_key_scheme
+    old_announcement_id = existing.id
 
     existing.is_current = False
     # 신규 row 에는 payload 값 + is_current=True 를 설정한다.
@@ -509,6 +957,17 @@ def upsert_announcement(session: Session, payload: Mapping[str, Any]) -> UpsertR
     else:
         # 구 row 에 canonical 이 없었으면 신규 row 에 대해 새로 계산한다.
         _apply_canonical(session, new_announcement, ancm_no=ancm_no, clean_payload=clean_payload)
+
+    # ── 사용자 라벨링 리셋 (동일 트랜잭션) ────────────────────────────────────
+    # 사용자 원문: "변경 시 리셋 (status 단독 제외)".
+    # (c) status_transitioned 분기는 여기 도달하지 않으므로 리셋이 불필요.
+    # 이 리셋은 UPSERT 와 같은 session 에서 수행되어, 호출자가 commit 하기 전
+    # 예외가 발생하면 INSERT/UPDATE 도 함께 롤백된다 (atomic 경계 보장).
+    _reset_user_state_on_content_change(
+        session,
+        old_announcement_id=old_announcement_id,
+        archive_reason=_ARCHIVE_REASON_CONTENT_CHANGED,
+    )
 
     return UpsertResult(
         announcement=new_announcement,
@@ -1097,9 +1556,15 @@ def get_attachments_by_announcement(
 __all__ = [
     "UpsertResult",
     "CanonicalGroupRow",
+    "AttachmentSignature",
+    "AttachmentChange",
     "upsert_announcement",
     "upsert_announcement_detail",
     "recompute_canonical_with_ancm_no",
+    "compute_attachment_signature",
+    "snapshot_announcement_attachments",
+    "detect_attachment_changes",
+    "reapply_version_with_reset",
     "get_announcement_by_id",
     "list_announcements",
     "count_announcements",
