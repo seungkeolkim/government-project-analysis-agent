@@ -24,6 +24,7 @@ dependencies = [
 
     # 데이터 모델 / DB
     "SQLAlchemy>=2.0,<3.0",
+    "alembic>=1.13,<2.0",
 
     # 웹 서버 (로컬 열람용)
     "fastapi>=0.110,<1.0",

@@ -275,13 +275,30 @@ docker compose --profile scrape run --rm scraper
 
 > **주의**: 삭제 전에 반드시 백업을 먼저 생성한다.
 
-### 스키마 마이그레이션
+### 스키마 마이그레이션 (Alembic)
 
-신규 코드로 업데이트한 후 `init_db` 가 자동으로 마이그레이션을 적용한다.
-수동으로 스키마 상태만 확인하려면:
+신규 코드로 업데이트한 후 컨테이너 기동 시 **자동으로** Alembic migration 이 적용된다.
+별도 명령이 필요 없다.
+
+**적용 전략 (자동 분기)**
+
+| DB 상태 | 전략 | 효과 |
+|---------|------|------|
+| 빈 DB | `upgrade head` | baseline 스키마 전체 생성 |
+| 기존 DB (Alembic 도입 전) | `stamp head` | 데이터 무변경, 리비전 레코드만 삽입 |
+| Alembic 관리 DB | `upgrade head` | 신규 migration 적용, 없으면 no-op |
+
+수동으로 Alembic 상태를 확인하려면:
 
 ```bash
-docker compose run --rm scraper python -m app.db.init_db
+# 현재 적용된 리비전 확인
+docker compose run --rm scraper alembic current
+
+# 적용 이력 확인
+docker compose run --rm scraper alembic history --verbose
+
+# 수동 upgrade (자동 적용 실패 시)
+docker compose run --rm scraper alembic upgrade head
 ```
 
 ### canonical backfill (일회성)
@@ -341,11 +358,11 @@ ORDER BY id LIMIT 10;
 
 ### DB 스키마 오류 (`no such column: is_current`)
 
-기존 DB에 마이그레이션이 적용되지 않은 경우다.
-다음 명령으로 마이그레이션을 강제 실행한다:
+기존 DB에 Alembic migration 이 적용되지 않은 경우다.
+다음 명령으로 수동 적용한다:
 
 ```bash
-docker compose run --rm scraper python -m app.db.init_db
+docker compose run --rm scraper alembic upgrade head
 ```
 
 그래도 해결되지 않으면 DB를 백업 후 삭제해 새로 생성한다.
@@ -407,7 +424,7 @@ WHERE announcement_id = {공고_id};
 ### 업데이트 후 확인
 
 - [ ] `docker compose build` 로 이미지 재빌드
-- [ ] `docker compose run --rm scraper python -m app.db.init_db` 로 마이그레이션 적용 확인
+- [ ] `docker compose run --rm scraper alembic current` 로 리비전이 `head` 임을 확인
 - [ ] `sources.yaml` 에서 `scrape.dry_run: true`, `scrape.max_pages: 1` 설정 후
       `docker compose --profile scrape run --rm scraper` 로 기본 동작 확인
 - [ ] 웹 UI 목록 페이지 정상 렌더링 확인
