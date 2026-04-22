@@ -29,10 +29,15 @@
 cp .env.example .env
 # 필요 시 .env 편집 (DB_URL, REQUEST_DELAY_SEC 등)
 
-# 2) 이미지 빌드
+# 2) sources.yaml 생성 (template 에서 복사, 이미 존재하면 덮어쓰지 않음)
+sh scripts/bootstrap_sources.sh
+# 필요 시 sources.yaml 편집 (수집 소스·페이지 수 등)
+# sources.yaml 은 .gitignore 대상 — 브랜치 전환 시 로컬 수정이 보존된다
+
+# 3) 이미지 빌드
 docker compose build
 
-# 3) 웹 UI 기동
+# 4) 웹 UI 기동
 docker compose up app
 # → http://localhost:8000 접속
 ```
@@ -452,6 +457,25 @@ sqlite3 ./data/db/app.sqlite3 "DELETE FROM announcements WHERE is_current = 0;"
 ---
 
 ## 트러블슈팅
+
+### 기동 시 "sources.yaml 마운트 없음 — template 기본값으로 기동합니다" 경고가 출력된다
+
+호스트 루트에 `sources.yaml` 이 없는 경우 entrypoint 가 이미지 내 template 을 폴백으로 사용해
+계속 기동한다. 수집 파라미터를 실제 설정으로 반영하려면 아래 순서로 진행한다:
+
+```bash
+# 1) sources.yaml 생성
+sh scripts/bootstrap_sources.sh
+
+# 2) 필요 시 편집
+vim sources.yaml   # 또는 선호하는 에디터
+
+# 3) 컨테이너 재기동 (바인드 마운트가 갱신된 파일을 읽는다)
+docker compose restart app
+```
+
+> `sources.yaml` 은 `.gitignore` 대상이므로 저장소에 포함되지 않는다.
+> 처음 clone 한 후 또는 `./data` 를 초기화한 후에 이 경고가 나타날 수 있다.
 
 ### 공고 목록이 비어 있다
 

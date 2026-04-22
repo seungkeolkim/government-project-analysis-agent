@@ -22,6 +22,10 @@ ENV/
 .env.local
 .env.*.local
 
+# 수집 설정 (로컬 수정본 보호 — template 에서 복사하여 사용)
+# 초기 설정: cp -n sources.yaml.template sources.yaml  또는  sh scripts/bootstrap_sources.sh
+sources.yaml
+
 # 빌드/배포 산출물
 build/
 dist/
