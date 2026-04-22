@@ -712,3 +712,31 @@ code {
     color: #991b1b;
     border: 1px solid #fecaca;
 }
+
+/* ---------- 목록 제목 읽음/안읽음 분기 (Phase 1b) ---------- */
+/*
+ * 로그인 사용자 기준:
+ *   - 안 읽은 공고(--unread): 굵게(700), 짙은 색.
+ *   - 읽은 공고(--read):      일반 굵기(400), 회색톤.
+ *
+ * 템플릿은 로그인 여부와 무관하게 두 클래스 중 하나를 항상 달아 준다
+ * (read_id_set 이 비어 있으면 모두 --unread).
+ * 비로그인(<body class="is-anonymous">) 상태에서는 아래 override 가
+ * 두 클래스를 기존 .announcement-title-link 기본 스타일로 되돌려
+ * 로그인 여부로 인한 시각적 차이가 생기지 않게 한다.
+ */
+.announcement-title-link--unread {
+    font-weight: 700;
+    color: #111827;
+}
+
+.announcement-title-link--read {
+    font-weight: 400;
+    color: #4b5563;
+}
+
+body.is-anonymous .announcement-title-link--unread,
+body.is-anonymous .announcement-title-link--read {
+    font-weight: 500;
+    color: #1f2937;
+}

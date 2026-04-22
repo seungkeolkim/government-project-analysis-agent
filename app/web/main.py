@@ -25,6 +25,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from loguru import logger
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import current_user_optional
@@ -40,8 +41,10 @@ from app.db.repository import (
     get_attachments_by_announcement,
     get_available_source_ids,
     get_group_size_map,
+    get_read_announcement_id_set,
     list_announcements,
     list_canonical_groups,
+    mark_announcement_read,
 )
 from app.db.session import SessionLocal
 
@@ -283,6 +286,18 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             )
             total_pages = ceil(total_count / page_size) if total_count > 0 else 1
 
+            # Phase 1b — 로그인 사용자에 한해 대표 공고들의 read 여부를
+            # 한 번에 조회한다 (N+1 방지). 비로그인은 빈 set.
+            if current_user is not None:
+                representative_ids = [gr.representative.id for gr in groups]
+                read_id_set = get_read_announcement_id_set(
+                    session,
+                    user_id=current_user.id,
+                    announcement_ids=representative_ids,
+                )
+            else:
+                read_id_set = set()
+
             return templates.TemplateResponse(
                 request,
                 "list.html",
@@ -300,8 +315,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     "sort": sort_str,
                     "group": "on",
                     "available_sources": available_source_ids,
-                    # Phase 1b — base.html 상단 네비 분기에 필요.
+                    # Phase 1b — base.html 상단 네비 + 목록 bold/normal 분기에 필요.
                     "current_user": current_user,
+                    "read_id_set": read_id_set,
                 },
             )
         else:
@@ -341,6 +357,19 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             )
             total_pages = ceil(total_count / page_size) if total_count > 0 else 1
 
+            # Phase 1b — 로그인 사용자의 페이지 공고별 read 여부를 한 쿼리로
+            # 조회. 비로그인은 빈 set 으로 두어 템플릿이 전부 unread 클래스를
+            # 달지만 body.is-anonymous CSS override 가 시각 차이를 상쇄한다.
+            if current_user is not None:
+                announcement_ids = [ann.id for ann, _size in ann_with_sizes]
+                read_id_set = get_read_announcement_id_set(
+                    session,
+                    user_id=current_user.id,
+                    announcement_ids=announcement_ids,
+                )
+            else:
+                read_id_set = set()
+
             return templates.TemplateResponse(
                 request,
                 "list.html",
@@ -358,8 +387,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     "sort": sort_str,
                     "group": "off",
                     "available_sources": available_source_ids,
-                    # Phase 1b — base.html 상단 네비 분기에 필요.
+                    # Phase 1b — base.html 상단 네비 + 목록 bold/normal 분기에 필요.
                     "current_user": current_user,
+                    "read_id_set": read_id_set,
                 },
             )
 
@@ -380,8 +410,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         공고에 연결된 첨부파일 목록도 함께 조회해 템플릿에 전달한다.
         없는 id 는 404 로 응답한다.
 
-        `current_user` 는 base.html 상단 네비 분기에 필요하다. 로그인 사용자의
-        자동 읽음 UPSERT 는 다음 subtask(00021-4)에서 추가한다.
+        `current_user` 는 base.html 상단 네비 분기에 필요하다. 로그인 상태일
+        때는 상세 진입 시 :func:`mark_announcement_read` 를 UPSERT 호출해
+        ``AnnouncementUserState`` 를 갱신하고 세션을 커밋한다. 비로그인 경로는
+        그대로 읽기 전용으로 유지되어 기존 URL 이 깨지지 않는다 (사용자 원문
+        "비로그인 상세 진입 시 에러 없음").
         """
         announcement = get_announcement_by_id(session, announcement_id)
         if announcement is None:
@@ -389,6 +422,26 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"공고 id={announcement_id} 를 찾을 수 없습니다.",
             )
+
+        # Phase 1b — 로그인 사용자일 때만 자동 읽음 UPSERT. announcement 단위
+        # 이므로 동일 canonical 내 다른 소스 공고(예: NTIS) 는 영향받지 않는다.
+        if current_user is not None:
+            try:
+                mark_announcement_read(
+                    session,
+                    user_id=current_user.id,
+                    announcement_id=announcement.id,
+                )
+                session.commit()
+            except Exception:
+                # 읽음 처리 실패가 페이지 열람 자체를 망가뜨리지 않도록 방어.
+                # 세션을 롤백해 다음 쿼리가 오염되지 않게 하고 경고만 기록.
+                session.rollback()
+                logger.warning(
+                    "자동 읽음 처리 실패: user_id={} announcement_id={}",
+                    current_user.id,
+                    announcement.id,
+                )
 
         attachments = get_attachments_by_announcement(session, announcement_id)
 

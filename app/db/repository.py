@@ -1553,6 +1553,116 @@ def get_attachments_by_announcement(
     )
 
 
+# ──────────────────────────────────────────────────────────────
+# 사용자 읽음 상태 (Phase 1b)
+# ──────────────────────────────────────────────────────────────
+
+
+def get_read_announcement_id_set(
+    session: Session,
+    *,
+    user_id: int,
+    announcement_ids: Iterable[int],
+) -> set[int]:
+    """주어진 사용자가 '이미 읽은' 공고 id 집합을 한 번의 쿼리로 반환한다.
+
+    목록 페이지의 bold/normal 분기를 위한 N+1 방지 헬퍼다. 현재 페이지에
+    보이는 announcement id 집합만 IN 절로 질의하므로, 페이지당 추가 쿼리는
+    정확히 1회다. 매칭되는 AnnouncementUserState 가 `is_read=True` 인 row 의
+    `announcement_id` 만 모아서 반환한다.
+
+    호출 규약:
+        - user_id 는 인증된 사용자 PK (비로그인 경로는 이 함수 자체를
+          호출하지 않는다 — 라우트에서 분기).
+        - announcement_ids 가 비어 있거나 None-only 이면 쿼리 없이 빈 set.
+
+    Args:
+        session:           호출자 세션.
+        user_id:           조회 대상 사용자 PK.
+        announcement_ids:  현재 페이지에 보이는 announcement id 들.
+
+    Returns:
+        ``is_read=True`` 가 확정된 announcement_id 집합. 미존재/미읽음은
+        포함되지 않는다.
+    """
+    # Iterable 을 한 번만 소비해도 되도록 list 로 고정한 뒤 None 제거.
+    announcement_id_list = [aid for aid in announcement_ids if aid is not None]
+    if not announcement_id_list:
+        return set()
+
+    rows = session.execute(
+        select(AnnouncementUserState.announcement_id).where(
+            AnnouncementUserState.user_id == user_id,
+            AnnouncementUserState.announcement_id.in_(announcement_id_list),
+            AnnouncementUserState.is_read.is_(True),
+        )
+    ).all()
+    return {row[0] for row in rows}
+
+
+def mark_announcement_read(
+    session: Session,
+    *,
+    user_id: int,
+    announcement_id: int,
+    now: datetime | None = None,
+) -> AnnouncementUserState:
+    """공고 상세 진입 시 (announcement_id, user_id) 단위로 읽음 상태를 UPSERT 한다.
+
+    동작:
+        - 매칭되는 AnnouncementUserState 가 있으면 ``is_read=True`` 로 갱신하고
+          ``read_at`` 을 ``now`` 로 덮어쓴다. ``updated_at`` 은 onupdate 로 자동.
+        - 없으면 새 row 를 INSERT 한다.
+
+    announcement 단위 (IRIS 공고를 읽었어도 동일 canonical 의 NTIS 공고
+    row 는 영향을 받지 않음) — FK 가 announcement_id 이므로 자연스럽게 성립.
+
+    호출 규약:
+        - 호출자(라우트)가 announcement 의 존재를 먼저 확인해야 한다 (FK 위반
+          방지). 상세 페이지 라우트는 404 분기 이후에만 이 함수를 부른다.
+        - commit 은 호출자 책임. 이 함수는 flush 까지만 수행한다.
+
+    Args:
+        session:         호출자 세션.
+        user_id:         인증된 사용자 PK.
+        announcement_id: 읽음 처리할 공고 PK.
+        now:             read_at 에 찍을 시각(UTC). None 이면 _utcnow.
+
+    Returns:
+        읽음 상태가 적용된 ``AnnouncementUserState`` 인스턴스.
+    """
+    now_ts = now if now is not None else datetime.now(tz=UTC)
+
+    existing = session.execute(
+        select(AnnouncementUserState).where(
+            AnnouncementUserState.announcement_id == announcement_id,
+            AnnouncementUserState.user_id == user_id,
+        )
+    ).scalar_one_or_none()
+
+    if existing is None:
+        # 신규 row — UNIQUE(ann_id, user_id) 제약에 의해 중복 시 에러는
+        # 호출자의 동시성 레이어가 처리한다 (웹 요청당 세션 독립이므로 실제
+        # 충돌 가능성은 낮다).
+        created = AnnouncementUserState(
+            announcement_id=announcement_id,
+            user_id=user_id,
+            is_read=True,
+            read_at=now_ts,
+        )
+        session.add(created)
+        session.flush()
+        return created
+
+    # 기존 row 가 있는 경우: is_read 를 True 로 고정하고 read_at 을 갱신.
+    # Phase 1a 의 내용 변경 리셋으로 is_read=False 로 돌아간 row 도 자연스럽게
+    # 재활성화된다.
+    existing.is_read = True
+    existing.read_at = now_ts
+    session.flush()
+    return existing
+
+
 __all__ = [
     "UpsertResult",
     "CanonicalGroupRow",
@@ -1576,4 +1686,6 @@ __all__ = [
     "get_attachment_by_id",
     "get_attachment_by_announcement_and_filename",
     "get_attachments_by_announcement",
+    "get_read_announcement_id_set",
+    "mark_announcement_read",
 ]
