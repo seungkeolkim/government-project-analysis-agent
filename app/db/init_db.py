@@ -34,6 +34,15 @@ from app.config import PROJECT_ROOT, get_settings
 from app.db.session import get_engine
 from app.logging_setup import configure_logging
 
+# baseline migration 의 revision 식별자.
+# "alembic_version 테이블이 없지만 기존 baseline 테이블이 존재" 하는 DB 는
+# 바로 HEAD 로 stamp 해서는 안 된다 — HEAD 가 baseline 이후의 migration 을
+# 포함하는 경우 해당 DDL 이 건너뛰어져 스키마가 실제 revision 과 어긋난다.
+# 대신 baseline 으로 stamp 한 뒤 HEAD 까지 upgrade 해서 후속 migration 을
+# 모두 적용해야 한다. 이 상수는 docs/alembic_migration_design.md 에서
+# 정의한 baseline revision 과 일치해야 한다.
+_BASELINE_REVISION = "a8f3c2d14e7b"
+
 
 def _build_alembic_config(engine: Engine) -> AlembicConfig:
     """alembic.ini 를 로드하고 접속 URL 을 engine 에서 주입한 Config 를 반환한다.
@@ -62,14 +71,16 @@ def _apply_alembic_migrations(engine: Engine) -> str:
 
     전략 결정 순서:
         1. alembic_version 테이블이 있으면 → upgrade head (Alembic 관리 DB)
-        2. 다른 테이블이 하나라도 있으면 → stamp head (기존 운영 DB)
+        2. 다른 테이블이 하나라도 있으면 → stamp baseline → upgrade head
+           (기존 운영 DB — baseline 수준 스키마로 가정. 이후 migration 적용)
         3. 테이블이 전혀 없으면 → upgrade head (신규/빈 DB)
 
     Args:
         engine: 대상 DB 엔진.
 
     Returns:
-        실제 사용된 전략 문자열: "upgrade" | "stamp" | "baseline-bootstrap"
+        실제 사용된 전략 문자열: "upgrade" | "stamp-then-upgrade" |
+        "baseline-bootstrap"
     """
     db_inspector = inspect(engine)
     table_names = set(db_inspector.get_table_names())
@@ -86,16 +97,22 @@ def _apply_alembic_migrations(engine: Engine) -> str:
         alembic_command.upgrade(alembic_cfg, "head")
 
     elif table_names:
-        # alembic_version 은 없지만 다른 테이블이 있음 → 기존 운영 DB
-        # create_all 또는 run_migrations 로 스키마를 만들었던 DB.
-        # 데이터를 건드리지 않고 리비전 레코드만 등록한다.
-        strategy = "stamp"
+        # alembic_version 은 없지만 다른 테이블이 있음 → 기존 운영 DB.
+        # run_migrations / create_all 로 baseline 수준 스키마가 이미 구성된
+        # 상태로 가정한다 (Phase 0 이전부터 있던 DB 는 이 경로를 탄다).
+        # 먼저 baseline revision 으로 stamp 하여 alembic_version 을 심고,
+        # 그 뒤 head 까지 upgrade 하여 baseline 이후 추가된 migration 을
+        # 모두 적용한다. 이렇게 해야 head 가 baseline 이후로 전진해도
+        # 신규 DDL 이 누락되지 않는다.
+        strategy = "stamp-then-upgrade"
         logger.info(
-            "초기화 전략: stamp (기존 DB 감지 — alembic_version 없음, "
-            "테이블 존재: {tables})",
+            "초기화 전략: stamp-then-upgrade (기존 DB 감지 — alembic_version "
+            "없음, 테이블 존재: {tables}, baseline={baseline})",
             tables=sorted(table_names),
+            baseline=_BASELINE_REVISION,
         )
-        alembic_command.stamp(alembic_cfg, "head")
+        alembic_command.stamp(alembic_cfg, _BASELINE_REVISION)
+        alembic_command.upgrade(alembic_cfg, "head")
 
     else:
         # 완전히 빈 DB — baseline migration 으로 전체 스키마를 생성한다
