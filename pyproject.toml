@@ -39,6 +39,14 @@ dependencies = [
 
     # 로깅
     "loguru>=0.7,<1.0",
+
+    # 인증 (Phase 1b — bcrypt 해시)
+    # passlib 가 해시 포맷과 라운드 파라미터를 포함해 저장하므로, 라운드 값이
+    # 바뀌어도 기존 해시를 그대로 verify 할 수 있다. bcrypt 4.x 는 passlib
+    # 1.7.4 와 호환되지만 일부 환경에서 __about__ 경고가 뜨므로 bcrypt 를
+    # 명시적으로 함께 고정한다.
+    "passlib[bcrypt]>=1.7,<2.0",
+    "bcrypt>=4.0,<5.0",
 ]
 
 [project.optional-dependencies]

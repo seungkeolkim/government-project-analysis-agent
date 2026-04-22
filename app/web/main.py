@@ -1,12 +1,16 @@
 """FastAPI 로컬 열람 웹 백엔드.
 
 활성화된 라우트:
-    - GET /                                       공고 목록 HTML 페이지 (상태 필터·검색·페이지네이션)
-    - GET /announcements                          공고 목록 JSON API
-    - GET /announcements/{id}                     공고 상세 HTML 페이지 (첨부파일 목록 포함)
-    - GET /attachments/{attachment_id}/download   로컬 파일 스트리밍 다운로드
+    - GET  /                                       공고 목록 HTML 페이지 (상태 필터·검색·페이지네이션)
+    - GET  /announcements                          공고 목록 JSON API
+    - GET  /announcements/{id}                     공고 상세 HTML 페이지 (첨부파일 목록 포함)
+    - GET  /attachments/{attachment_id}/download   로컬 파일 스트리밍 다운로드
+    - GET  /register, GET /login                   회원가입/로그인 폼 HTML (Phase 1b)
+    - POST /auth/register, /auth/login, /auth/logout  인증 처리 (Phase 1b)
+    - GET  /auth/me                                현재 사용자 JSON (Phase 1b)
 
-로컬 전용. 인증이 없으므로 외부 노출 금지.
+Phase 1b 에서 자유 회원가입 기반 세션 인증이 추가되었으나, 외부 노출은 여전히
+금지된다. 비로그인에서도 기존 목록/상세 URL 은 그대로 동작한다.
 """
 
 from __future__ import annotations
@@ -21,11 +25,14 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from loguru import logger
 from sqlalchemy.orm import Session
 
+from app.auth.dependencies import current_user_optional
+from app.auth.routes import router as auth_router
 from app.config import Settings, get_settings
 from app.db.init_db import init_db
-from app.db.models import Announcement, AnnouncementStatus
+from app.db.models import Announcement, AnnouncementStatus, User
 from app.db.repository import (
     count_announcements,
     count_canonical_groups,
@@ -34,8 +41,10 @@ from app.db.repository import (
     get_attachments_by_announcement,
     get_available_source_ids,
     get_group_size_map,
+    get_read_announcement_id_set,
     list_announcements,
     list_canonical_groups,
+    mark_announcement_read,
 )
 from app.db.session import SessionLocal
 
@@ -220,6 +229,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         name="static",
     )
 
+    # Phase 1b: 인증 라우터(register/login/logout/me) 를 mount 한다.
+    # 기존 라우트와 충돌하지 않으며, /auth/* 와 /login, /register 를 노출한다.
+    fastapi_app.include_router(auth_router)
+
     # ──────────────────────────────────────────────────────────
     # HTML: 목록 페이지
     # ──────────────────────────────────────────────────────────
@@ -235,6 +248,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
         session: Session = Depends(get_session),
+        current_user: User | None = Depends(current_user_optional),
     ) -> HTMLResponse:
         """공고 목록 HTML 페이지.
 
@@ -272,6 +286,18 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             )
             total_pages = ceil(total_count / page_size) if total_count > 0 else 1
 
+            # Phase 1b — 로그인 사용자에 한해 대표 공고들의 read 여부를
+            # 한 번에 조회한다 (N+1 방지). 비로그인은 빈 set.
+            if current_user is not None:
+                representative_ids = [gr.representative.id for gr in groups]
+                read_id_set = get_read_announcement_id_set(
+                    session,
+                    user_id=current_user.id,
+                    announcement_ids=representative_ids,
+                )
+            else:
+                read_id_set = set()
+
             return templates.TemplateResponse(
                 request,
                 "list.html",
@@ -289,6 +315,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     "sort": sort_str,
                     "group": "on",
                     "available_sources": available_source_ids,
+                    # Phase 1b — base.html 상단 네비 + 목록 bold/normal 분기에 필요.
+                    "current_user": current_user,
+                    "read_id_set": read_id_set,
                 },
             )
         else:
@@ -328,6 +357,19 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             )
             total_pages = ceil(total_count / page_size) if total_count > 0 else 1
 
+            # Phase 1b — 로그인 사용자의 페이지 공고별 read 여부를 한 쿼리로
+            # 조회. 비로그인은 빈 set 으로 두어 템플릿이 전부 unread 클래스를
+            # 달지만 body.is-anonymous CSS override 가 시각 차이를 상쇄한다.
+            if current_user is not None:
+                announcement_ids = [ann.id for ann, _size in ann_with_sizes]
+                read_id_set = get_read_announcement_id_set(
+                    session,
+                    user_id=current_user.id,
+                    announcement_ids=announcement_ids,
+                )
+            else:
+                read_id_set = set()
+
             return templates.TemplateResponse(
                 request,
                 "list.html",
@@ -345,6 +387,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     "sort": sort_str,
                     "group": "off",
                     "available_sources": available_source_ids,
+                    # Phase 1b — base.html 상단 네비 + 목록 bold/normal 분기에 필요.
+                    "current_user": current_user,
+                    "read_id_set": read_id_set,
                 },
             )
 
@@ -357,12 +402,19 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         request: Request,
         announcement_id: int,
         session: Session = Depends(get_session),
+        current_user: User | None = Depends(current_user_optional),
     ) -> HTMLResponse:
         """공고 상세 HTML 페이지.
 
         내부 PK(`id`)로 공고를 조회해 DB에 저장된 `detail_html` 을 렌더한다.
         공고에 연결된 첨부파일 목록도 함께 조회해 템플릿에 전달한다.
         없는 id 는 404 로 응답한다.
+
+        `current_user` 는 base.html 상단 네비 분기에 필요하다. 로그인 상태일
+        때는 상세 진입 시 :func:`mark_announcement_read` 를 UPSERT 호출해
+        ``AnnouncementUserState`` 를 갱신하고 세션을 커밋한다. 비로그인 경로는
+        그대로 읽기 전용으로 유지되어 기존 URL 이 깨지지 않는다 (사용자 원문
+        "비로그인 상세 진입 시 에러 없음").
         """
         announcement = get_announcement_by_id(session, announcement_id)
         if announcement is None:
@@ -371,12 +423,37 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 detail=f"공고 id={announcement_id} 를 찾을 수 없습니다.",
             )
 
+        # Phase 1b — 로그인 사용자일 때만 자동 읽음 UPSERT. announcement 단위
+        # 이므로 동일 canonical 내 다른 소스 공고(예: NTIS) 는 영향받지 않는다.
+        if current_user is not None:
+            try:
+                mark_announcement_read(
+                    session,
+                    user_id=current_user.id,
+                    announcement_id=announcement.id,
+                )
+                session.commit()
+            except Exception:
+                # 읽음 처리 실패가 페이지 열람 자체를 망가뜨리지 않도록 방어.
+                # 세션을 롤백해 다음 쿼리가 오염되지 않게 하고 경고만 기록.
+                session.rollback()
+                logger.warning(
+                    "자동 읽음 처리 실패: user_id={} announcement_id={}",
+                    current_user.id,
+                    announcement.id,
+                )
+
         attachments = get_attachments_by_announcement(session, announcement_id)
 
         return templates.TemplateResponse(
             request,
             "detail.html",
-            {"announcement": announcement, "attachments": attachments},
+            {
+                "announcement": announcement,
+                "attachments": attachments,
+                # Phase 1b — base.html 상단 네비 분기에 필요.
+                "current_user": current_user,
+            },
         )
 
     # ──────────────────────────────────────────────────────────

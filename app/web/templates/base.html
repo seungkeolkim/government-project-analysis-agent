@@ -1,11 +1,20 @@
 {#
   공통 레이아웃 템플릿.
 
-  - 모든 페이지(list/detail) 가 상속하여 HTML 뼈대와 공통 헤더·푸터를 공유한다.
+  - 모든 페이지(list/detail/login/register) 가 상속하여 HTML 뼈대와 공통
+    헤더·푸터, 상단 네비게이션을 공유한다.
   - 외부 CDN 없이 동작하도록 CSS 는 로컬 `/static/css/style.css` 만 링크한다
     (오프라인·격리 환경 고려).
   - charset 은 UTF-8 로 고정하여 한글 제목/파일명이 깨지지 않게 한다.
   - 자식 템플릿은 `page_title` / `content` 두 블록을 오버라이드한다.
+
+  컨텍스트 규약 (Phase 1b):
+    - `current_user`: 로그인된 User 또는 None. 모든 HTML 라우트가 컨텍스트에
+      포함해야 한다 (포함하지 않아도 Jinja2 Undefined 는 falsy 라 렌더는
+      되지만, 개발자가 의도적으로 주입하는 규약을 지킨다).
+    - `body` 태그의 `is-anonymous` 클래스는 비로그인 렌더 경로를 CSS 에서
+      구별할 때 사용한다 (다음 subtask 의 "읽음/안읽음" 스타일이 로그인 시
+      에만 적용되도록 덮어쓸 때 사용).
 #}
 <!doctype html>
 <html lang="ko">
@@ -15,11 +24,26 @@
     <title>{% block page_title %}사업공고 열람{% endblock %}</title>
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
-<body>
+<body class="{% if not current_user %}is-anonymous{% endif %}">
     <header class="site-header">
-        <div class="container">
-            <h1 class="site-title"><a href="/">사업공고 로컬 열람</a></h1>
-            <p class="site-subtitle">수집된 사업공고를 소스별로 조회한다.</p>
+        <div class="container site-header__inner">
+            <div class="site-header__brand">
+                <h1 class="site-title"><a href="/">사업공고 로컬 열람</a></h1>
+                <p class="site-subtitle">수집된 사업공고를 소스별로 조회한다.</p>
+            </div>
+            <nav class="site-nav" aria-label="사용자 메뉴">
+                {% if current_user %}
+                    {# 로그인 상태: 사용자명 + 로그아웃 버튼 (POST 폼) #}
+                    <span class="site-nav__user">{{ current_user.username }}</span>
+                    <form class="site-nav__logout-form" method="post" action="/auth/logout">
+                        <button type="submit" class="site-nav__logout-button">로그아웃</button>
+                    </form>
+                {% else %}
+                    {# 비로그인 상태: 로그인/회원가입 링크 #}
+                    <a class="site-nav__link" href="/login">로그인</a>
+                    <a class="site-nav__link" href="/register">회원가입</a>
+                {% endif %}
+            </nav>
         </div>
     </header>
 

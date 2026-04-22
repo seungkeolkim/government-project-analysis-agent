@@ -545,6 +545,14 @@ class User(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+    # Phase 1b 로 추가된 역관계. 사용자 삭제 시 세션도 함께 제거된다 (DB FK 가 CASCADE).
+    # ORM 쪽에서도 cascade="all, delete-orphan" 을 두어 ORM 플러시 경로에서 일관성 유지.
+    sessions: Mapped[list[UserSession]] = relationship(
+        "UserSession",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
 
     __table_args__ = (
         UniqueConstraint("username", name="uq_users_username"),
@@ -553,6 +561,85 @@ class User(Base):
     def __repr__(self) -> str:
         """디버깅 편의용 문자열 표현을 반환한다."""
         return f"<User id={self.id} username={self.username!r} is_admin={self.is_admin}>"
+
+
+class UserSession(Base):
+    """로그인 세션 한 건.
+
+    사용자가 로그인하면 서버가 `secrets.token_urlsafe(32)` 로 불투명 세션 ID 를
+    발급해 쿠키로 내려주고, 같은 문자열을 이 테이블의 PK 로 저장한다.
+    쿠키를 갖고 돌아온 요청은 `session_id` 로 이 row 를 조회해 현재 사용자를
+    복원한다.
+
+    설계 메모:
+        - `session_id` 는 평문으로 저장한다. 로컬 전제 — DB 파일 자체가 신뢰
+          경계 안이므로, 쿠키와 DB 값의 신뢰 수준이 동일하다. (사용자 원문:
+          "세션 ID: secrets.token_urlsafe(32). DB 평문 (로컬 전제)".)
+        - `expires_at` 이 현재 시각 이하이면 해당 세션은 만료된 것이다.
+          만료된 세션은 즉시 삭제하지 않고 조회 시점에 로그인 실패로 취급한다.
+          적극적 cleanup 은 Phase 2 의 스케줄러가 담당한다.
+        - FK 는 `users.id` 로 CASCADE — 사용자를 삭제하면 세션도 자동 제거.
+        - 테이블 DDL 은 Phase 1a migration
+          (`20260422_1500_b2c5e8f1a934_phase1a_new_tables.py`) 에서 이미 생성되어
+          있으므로 본 ORM 선언의 컬럼/인덱스/FK 이름은 DDL 과 **정확히 일치**해야
+          한다. autogenerate diff 가 비어야 하는 것이 검증 기준.
+
+    관계:
+        user: 세션 소유자 사용자.
+    """
+
+    __tablename__ = "user_sessions"
+
+    # 쿠키로 전달되는 불투명 토큰. Phase 1a DDL 에서 String(64) 로 정의되었다.
+    session_id: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+        doc="세션 식별자. secrets.token_urlsafe(32) 결과(≈43자).",
+    )
+
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "users.id",
+            name="fk_user_sessions_user_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+        doc="세션 소유자 사용자 PK.",
+    )
+
+    # 만료 시각(UTC). 이 값 이하의 시각에 도착한 요청은 로그인 실패로 처리한다.
+    # 기본 유효기간은 app.auth.constants.SESSION_LIFETIME_DAYS (30일) 로,
+    # 세션 발급 시점에 서비스 계층이 계산해 넣는다.
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+        doc="세션 만료 시각(UTC). 현재 시각 이하이면 만료.",
+    )
+
+    # 세션 발급 시각(UTC). 디버깅/감사용.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        doc="세션이 발급된 시각(UTC).",
+    )
+
+    user: Mapped[User] = relationship(
+        "User",
+        back_populates="sessions",
+    )
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현을 반환한다."""
+        # session_id 는 토큰이므로 앞 8자만 보여준다 (보안 위험 최소화 + 식별).
+        preview = self.session_id[:8] if self.session_id else ""
+        return (
+            f"<UserSession id={preview!r}... user_id={self.user_id} "
+            f"expires_at={self.expires_at.isoformat() if self.expires_at else None!r}>"
+        )
 
 
 class AnnouncementUserState(Base):
@@ -987,4 +1074,5 @@ __all__ = [
     "RelevanceJudgment",
     "RelevanceJudgmentHistory",
     "User",
+    "UserSession",
 ]

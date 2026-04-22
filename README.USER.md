@@ -10,14 +10,15 @@
 ## 목차
 
 1. [초기 설치 요약](#초기-설치-요약)
-2. [스크래퍼 실행 방법](#스크래퍼-실행-방법)
-3. [NTIS 수집 운영 특이사항](#ntis-수집-운영-특이사항)
-4. [증분 수집 동작 설명](#증분-수집-동작-설명)
-5. [웹 UI 검색/필터/중복 그룹 보기](#웹-ui-검색필터중복-그룹-보기)
-6. [로그 해석](#로그-해석)
-7. [DB 관리](#db-관리)
-8. [트러블슈팅](#트러블슈팅)
-9. [정기 운영 체크리스트](#정기-운영-체크리스트)
+2. [첫 관리자 계정 생성](#첫-관리자-계정-생성)
+3. [스크래퍼 실행 방법](#스크래퍼-실행-방법)
+4. [NTIS 수집 운영 특이사항](#ntis-수집-운영-특이사항)
+5. [증분 수집 동작 설명](#증분-수집-동작-설명)
+6. [웹 UI 검색/필터/중복 그룹 보기](#웹-ui-검색필터중복-그룹-보기)
+7. [로그 해석](#로그-해석)
+8. [DB 관리](#db-관리)
+9. [트러블슈팅](#트러블슈팅)
+10. [정기 운영 체크리스트](#정기-운영-체크리스트)
 
 ---
 
@@ -35,6 +36,70 @@ docker compose build
 docker compose up app
 # → http://localhost:8000 접속
 ```
+
+---
+
+## 첫 관리자 계정 생성
+
+Phase 1b 에서 자유 회원가입 + 세션 쿠키 인증이 추가되었다. 일반 사용자는
+`/register` 폼에서 직접 가입할 수 있지만, **관리자(`is_admin=True`) 계정은
+DB 컬럼만 존재하고 가입 폼으로는 만들 수 없다**. 운영자가 컨테이너 안에서
+`scripts/create_admin.py` CLI 로 한 번 만들어 둔다.
+
+```bash
+# 대화형 (username/password/email 모두 prompt)
+docker compose run --rm app python scripts/create_admin.py
+
+# username 만 인자로 전달, 나머지는 prompt
+docker compose run --rm app python scripts/create_admin.py root_user
+
+# username + email 까지 인자로, password 만 prompt
+docker compose run --rm app python scripts/create_admin.py root_user --email admin@example.com
+```
+
+**동작 요약**:
+
+- 비밀번호는 항상 `getpass` 로 입력받아 두 번 일치 확인 (터미널에 표시되지 않음).
+- bcrypt 해시(라운드 12)로 저장. 평문 저장 없음.
+- 같은 username 이 이미 있으면 종료 코드 1 + 에러 메시지.
+- 정책: username 은 영문 소문자/숫자/밑줄 3~64자, password 는 8자 이상.
+- `is_admin=True` 로 생성된 사용자도 일반 로그인(`/login`) 으로 접속 — 관리자
+  전용 화면은 Phase 2 부터 추가될 예정이며, 본 단계에서는 DB 의 플래그만 의미를
+  갖는다.
+
+**확인**:
+
+```bash
+sqlite3 ./data/db/app.sqlite3 \
+  "SELECT id, username, is_admin FROM users WHERE is_admin = 1;"
+```
+
+> **컨테이너 내부 vs 호스트.** 위 예시는 Docker 사용을 전제로 한다. 호스트에서
+> 직접 가상환경을 돌리는 개발 환경이라면 `docker compose run --rm app`
+> 부분만 빼고 `python scripts/create_admin.py` 로 동일하게 사용한다.
+
+### 만료된 세션 디버깅
+
+세션 수명은 기본 30 일이다 (`app/auth/constants.py` 의
+`SESSION_LIFETIME_DAYS`). 운영 중 임의 사용자의 세션을 즉시 만료시키려면
+DB 의 `user_sessions.expires_at` 을 과거로 UPDATE 한다 — 다음 요청부터
+해당 사용자는 비로그인으로 처리되며, 자동으로 로그인 페이지에서 다시
+인증할 수 있다.
+
+```bash
+# 모든 세션 일괄 만료 (운영자 강제 로그아웃)
+sqlite3 ./data/db/app.sqlite3 \
+  "UPDATE user_sessions SET expires_at = datetime('now', '-1 day');"
+
+# 특정 사용자의 세션만 만료
+sqlite3 ./data/db/app.sqlite3 \
+  "UPDATE user_sessions
+     SET expires_at = datetime('now', '-1 day')
+   WHERE user_id = (SELECT id FROM users WHERE username = 'root_user');"
+```
+
+만료된 row 자체는 자동으로 삭제되지 않는다 — 적극적인 cleanup 배치는 Phase 2
+스케줄러에서 도입될 예정이다.
 
 ---
 

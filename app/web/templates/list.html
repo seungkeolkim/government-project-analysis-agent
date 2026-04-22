@@ -21,6 +21,11 @@
     - sort:             str  (received_desc | deadline_asc | title_asc)
     - group:            str  (on | off)
     - available_sources: list[str]
+    - current_user:     User | None  (상단 네비 분기용)
+    - read_id_set:      set[int]  (Phase 1b — 로그인 사용자의 읽은 공고 id.
+                                   비로그인 시 빈 set. 제목 링크의 bold/normal
+                                   분기에 사용하며, body.is-anonymous CSS override
+                                   가 비로그인 시 시각적 차이를 중립화한다.)
 #}
 {% extends "base.html" %}
 
@@ -101,7 +106,14 @@
             {% for gr in groups %}
             <tr>
                 <td class="col-title">
-                    <a class="announcement-title-link" href="/announcements/{{ gr.representative.id }}">
+                    {# Phase 1b — 읽음 여부에 따라 bold/normal 보조 클래스를 부여.
+                       비로그인 시에는 read_id_set 이 빈 set 이라 모든 항목이 unread
+                       클래스를 달지만, style.css 의 body.is-anonymous 규칙이
+                       시각적 차이를 중립화한다. #}
+                    <a class="announcement-title-link
+                              {% if gr.representative.id in read_id_set %}announcement-title-link--read
+                              {% else %}announcement-title-link--unread{% endif %}"
+                       href="/announcements/{{ gr.representative.id }}">
                         {{ gr.representative.title }}
                     </a>
                     {# 그룹 크기 배지: 항상 표시 #}
@@ -158,7 +170,11 @@
             {% for ann, group_size in ann_with_sizes %}
             <tr>
                 <td class="col-title">
-                    <a class="announcement-title-link" href="/announcements/{{ ann.id }}">
+                    {# Phase 1b — 읽음 여부 분기 (그룹 모드와 동일 규칙). #}
+                    <a class="announcement-title-link
+                              {% if ann.id in read_id_set %}announcement-title-link--read
+                              {% else %}announcement-title-link--unread{% endif %}"
+                       href="/announcements/{{ ann.id }}">
                         {{ ann.title }}
                     </a>
                     {# 동일 과제 배지: 같은 canonical group 에 2건 이상 있을 때만 표시 #}
