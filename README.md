@@ -210,8 +210,26 @@ scrape:
   - `/announcements/{id}` — 공고 상세 + 첨부파일 목록
   - `/attachments/{id}/download` — 첨부파일 다운로드
   - `/announcements`, `/announcements/{id}.json` — JSON API
+  - `/register`, `/login` — 회원가입/로그인 페이지 (Phase 1b)
+  - `/auth/register`, `/auth/login`, `/auth/logout` — 인증 처리 엔드포인트 (POST)
+  - `/auth/me` — 현재 사용자 JSON (비로그인이면 `{"user": null}`)
 - **SQLite DB**: `./data/db/app.sqlite3`
 - **첨부파일 저장소**: `./data/downloads/{source_type}/{announcement_id}/`
+
+### 사용자 인증 (Phase 1b)
+
+자유 회원가입 기반의 세션 쿠키 인증이 활성화되어 있다.
+
+- **비로그인 열람 가능.** 목록(`/`)·상세(`/announcements/{id}`)·첨부 다운로드는
+  로그인 없이 그대로 사용한다.
+- **로그인 시 추가 기능.**
+  - 목록에서 안 읽은 공고는 **굵게**, 읽은 건 보통 굵기로 표시.
+  - 상세 페이지 진입 시 자동으로 "읽음" 처리 (announcement 단위로 기록).
+- **회원가입.** 우상단 네비의 "회원가입" 또는 `/register` 로 직접 접근.
+  username/password (선택: email) 만 입력하면 가입과 동시에 자동 로그인.
+- **첫 관리자 계정.** 운영자가 `scripts/create_admin.py` CLI 로 생성한다.
+  자세한 절차는 [README.USER.md](README.USER.md) 의 *첫 관리자 계정 생성*
+  섹션 참조.
 
 ## 증분 수집 전략
 
@@ -230,7 +248,9 @@ scrape:
 
 - **Docker 전용.** 호스트 Python 직접 실행(`python -m app.cli`, `uvicorn` 등)은 지원하지 않는다.
   모든 실행은 `docker compose` 를 통해서만 수행한다.
-- **로컬 전용.** FastAPI 백엔드는 인증·권한 제어가 없다. 외부에 노출하지 말 것.
+- **로컬 전용.** Phase 1b 에서 자유 회원가입 기반 세션 인증이 추가되었지만
+  여전히 팀 내부 로컬망 사용을 전제로 한다. 외부 인터넷에 직접 노출하지 말 것
+  (HTTPS 종단 미적용, CSRF 토큰 미발급, 비밀번호 정책 최소만 강제).
 - **차단 방지.** 각 소스가 동일 IP 의 과도한 요청을 차단할 수 있다. `sources.yaml` 의
   `request_delay_sec` (기본 1.5초) 를 너무 짧게 설정하지 말고, `max_pages` 로 범위를 제한해서 사용할 것.
 - **User-Agent/봇 정책.** 대상 사이트의 이용 약관, `robots.txt`, 저작권 정책을 확인하고,
