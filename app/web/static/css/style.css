@@ -555,3 +555,160 @@ code {
     color: #1d4ed8;
     text-decoration: underline;
 }
+
+/* ---------- 상단 네비 (Phase 1b 인증 분기) ---------- */
+/*
+ * 기존 .site-header 블록은 건드리지 않고, 내부 flex 레이아웃을 담는
+ * 컨테이너(.site-header__inner) 와 브랜드/네비 칸만 추가한다.
+ */
+.site-header__inner {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.site-header__brand {
+    /* 타이틀/서브타이틀 블록 — 남은 공간을 우선 사용. */
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.site-nav {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 14px;
+    flex: 0 0 auto;
+}
+
+.site-nav__user {
+    color: #374151;
+    font-weight: 600;
+    /* 너무 긴 username 에도 네비 레이아웃이 깨지지 않도록 제한. */
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.site-nav__link {
+    color: #1d4ed8;
+    padding: 4px 2px;
+}
+
+.site-nav__link:hover {
+    text-decoration: underline;
+}
+
+.site-nav__logout-form {
+    /* form 태그의 기본 여백 제거 — 버튼만 네비에 얹히도록. */
+    margin: 0;
+    padding: 0;
+    display: inline-flex;
+}
+
+.site-nav__logout-button {
+    background: none;
+    border: none;
+    padding: 4px 2px;
+    margin: 0;
+    cursor: pointer;
+    font: inherit;
+    color: #1d4ed8;
+}
+
+.site-nav__logout-button:hover {
+    text-decoration: underline;
+}
+
+/* ---------- 인증 폼 (login/register) ---------- */
+.auth-form-wrap {
+    max-width: 380px;
+    margin: 40px auto;
+    background: #ffffff;
+    padding: 24px 28px;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+}
+
+.auth-form__heading {
+    margin: 0 0 16px;
+    font-size: 20px;
+    color: #111827;
+}
+
+.auth-form {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.auth-form__field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 14px;
+    color: #374151;
+}
+
+.auth-form__label {
+    font-weight: 600;
+}
+
+.auth-form__input {
+    padding: 8px 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    font-size: 14px;
+    background: #ffffff;
+    color: #111827;
+}
+
+.auth-form__input:focus {
+    outline: 2px solid #93c5fd;
+    outline-offset: -1px;
+    border-color: #1d4ed8;
+}
+
+.auth-form__hint {
+    color: #6b7280;
+    font-size: 12px;
+}
+
+.auth-form__submit {
+    padding: 8px 14px;
+    border: 1px solid #1d4ed8;
+    background: #1d4ed8;
+    color: #ffffff;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    margin-top: 6px;
+}
+
+.auth-form__submit:hover {
+    background: #1e40af;
+}
+
+.auth-form__switch {
+    margin: 16px 0 0;
+    font-size: 13px;
+    text-align: center;
+    color: #6b7280;
+}
+
+/* ---------- 플래시 메시지 ---------- */
+.flash-message {
+    padding: 10px 12px;
+    border-radius: 4px;
+    font-size: 13px;
+    margin: 0 0 14px;
+}
+
+.flash-message--error {
+    background: #fee2e2;
+    color: #991b1b;
+    border: 1px solid #fecaca;
+}

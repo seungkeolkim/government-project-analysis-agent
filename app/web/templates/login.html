@@ -1,0 +1,52 @@
+{#
+  로그인 페이지.
+
+  입력 컨텍스트 (auth/routes.py `login_page` / `login_submit` 가 주입):
+    - current_user:    항상 None (로그인 상태면 라우트가 / 로 redirect 한다)
+    - flash:           실패 메시지 문자열 또는 None
+    - username_value:  실패 후 폼 재렌더 시 아이디 보존용
+
+  외부 CDN 의존 없음 — base.html 의 /static/css/style.css 만 사용한다.
+#}
+{% extends "base.html" %}
+
+{% block page_title %}로그인{% endblock %}
+
+{% block content %}
+<section class="auth-form-wrap" aria-labelledby="auth-form-heading">
+    <h2 id="auth-form-heading" class="auth-form__heading">로그인</h2>
+
+    {% if flash %}
+    <p class="flash-message flash-message--error" role="alert">{{ flash }}</p>
+    {% endif %}
+
+    <form class="auth-form" method="post" action="/auth/login">
+        <label class="auth-form__field">
+            <span class="auth-form__label">아이디</span>
+            <input
+                class="auth-form__input"
+                type="text"
+                name="username"
+                required
+                autocomplete="username"
+                value="{{ username_value or '' }}">
+        </label>
+
+        <label class="auth-form__field">
+            <span class="auth-form__label">비밀번호</span>
+            <input
+                class="auth-form__input"
+                type="password"
+                name="password"
+                required
+                autocomplete="current-password">
+        </label>
+
+        <button type="submit" class="auth-form__submit">로그인</button>
+    </form>
+
+    <p class="auth-form__switch">
+        계정이 없다면 <a href="/register">회원가입</a>.
+    </p>
+</section>
+{% endblock %}

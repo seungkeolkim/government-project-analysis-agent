@@ -1,12 +1,16 @@
 """FastAPI 로컬 열람 웹 백엔드.
 
 활성화된 라우트:
-    - GET /                                       공고 목록 HTML 페이지 (상태 필터·검색·페이지네이션)
-    - GET /announcements                          공고 목록 JSON API
-    - GET /announcements/{id}                     공고 상세 HTML 페이지 (첨부파일 목록 포함)
-    - GET /attachments/{attachment_id}/download   로컬 파일 스트리밍 다운로드
+    - GET  /                                       공고 목록 HTML 페이지 (상태 필터·검색·페이지네이션)
+    - GET  /announcements                          공고 목록 JSON API
+    - GET  /announcements/{id}                     공고 상세 HTML 페이지 (첨부파일 목록 포함)
+    - GET  /attachments/{attachment_id}/download   로컬 파일 스트리밍 다운로드
+    - GET  /register, GET /login                   회원가입/로그인 폼 HTML (Phase 1b)
+    - POST /auth/register, /auth/login, /auth/logout  인증 처리 (Phase 1b)
+    - GET  /auth/me                                현재 사용자 JSON (Phase 1b)
 
-로컬 전용. 인증이 없으므로 외부 노출 금지.
+Phase 1b 에서 자유 회원가입 기반 세션 인증이 추가되었으나, 외부 노출은 여전히
+금지된다. 비로그인에서도 기존 목록/상세 URL 은 그대로 동작한다.
 """
 
 from __future__ import annotations
@@ -23,9 +27,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
+from app.auth.dependencies import current_user_optional
+from app.auth.routes import router as auth_router
 from app.config import Settings, get_settings
 from app.db.init_db import init_db
-from app.db.models import Announcement, AnnouncementStatus
+from app.db.models import Announcement, AnnouncementStatus, User
 from app.db.repository import (
     count_announcements,
     count_canonical_groups,
@@ -220,6 +226,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         name="static",
     )
 
+    # Phase 1b: 인증 라우터(register/login/logout/me) 를 mount 한다.
+    # 기존 라우트와 충돌하지 않으며, /auth/* 와 /login, /register 를 노출한다.
+    fastapi_app.include_router(auth_router)
+
     # ──────────────────────────────────────────────────────────
     # HTML: 목록 페이지
     # ──────────────────────────────────────────────────────────
@@ -235,6 +245,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
         session: Session = Depends(get_session),
+        current_user: User | None = Depends(current_user_optional),
     ) -> HTMLResponse:
         """공고 목록 HTML 페이지.
 
@@ -289,6 +300,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     "sort": sort_str,
                     "group": "on",
                     "available_sources": available_source_ids,
+                    # Phase 1b — base.html 상단 네비 분기에 필요.
+                    "current_user": current_user,
                 },
             )
         else:
@@ -345,6 +358,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     "sort": sort_str,
                     "group": "off",
                     "available_sources": available_source_ids,
+                    # Phase 1b — base.html 상단 네비 분기에 필요.
+                    "current_user": current_user,
                 },
             )
 
@@ -357,12 +372,16 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         request: Request,
         announcement_id: int,
         session: Session = Depends(get_session),
+        current_user: User | None = Depends(current_user_optional),
     ) -> HTMLResponse:
         """공고 상세 HTML 페이지.
 
         내부 PK(`id`)로 공고를 조회해 DB에 저장된 `detail_html` 을 렌더한다.
         공고에 연결된 첨부파일 목록도 함께 조회해 템플릿에 전달한다.
         없는 id 는 404 로 응답한다.
+
+        `current_user` 는 base.html 상단 네비 분기에 필요하다. 로그인 사용자의
+        자동 읽음 UPSERT 는 다음 subtask(00021-4)에서 추가한다.
         """
         announcement = get_announcement_by_id(session, announcement_id)
         if announcement is None:
@@ -376,7 +395,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         return templates.TemplateResponse(
             request,
             "detail.html",
-            {"announcement": announcement, "attachments": attachments},
+            {
+                "announcement": announcement,
+                "attachments": attachments,
+                # Phase 1b — base.html 상단 네비 분기에 필요.
+                "current_user": current_user,
+            },
         )
 
     # ──────────────────────────────────────────────────────────
