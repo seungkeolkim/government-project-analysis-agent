@@ -18,7 +18,16 @@ from app.config import get_settings
 
 # ORM 모델이 Base.metadata 에 등록되려면 반드시 import 해야 한다.
 from app.db.models import Base  # noqa: F401
-from app.db.models import Announcement, Attachment, CanonicalProject  # noqa: F401
+from app.db.models import (  # noqa: F401
+    Announcement,
+    AnnouncementUserState,
+    Attachment,
+    CanonicalProject,
+    FavoriteFolder,
+    RelevanceJudgment,
+    RelevanceJudgmentHistory,
+    User,
+)
 
 # alembic.ini 의 [alembic] 섹션에 접근하는 config 객체
 alembic_config = context.config

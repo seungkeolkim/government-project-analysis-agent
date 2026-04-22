@@ -1,8 +1,11 @@
 """SQLAlchemy ORM 모델 정의.
 
-사업공고(Announcement)와 첨부파일(Attachment)을 표현한다.
-Alembic 은 도입하지 않으며, 초기 DDL 은 `init_db.py` 의 `create_all` 로 생성한다.
-기존 DB 스키마 변경은 `app/db/migration.py` 의 `run_migrations` 가 처리한다.
+사업공고(Announcement)와 첨부파일(Attachment) 외에 Phase 1a(팀 공용 전환)에서
+사용자 라벨링과 리셋 트랜잭션에 필요한 최소 모델(User / AnnouncementUserState /
+RelevanceJudgment / RelevanceJudgmentHistory / FavoriteFolder)을 함께 정의한다.
+
+스키마 변경은 Alembic migration(`alembic/versions/`) 이 전담한다.
+`init_db.py` 는 Alembic Python API 로 stamp/upgrade 를 분기 실행한다.
 
 설계 메모:
     - 증분 수집 이력 보존 모델:
@@ -21,6 +24,11 @@ Alembic 은 도입하지 않으며, 초기 DDL 은 `init_db.py` 의 `create_all`
     - 상태값은 '접수중/접수예정/마감' 세 가지만 취급한다(문자열 Enum).
     - 시간 컬럼은 모두 timezone-aware UTC 로 저장한다(`DateTime(timezone=True)`).
     - `raw_metadata` 는 수집 소스에서 내려온 임의의 부가 필드를 손실 없이 보존한다.
+    - Phase 1a 신규 모델 5종: 리셋·이관·validator 에 필요한 최소 범위만 ORM 으로
+      선언한다. 나머지 8개 신규 테이블(user_sessions, favorite_entries,
+      canonical_overrides, email_subscriptions, admin_email_targets, audit_logs,
+      scrape_runs, attachment_analyses)은 migration 으로만 만들고 ORM 화는
+      해당 기능 Phase 에서 처리한다.
 """
 
 from __future__ import annotations
@@ -33,6 +41,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
@@ -40,10 +49,13 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
+    event,
 )
 from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
+    Session,
     mapped_column,
     relationship,
 )
@@ -455,10 +467,524 @@ class Attachment(Base):
         )
 
 
+class User(Base):
+    """팀 구성원 계정.
+
+    Phase 1a 시점에는 실제 로그인 플로우가 아직 없지만, 리셋 트랜잭션에서
+    `announcement_user_states.user_id` 및 `relevance_judgments.user_id` 가
+    참조할 FK target 이 필요하므로 ORM 모델을 미리 정의한다.
+
+    관계:
+        announcement_states: 이 사용자의 공고별 읽음 상태 목록.
+        relevance_judgments: 이 사용자의 현재 유효한 관련성 판정 목록.
+        favorite_folders: 이 사용자가 만든 즐겨찾기 폴더 목록.
+
+    보안 메모:
+        password_hash 는 해시 결과 문자열만 저장한다. 해싱 알고리즘(bcrypt 또는
+        argon2) 선택은 Phase 1b 에서 확정한다. 본 모델은 컬럼 자리만 예약한다.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # 로그인 ID — 소문자 ASCII + 숫자 + _ 만 허용할 예정 (Phase 1b validator).
+    username: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        doc="로그인 ID. 전역 UNIQUE.",
+    )
+
+    # 해시 문자열. 알고리즘은 Phase 1b 에서 결정.
+    password_hash: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        doc="비밀번호 해시 결과 문자열. 알고리즘은 Phase 1b 결정(bcrypt/argon2).",
+    )
+
+    # 이메일 알림 수신 주소 — 없어도 계정 사용 가능하므로 nullable.
+    email: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        index=True,
+        doc="이메일 알림 수신 주소. NULL 이면 이메일 알림 대상에서 제외.",
+    )
+
+    # 관리자 권한 플래그 — Phase 2 관리자 화면에서 게이트로 사용.
+    is_admin: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+        doc="관리자 권한 여부.",
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        doc="계정 생성 시각(UTC).",
+    )
+
+    # 역관계 — 개별 리셋 로직이 user_id 기준으로 조회할 때 사용한다.
+    announcement_states: Mapped[list[AnnouncementUserState]] = relationship(
+        "AnnouncementUserState",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+    relevance_judgments: Mapped[list[RelevanceJudgment]] = relationship(
+        "RelevanceJudgment",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+    favorite_folders: Mapped[list[FavoriteFolder]] = relationship(
+        "FavoriteFolder",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("username", name="uq_users_username"),
+    )
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현을 반환한다."""
+        return f"<User id={self.id} username={self.username!r} is_admin={self.is_admin}>"
+
+
+class AnnouncementUserState(Base):
+    """공고 × 사용자 단위 상태(현재는 "읽음" 하나).
+
+    내용 변경(status 단독 제외)이 감지되면 해당 announcement_id 의 모든 row 가
+    `is_read=False`, `read_at=NULL` 로 리셋된다. 이 테이블은 UPSERT 와 동일한
+    트랜잭션에서 atomic 하게 갱신되어야 한다(repository 계층 책임).
+
+    UNIQUE: (announcement_id, user_id) 1건만 존재.
+    """
+
+    __tablename__ = "announcement_user_states"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    announcement_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "announcements.id",
+            name="fk_announcement_user_states_announcement_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        doc="대상 공고 PK.",
+    )
+
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "users.id",
+            name="fk_announcement_user_states_user_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+        doc="상태 소유자 사용자 PK.",
+    )
+
+    is_read: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+        doc="읽음 여부. 내용 변경 시 False 로 리셋된다.",
+    )
+
+    read_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        doc="마지막으로 읽은 시각(UTC). 읽지 않은 동안은 NULL.",
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+        doc="레코드 마지막 갱신 시각.",
+    )
+
+    user: Mapped[User] = relationship(
+        "User",
+        back_populates="announcement_states",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "announcement_id",
+            "user_id",
+            name="uq_announcement_user_states_ann_user",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현을 반환한다."""
+        return (
+            f"<AnnouncementUserState id={self.id} ann_id={self.announcement_id} "
+            f"user_id={self.user_id} is_read={self.is_read}>"
+        )
+
+
+class RelevanceJudgment(Base):
+    """canonical_project × user 단위 현재 유효 판정.
+
+    (canonical_project_id, user_id) 조합당 1건만 존재한다.
+    내용 변경(status 단독 제외) 감지 시 해당 canonical 의 모든 row 는
+    `relevance_judgment_history` 로 이관되어 이 테이블에서 제거된다.
+
+    verdict 허용값: '관련', '무관' — DB CHECK 및 app-level 상수로 이중 강제.
+    """
+
+    __tablename__ = "relevance_judgments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    canonical_project_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "canonical_projects.id",
+            name="fk_relevance_judgments_canonical_project_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        doc="판정 대상 canonical_project PK.",
+    )
+
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "users.id",
+            name="fk_relevance_judgments_user_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+        doc="판정한 사용자 PK.",
+    )
+
+    # verdict: '관련' | '무관'. 한글 2글자 + 여유로 String(8).
+    verdict: Mapped[str] = mapped_column(
+        String(8),
+        nullable=False,
+        doc="판정 결과. 허용값: '관련', '무관'.",
+    )
+
+    reason: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="판정 이유(짧은 메모). 없으면 NULL.",
+    )
+
+    decided_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        doc="판정 시각(UTC).",
+    )
+
+    user: Mapped[User] = relationship(
+        "User",
+        back_populates="relevance_judgments",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "canonical_project_id",
+            "user_id",
+            name="uq_relevance_project_user",
+        ),
+        CheckConstraint(
+            "verdict IN ('관련', '무관')",
+            name="ck_relevance_verdict",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현을 반환한다."""
+        return (
+            f"<RelevanceJudgment id={self.id} "
+            f"canonical={self.canonical_project_id} user_id={self.user_id} "
+            f"verdict={self.verdict!r}>"
+        )
+
+
+class RelevanceJudgmentHistory(Base):
+    """이관된 과거 판정.
+
+    새 판정/내용 변경 시 `relevance_judgments` 의 row 를 이 테이블로 복사한다.
+    이 테이블은 append-only 로 취급하며, 이관된 레코드는 수정하지 않는다.
+
+    archive_reason 허용값(app-level 상수): 'content_changed', 'user_overwrite',
+    'admin_override'. DB CHECK 는 유연성 위해 설치하지 않는다.
+    """
+
+    __tablename__ = "relevance_judgment_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    canonical_project_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "canonical_projects.id",
+            name="fk_relevance_judgment_history_canonical_project_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        doc="이관 시점의 canonical_project PK.",
+    )
+
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "users.id",
+            name="fk_relevance_judgment_history_user_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        doc="이관 시점의 사용자 PK.",
+    )
+
+    verdict: Mapped[str] = mapped_column(
+        String(8),
+        nullable=False,
+        doc="이관 시점의 판정 결과 값.",
+    )
+
+    reason: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="이관 시점의 판정 이유. 원본 그대로 복사.",
+    )
+
+    # decided_at 은 원본 판정 시각 — 이관 시 덮어쓰지 않는다.
+    decided_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        doc="원본 판정 시각. 이관 시 덮어쓰지 않는다.",
+    )
+
+    archived_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        doc="이관 시각(UTC).",
+    )
+
+    archive_reason: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        doc="이관 사유. 'content_changed' / 'user_overwrite' / 'admin_override'.",
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_relevance_judgment_history_canonical_user",
+            "canonical_project_id",
+            "user_id",
+        ),
+        Index(
+            "ix_relevance_judgment_history_archived_at",
+            "archived_at",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현을 반환한다."""
+        return (
+            f"<RelevanceJudgmentHistory id={self.id} "
+            f"canonical={self.canonical_project_id} user_id={self.user_id} "
+            f"verdict={self.verdict!r} archive_reason={self.archive_reason!r}>"
+        )
+
+
+class FavoriteFolder(Base):
+    """즐겨찾기 폴더. 최대 depth 2 (루트 + 1단 하위만 허용).
+
+    depth 제약은 DB CHECK 대신 ORM @validates 로 강제한다(사용자 원문: "폴더
+    depth 2 는 ORM validator"). parent 삭제 시 자식은 SET NULL 로 살아남는다.
+
+    NOTE (루트 동명 허용 문제):
+        UNIQUE (user_id, parent_id, name) 는 parent_id IS NULL 인 루트 폴더끼리
+        동명을 허용한다(SQLite/Postgres 모두 NULL 을 "서로 다름"으로 취급).
+        루트 동명 금지는 Phase 1b 에서 repository 계층에 app-check 로 보강한다.
+    """
+
+    __tablename__ = "favorite_folders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "users.id",
+            name="fk_favorite_folders_user_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+        doc="폴더 소유자 사용자 PK.",
+    )
+
+    parent_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "favorite_folders.id",
+            name="fk_favorite_folders_parent_id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+        doc="부모 폴더 PK. NULL 이면 루트(depth=0).",
+    )
+
+    name: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        doc="폴더명.",
+    )
+
+    # depth: 0(루트) 또는 1(루트의 자식). validator 가 parent_id 기준으로 강제.
+    depth: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+        doc="폴더 깊이. 0 = 루트, 1 = 루트의 자식.",
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        doc="생성 시각(UTC).",
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+        doc="레코드 마지막 갱신 시각.",
+    )
+
+    user: Mapped[User] = relationship(
+        "User",
+        back_populates="favorite_folders",
+    )
+
+    # self-reference 관계: 부모 폴더 / 자식 폴더 목록.
+    parent: Mapped[FavoriteFolder | None] = relationship(
+        "FavoriteFolder",
+        remote_side="FavoriteFolder.id",
+        back_populates="children",
+        foreign_keys=lambda: [FavoriteFolder.parent_id],
+    )
+    children: Mapped[list[FavoriteFolder]] = relationship(
+        "FavoriteFolder",
+        back_populates="parent",
+        foreign_keys=lambda: [FavoriteFolder.parent_id],
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "parent_id",
+            "name",
+            name="uq_favorite_folders_user_parent_name",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현을 반환한다."""
+        return (
+            f"<FavoriteFolder id={self.id} user_id={self.user_id} "
+            f"name={self.name!r} depth={self.depth} parent_id={self.parent_id}>"
+        )
+
+
+def _enforce_favorite_folder_depth(session: Session, target: FavoriteFolder) -> None:
+    """FavoriteFolder insert/update 시 depth 2 계층을 강제한다.
+
+    규칙:
+        - parent_id 가 None → 루트(depth=0).
+        - parent_id 가 주어지면 부모가 존재해야 하고, 그 부모의 `parent_id` 는
+          None 이어야 한다(즉 부모는 루트). 이를 어기면 depth 2 초과가 되어
+          ValueError.
+        - 자기 자신을 부모로 지정 금지.
+
+    target.depth 는 여기서 함께 계산하여 parent_id 와의 일관성을 보장한다.
+    DB CHECK 가 없으므로 이 listener 가 유일한 방어선이다.
+
+    session 이 flush 중이므로 세션 쿼리로 부모를 조회할 수 있다 —
+    `@validates` 는 생성자 호출 시점에 돌아 session 이 없을 수 있어 불완전했다.
+    """
+    if target.parent_id is None:
+        target.depth = 0
+        return
+
+    # 자기 자신을 부모로 지정 금지 (PK 가 이미 있을 때만 검사 가능).
+    if target.id is not None and target.parent_id == target.id:
+        raise ValueError("즐겨찾기 폴더는 자기 자신을 부모로 지정할 수 없습니다.")
+
+    # 부모 조회 — flush 컨텍스트 안이므로 pending 객체도 인식한다.
+    parent_row = session.get(FavoriteFolder, target.parent_id)
+    if parent_row is None:
+        raise ValueError(
+            f"부모 폴더를 찾을 수 없습니다: parent_id={target.parent_id}"
+        )
+
+    if parent_row.parent_id is not None:
+        # 부모가 이미 누군가의 자식 → depth 2 초과 → 거부.
+        raise ValueError(
+            "즐겨찾기 폴더는 최대 2단까지만 허용됩니다 "
+            "(루트 또는 루트의 자식만 가능)."
+        )
+
+    target.depth = 1
+
+
+@event.listens_for(FavoriteFolder, "before_insert")
+def _favorite_folder_before_insert(
+    _mapper: Any, connection: Any, target: FavoriteFolder
+) -> None:
+    """INSERT 직전 depth 제약 검사."""
+    session = Session.object_session(target)
+    if session is None:
+        # session 없이 flush 경로에 진입하는 일은 없어야 함 — 방어적 체크.
+        return
+    _enforce_favorite_folder_depth(session, target)
+
+
+@event.listens_for(FavoriteFolder, "before_update")
+def _favorite_folder_before_update(
+    _mapper: Any, connection: Any, target: FavoriteFolder
+) -> None:
+    """UPDATE(parent_id 변경 포함) 직전 depth 제약 검사."""
+    session = Session.object_session(target)
+    if session is None:
+        return
+    _enforce_favorite_folder_depth(session, target)
+
+
 __all__ = [
     "Base",
     "Announcement",
     "AnnouncementStatus",
+    "AnnouncementUserState",
     "Attachment",
     "CanonicalProject",
+    "FavoriteFolder",
+    "RelevanceJudgment",
+    "RelevanceJudgmentHistory",
+    "User",
 ]
