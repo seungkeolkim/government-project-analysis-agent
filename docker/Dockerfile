@@ -26,12 +26,20 @@ COPY pyproject.toml README.md ./
 #    이미지 자체도 단독 실행이 가능하도록 복사해 둔다.
 COPY app ./app
 
-# 3) 파이썬 의존성 및 패키지 editable 설치.
+# 3) Alembic 설정 및 migration 파일 복사.
+#    entrypoint.sh 가 `alembic upgrade head` 를 실행하므로
+#    alembic.ini 와 alembic/ 디렉터리가 /app 아래에 있어야 한다.
+#    init_db.py 가 PROJECT_ROOT / 'alembic.ini' 로 경로를 계산하며
+#    PROJECT_ROOT = /app 이므로 /app/alembic.ini 가 기대 위치다.
+COPY alembic.ini ./
+COPY alembic ./alembic
+
+# 4) 파이썬 의존성 및 패키지 editable 설치.
 #    editable(-e) 로 설치해야 compose 의 ./app 바인드 마운트와 함께
 #    호스트의 소스 변경이 즉시 반영된다.
 RUN pip install --upgrade pip && pip install -e .
 
-# 4) Playwright headless chromium 브라우저 설치.
+# 5) Playwright headless chromium 브라우저 설치.
 #    --with-deps: python:3.12-slim 에 없는 시스템 라이브러리(libnss3, libatk,
 #    libgbm 등)를 함께 설치한다. root 권한이 필요하며 이미지 크기가 ~400 MB 증가한다.
 #    브라우저 바이너리는 /root/.cache/ms-playwright 에 저장된다.
@@ -41,11 +49,11 @@ RUN pip install --upgrade pip && pip install -e .
 #        python -c 'from playwright.async_api import async_playwright; print("ok")'
 RUN playwright install --with-deps chromium
 
-# 5) 런타임에 사용되는 로컬 디렉터리 기본 생성.
+# 6) 런타임에 사용되는 로컬 디렉터리 기본 생성.
 #    compose 의 ./data 볼륨이 이를 덮어쓰지만, 단독 컨테이너 실행 시에도 동작하도록 준비한다.
 RUN mkdir -p /app/data/db /app/data/downloads
 
-# 6) 엔트리포인트 스크립트.
+# 7) 엔트리포인트 스크립트.
 #    sources.yaml per-run copy 격리 및 SOURCES_CONFIG_PATH 주입을 담당한다.
 COPY docker/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh

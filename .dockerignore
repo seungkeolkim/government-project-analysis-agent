@@ -1,0 +1,44 @@
+# 빌드 컨텍스트에서 제외할 항목.
+#
+# data/ 아래에는 SQLite DB 파일과 수십 MB 단위의 첨부 파일이 있어
+# Docker 빌드 컨텍스트로 업로드되면 빌드 속도가 크게 느려진다.
+# 런타임 디렉터리(data/db, data/downloads)는 Dockerfile 의 RUN mkdir 또는
+# compose 의 볼륨 마운트가 처리하므로 이미지 빌드 시에는 필요 없다.
+
+# 데이터 디렉터리 (SQLite DB, 첨부 다운로드)
+data/
+
+# 파이썬 캐시
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Git 메타데이터
+.git/
+.gitignore
+
+# 개발 도구 설정
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.venv/
+venv/
+
+# 환경변수 파일 (비밀 정보 포함 가능)
+.env
+.env.*
+!.env.example
+
+# 소스 설정 파일 (로컬 편집본 — 이미지에 포함하지 않음)
+# compose 가 바인드 마운트로 주입하므로 이미지 내 파일은 불필요하다.
+sources.yaml
+
+# IDE/에디터
+.idea/
+.vscode/
+*.swp
+*.swo
