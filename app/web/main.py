@@ -47,6 +47,8 @@ from app.db.repository import (
     mark_announcement_read,
 )
 from app.db.session import SessionLocal
+from app.scrape_control import cleanup_stale_running_runs
+from app.web.routes import admin_router
 
 # ──────────────────────────────────────────────────────────────
 # 상수
@@ -208,6 +210,29 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     effective_settings.ensure_runtime_paths()
     init_db()
 
+    # Phase 2(00025) — 웹 startup 시 "pid 없는 running row" 및 프로세스 사라진
+    # running row 를 failed 로 정리한다. 이전 인스턴스가 관리하던 subprocess
+    # 는 재시작 후 제어 불가능한 고아 상태이므로 lock 을 해제해 다음 수집을
+    # 받을 수 있도록 한다 (사용자 원문 '동시성 · Stale cleanup' 요구).
+    #
+    # 주의: create_app 은 테스트에서 여러 번 호출될 수 있다. cleanup_stale_running_runs
+    # 은 idempotent (terminal 상태 row 는 건너뜀) — 반복 호출 안전하다.
+    try:
+        cleaned_count = cleanup_stale_running_runs()
+        if cleaned_count:
+            logger.warning(
+                "startup stale cleanup: {}건의 running ScrapeRun 을 failed 로 정리",
+                cleaned_count,
+            )
+    except Exception as exc:
+        # stale cleanup 실패가 웹 기동 자체를 막지는 않도록 한다 — 최악의 경우
+        # lock 이 해제되지 않아 관리자가 수동 정리가 필요할 수 있지만, 웹 UI
+        # 는 뜨는 것이 우선.
+        logger.exception(
+            "startup stale cleanup 실패(스킵, 웹 기동 계속): ({}: {})",
+            type(exc).__name__, exc,
+        )
+
     # sources.yaml 에서 소스 목록을 한 번만 읽어 라우트 클로저에 공유한다.
     available_source_ids: list[str] = get_available_source_ids()
 
@@ -232,6 +257,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # Phase 1b: 인증 라우터(register/login/logout/me) 를 mount 한다.
     # 기존 라우트와 충돌하지 않으며, /auth/* 와 /login, /register 를 노출한다.
     fastapi_app.include_router(auth_router)
+
+    # Phase 2(00025-4): 관리자 라우터(/admin/*) mount.
+    # 라우터 자체에 admin_user_required dependency 가 걸려 있어 비로그인 401,
+    # 비관리자 403. 본 subtask 범위는 [수집 제어] 탭 + startup stale cleanup.
+    fastapi_app.include_router(admin_router)
 
     # ──────────────────────────────────────────────────────────
     # HTML: 목록 페이지

@@ -1,0 +1,251 @@
+{#
+  [수집 제어] 탭 (Phase 2 / 00025-4).
+
+  구성:
+    1. flash 배지 — POST 후 redirect 시 쿼리 파라미터로 전달된 메시지.
+    2. 현재 상태 블록 — running 이면 세부정보 + 중단 버튼, idle 이면 '지금 시작' 폼.
+    3. 최근 이력 테이블 — 최근 N 개 ScrapeRun.
+    4. 5초 폴링 JS — /admin/scrape/status 를 호출해 상태 블록 + 이력 테이블만 갱신.
+
+  사용자 원문 대응:
+    - '지금 시작' 버튼 (source 선택, 전체 default): available_sources 체크박스.
+      아무것도 체크되지 않으면 서버가 '전체 enabled 소스' 로 해석.
+    - '중단' 버튼 (running 시만): running 블록 내부에 배치.
+    - 5초 폴링 (SSE 과함): setInterval + fetch 로 구현.
+    - 비관리자 403: 라우터 레벨 dependency 가 처리.
+
+  컨텍스트 규약:
+    - running: 직렬화 dict 또는 None.
+    - recent_runs: 직렬화 dict 리스트 (최신순).
+    - available_sources: ['IRIS', 'NTIS'] 등.
+    - flash / flash_level: 안내 배지 내용.
+#}
+{% extends "admin/base.html" %}
+
+{% block admin_content %}
+{% if flash %}
+<div class="admin-flash admin-flash--{{ flash_level | default('success') }}" role="status">
+    {{ flash }}
+</div>
+{% endif %}
+
+{# ── 현재 상태 블록 ──────────────────────────────────────────── #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">현재 상태</h3>
+
+    <div id="admin-current-state" class="admin-state">
+        {% if running %}
+            {# 서버 사이드 최초 렌더 — running 상세 + 중단 폼 #}
+            <div class="admin-state__running" data-running-id="{{ running.id }}">
+                <p class="admin-state__label">
+                    <span class="admin-badge admin-badge--running">진행 중</span>
+                    <span class="admin-state__text">
+                        id={{ running.id }} · trigger={{ running.trigger }} · pid={{ running.pid }}
+                        · started_at={{ running.started_at }}
+                    </span>
+                </p>
+                {% if running.source_counts and running.source_counts.active_sources %}
+                <p class="admin-state__muted">
+                    active_sources: {{ running.source_counts.active_sources | join(', ') }}
+                </p>
+                {% endif %}
+
+                <form class="admin-form" method="post" action="/admin/scrape/cancel">
+                    <input type="hidden" name="scrape_run_id" value="{{ running.id }}">
+                    <button type="submit" class="admin-button admin-button--danger">
+                        중단 (SIGTERM)
+                    </button>
+                </form>
+            </div>
+        {% else %}
+            {# 서버 사이드 최초 렌더 — idle 상태. 시작 폼 노출. #}
+            <div class="admin-state__idle">
+                <p class="admin-state__label">
+                    <span class="admin-badge admin-badge--idle">대기</span>
+                    <span class="admin-state__text">현재 진행 중인 수집이 없습니다.</span>
+                </p>
+
+                <form class="admin-form admin-form--start" method="post" action="/admin/scrape/start">
+                    <fieldset class="admin-fieldset">
+                        <legend class="admin-fieldset__legend">
+                            소스 선택 (모두 체크 해제 = 전체)
+                        </legend>
+                        {% for source_id in available_sources %}
+                        <label class="admin-checkbox">
+                            <input type="checkbox" name="active_sources" value="{{ source_id }}">
+                            <span>{{ source_id }}</span>
+                        </label>
+                        {% else %}
+                        <p class="admin-state__muted">
+                            등록된 소스가 없습니다. sources.yaml 을 먼저 설정하세요.
+                        </p>
+                        {% endfor %}
+                    </fieldset>
+                    <button type="submit" class="admin-button admin-button--primary">
+                        지금 시작
+                    </button>
+                </form>
+            </div>
+        {% endif %}
+    </div>
+</section>
+
+{# ── 최근 이력 ──────────────────────────────────────────────── #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">최근 실행 이력</h3>
+
+    <div id="admin-recent-runs">
+        {% include "admin/_recent_runs_table.html" %}
+    </div>
+</section>
+
+{# ── 5초 폴링 JS (외부 CDN 없음) ────────────────────────────── #}
+<script>
+  (function () {
+    // 폴링 주기. /admin/scrape/status 응답의 poll_interval_ms 가 우선하며,
+    // fallback 은 5000ms.
+    var defaultIntervalMs = 5000;
+
+    function formatDateTimeIso(value) {
+      // ISO 문자열 그대로 노출 — timezone/포맷 변환은 UI 에서 하지 않는다.
+      return value || "";
+    }
+
+    function renderRunningBlock(container, running) {
+      if (!running) {
+        container.className = "admin-state__idle";
+        container.innerHTML =
+          '<p class="admin-state__label">' +
+          '<span class="admin-badge admin-badge--idle">대기</span>' +
+          '<span class="admin-state__text">현재 진행 중인 수집이 없습니다.</span>' +
+          '</p>' +
+          '<p class="admin-state__muted">' +
+          '  폼이 숨겨졌습니다. 새 수집을 시작하려면 페이지를 새로고침하세요.' +
+          '</p>';
+        return;
+      }
+      container.className = "admin-state__running";
+      container.setAttribute("data-running-id", String(running.id));
+      var sources = (running.source_counts && running.source_counts.active_sources) || [];
+      var sourcesLine = sources.length
+        ? '<p class="admin-state__muted">active_sources: ' + sources.join(", ") + "</p>"
+        : "";
+      container.innerHTML =
+        '<p class="admin-state__label">' +
+        '  <span class="admin-badge admin-badge--running">진행 중</span>' +
+        '  <span class="admin-state__text">' +
+        '    id=' + running.id +
+        '    · trigger=' + running.trigger +
+        '    · pid=' + (running.pid != null ? running.pid : "?") +
+        '    · started_at=' + formatDateTimeIso(running.started_at) +
+        '  </span>' +
+        '</p>' +
+        sourcesLine +
+        '<form class="admin-form" method="post" action="/admin/scrape/cancel">' +
+        '  <input type="hidden" name="scrape_run_id" value="' + running.id + '">' +
+        '  <button type="submit" class="admin-button admin-button--danger">' +
+        '    중단 (SIGTERM)' +
+        '  </button>' +
+        '</form>';
+    }
+
+    function renderRecentTable(container, recentRuns) {
+      if (!recentRuns || recentRuns.length === 0) {
+        container.innerHTML =
+          '<p class="admin-state__muted">아직 실행 이력이 없습니다.</p>';
+        return;
+      }
+      var rows = recentRuns.map(function (run) {
+        var countsSummary = "";
+        var totals = run.source_counts && run.source_counts.totals;
+        if (totals) {
+          countsSummary =
+            "성공 " + (totals.success || 0) +
+            " / 실패 " + (totals.failure || 0);
+        }
+        var err = run.error_message
+          ? ' <span class="admin-state__muted">(' + run.error_message + ')</span>'
+          : "";
+        return (
+          "<tr>" +
+          "<td>" + run.id + "</td>" +
+          "<td>" + run.status + err + "</td>" +
+          "<td>" + run.trigger + "</td>" +
+          "<td>" + formatDateTimeIso(run.started_at) + "</td>" +
+          "<td>" + formatDateTimeIso(run.ended_at) + "</td>" +
+          "<td>" + countsSummary + "</td>" +
+          '<td><a href="/admin/scrape/runs/' + run.id + '/log">로그</a></td>' +
+          "</tr>"
+        );
+      }).join("");
+      container.innerHTML =
+        '<table class="admin-table">' +
+        "<thead><tr>" +
+        "<th>id</th>" +
+        "<th>status</th>" +
+        "<th>trigger</th>" +
+        "<th>started_at</th>" +
+        "<th>ended_at</th>" +
+        "<th>요약</th>" +
+        "<th>로그</th>" +
+        "</tr></thead>" +
+        "<tbody>" + rows + "</tbody>" +
+        "</table>";
+    }
+
+    function fetchStatus() {
+      fetch("/admin/scrape/status", {
+        credentials: "same-origin",
+        headers: {"Accept": "application/json"},
+      })
+        .then(function (response) {
+          if (!response.ok) {
+            throw new Error("status fetch failed: " + response.status);
+          }
+          return response.json();
+        })
+        .then(function (data) {
+          var currentState = document.getElementById("admin-current-state");
+          if (currentState) {
+            // running 블록을 직접 교체. 최초 서버 렌더가 idle 인 경우에도
+            // 외부 wrapper 는 그대로 두고 내부만 갱신.
+            var wrapper = currentState.firstElementChild;
+            if (!wrapper) {
+              var newWrapper = document.createElement("div");
+              currentState.appendChild(newWrapper);
+              wrapper = newWrapper;
+            }
+            renderRunningBlock(wrapper, data.running);
+          }
+          var recentContainer = document.getElementById("admin-recent-runs");
+          if (recentContainer) {
+            renderRecentTable(recentContainer, data.recent);
+          }
+          // 다음 폴링 주기 반영 (응답이 명시적으로 설정한 경우).
+          if (data.poll_interval_ms && data.poll_interval_ms !== activeIntervalMs) {
+            restartPolling(data.poll_interval_ms);
+          }
+        })
+        .catch(function (err) {
+          // 네트워크 실패 등은 콘솔에만 남기고 폴링 자체는 계속 시도한다.
+          console.warn("[admin polling]", err);
+        });
+    }
+
+    var activeIntervalMs = defaultIntervalMs;
+    var timerId = null;
+
+    function restartPolling(intervalMs) {
+      activeIntervalMs = intervalMs || defaultIntervalMs;
+      if (timerId) {
+        clearInterval(timerId);
+      }
+      timerId = setInterval(fetchStatus, activeIntervalMs);
+    }
+
+    restartPolling(defaultIntervalMs);
+    // 탭 진입 직후에도 1회 즉시 갱신해 flash 이후 상태가 즉각 반영되도록.
+    fetchStatus();
+  })();
+</script>
+{% endblock %}
