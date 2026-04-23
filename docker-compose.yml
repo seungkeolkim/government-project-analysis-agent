@@ -38,6 +38,11 @@ services:
       dockerfile: docker/Dockerfile
     image: iris-agent:dev
     container_name: iris-agent-web
+    # 컨테이너를 호스트 유저 UID:GID 로 실행해 생성 파일(SQLite DB·다운로드·로그 등) 의
+    # owner 가 호스트 유저가 되도록 한다. HOST_UID/HOST_GID 는 .env 에서 주입한다.
+    # YAML 에서 콜론을 포함한 값은 반드시 큰따옴표로 감싸야 mapping 으로 오인되지 않는다.
+    # group_add(HOST_DOCKER_GID) 는 user 지시어와 독립적으로 동작한다 — 두 설정은 충돌하지 않는다.
+    user: "${HOST_UID}:${HOST_GID}"
     env_file:
       - .env
     # Phase 2(00025) — 웹 subprocess 가 호스트 dockerd 에 docker compose 호출을
@@ -95,6 +100,9 @@ services:
     # app 서비스와 동일한 이미지를 재사용하여 빌드 시간을 절약한다.
     image: iris-agent:dev
     container_name: iris-agent-scraper
+    # app 서비스와 동일한 이유로 호스트 유저 UID:GID 로 실행한다.
+    # Playwright 가 생성하는 다운로드 파일·임시 파일 포함 모든 런타임 산출물의 owner 를 맞춘다.
+    user: "${HOST_UID}:${HOST_GID}"
     # 기본 `up` 에서 기동되지 않도록 프로파일로 격리한다.
     # 실행: docker compose --profile scrape run --rm scraper
     profiles:
