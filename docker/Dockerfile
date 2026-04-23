@@ -55,11 +55,43 @@ RUN pip install --upgrade pip && pip install -e .
 #        python -c 'from playwright.async_api import async_playwright; print("ok")'
 RUN playwright install --with-deps chromium
 
-# 6) 런타임에 사용되는 로컬 디렉터리 기본 생성.
+# 6) docker CLI + compose v2 plugin 설치 (Phase 2 / 00025 웹 수집 제어용).
+#    - 웹이 subprocess 로 `docker compose --profile scrape run --rm scraper` 를 호출해
+#      스크래퍼 컨테이너를 기동/중단/스케줄하려면 app 컨테이너 안에 docker CLI 가 있어야 한다.
+#    - Debian bookworm 기본 저장소의 `docker.io` 패키지를 그대로 사용한다(검증 시간 단축을
+#      위해 Docker 공식 apt 저장소 등록은 생략). 이 패키지는 docker 데몬도 함께 설치하지만,
+#      컨테이너 내부에서는 dockerd 를 기동하지 않는다 — docker-in-docker 가 아니라
+#      호스트의 /var/run/docker.sock 을 compose 바인드 마운트로 받아 호스트 dockerd 를
+#      원격 조작하는 방식이다. docker-compose.yml 및 docs/scrape_control_design.md §5 참조.
+#    - docker.io 는 compose v2 플러그인을 포함하지 않으므로, 공식 compose v2 바이너리를
+#      /usr/libexec/docker/cli-plugins 에 직접 배치해 `docker compose` 서브커맨드를 활성화한다.
+#      (compose v1 의 `docker-compose` 대신 v2 의 `docker compose` 를 요구하는 사용자 원문 준수.
+#       v2 는 SIGTERM 을 관리 컨테이너로 전파하는 공식 동작이 검증되어 있어 본 task 의
+#       중단 흐름에 필수 — docs/scrape_control_design.md §6.3 참조.)
+#    - 이미지 크기 증가: docker.io(~80 MB) + compose plugin(~60 MB) ≈ 140 MB.
+#    - **보안 경고**: /var/run/docker.sock 마운트는 호스트 root 권한 부여와 동등하다
+#      (docs/scrape_control_design.md §15.1). FastAPI 의 외부 노출 금지 전제가 이 구성으로
+#      더 강하게 요구된다.
+#
+# ARG 로 버전을 외부 주입 가능하게 하되, 기본값은 reproducible build 를 위해 고정한다.
+ARG DOCKER_COMPOSE_PLUGIN_VERSION=v2.29.7
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        docker.io \
+        curl \
+        ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir -p /usr/libexec/docker/cli-plugins && \
+    curl --fail --silent --show-error --location \
+        "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_PLUGIN_VERSION}/docker-compose-linux-$(uname -m)" \
+        -o /usr/libexec/docker/cli-plugins/docker-compose && \
+    chmod +x /usr/libexec/docker/cli-plugins/docker-compose
+
+# 7) 런타임에 사용되는 로컬 디렉터리 기본 생성.
 #    compose 의 ./data 볼륨이 이를 덮어쓰지만, 단독 컨테이너 실행 시에도 동작하도록 준비한다.
 RUN mkdir -p /app/data/db /app/data/downloads
 
-# 7) 엔트리포인트 스크립트.
+# 8) 엔트리포인트 스크립트.
 #    sources.yaml per-run copy 격리 및 SOURCES_CONFIG_PATH 주입을 담당한다.
 COPY docker/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
