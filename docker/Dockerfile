@@ -26,6 +26,9 @@ COPY pyproject.toml README.md ./
 #    이미지 자체도 단독 실행이 가능하도록 복사해 둔다.
 COPY app ./app
 
+# 2b) 운영자 CLI 스크립트(create_admin.py 등) 노출.
+COPY scripts ./scripts
+
 # 3) Alembic 설정 및 migration 파일 복사.
 #    entrypoint.sh 가 `alembic upgrade head` 를 실행하므로
 #    alembic.ini 와 alembic/ 디렉터리가 /app 아래에 있어야 한다.
