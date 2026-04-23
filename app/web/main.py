@@ -47,6 +47,7 @@ from app.db.repository import (
     mark_announcement_read,
 )
 from app.db.session import SessionLocal
+from app.logging_setup import configure_logging
 from app.scheduler import start_scheduler, stop_scheduler
 from app.scrape_control import cleanup_stale_running_runs
 from app.web.routes import admin_router
@@ -208,6 +209,18 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     팩토리 형태로 제공해 테스트에서 격리된 settings 를 주입할 수 있도록 한다.
     """
     effective_settings = settings or get_settings()
+
+    # 00030-1 — 웹 프로세스 부트스트랩 가장 먼저 로깅을 설정한다.
+    # 이전에는 configure_logging() 이 CLI 진입점(app.cli, scripts/*) 에서만
+    # 호출돼, uvicorn 이 기동한 FastAPI 프로세스에서는 loguru 가 기본 상태로
+    # 남아 LOG_LEVEL=DEBUG 가 무시되고 stdlib logging(uvicorn/starlette/
+    # fastapi/sqlalchemy/alembic) 이 loguru 로 라우팅되지 않았다. 결과적으로
+    # 미처리 예외의 stack trace 가 docker logs 에 전혀 남지 않는 문제가 있어,
+    # create_app() 최상단에서 명시적으로 호출하도록 고정한다.
+    # init_db() 내부에서 다시 호출될 가능성에 대비해 configure_logging 은
+    # idempotent 하게 구현돼 있다.
+    configure_logging(effective_settings)
+
     effective_settings.ensure_runtime_paths()
     init_db()
 
