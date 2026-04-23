@@ -1,20 +1,24 @@
-"""관리자 페이지 라우터 (Phase 2 / 00025-4, 00025-5).
+"""관리자 페이지 라우터 (Phase 2 / 00025-4, 00025-5, 00025-6).
 
 사용자 원문의 '관리자 페이지 (app/web/routes/admin.py)' 섹션을 구현한다.
-탭 3개 중:
-    - [수집 제어]:   00025-4 에서 구현 완료.
-    - [sources.yaml]: 00025-5 에서 추가 (본 subtask).
-    - [스케줄]:      00025-6 에서 추가 예정 — 탭 링크만 base 템플릿에 있다.
+탭 3개 전부 구현:
+    - [수집 제어]:   00025-4 — 수동 시작/중단/이력/5초 폴링.
+    - [sources.yaml]: 00025-5 — textarea 편집 + Pydantic 검증 + 백업.
+    - [스케줄]:      00025-6 (본 subtask) — cron/매N시간 등록/토글/삭제.
 
 엔드포인트:
-    GET  /admin                         → 307 redirect /admin/scrape
-    GET  /admin/scrape                  HTML 수집 제어 탭
-    GET  /admin/scrape/status           JSON (5초 폴링용)
-    POST /admin/scrape/start            수동 수집 시작 → 303 /admin/scrape
-    POST /admin/scrape/cancel           중단 요청 → 303 /admin/scrape
-    GET  /admin/scrape/runs/{id}/log    text/plain 로그 파일 덤프
-    GET  /admin/sources/yaml            HTML sources.yaml 편집기 탭
-    POST /admin/sources/yaml            YAML 검증·백업·저장 후 재렌더
+    GET  /admin                              → 307 redirect /admin/scrape
+    GET  /admin/scrape                       HTML 수집 제어 탭
+    GET  /admin/scrape/status                JSON (5초 폴링용)
+    POST /admin/scrape/start                 수동 수집 시작 → 303 /admin/scrape
+    POST /admin/scrape/cancel                중단 요청 → 303 /admin/scrape
+    GET  /admin/scrape/runs/{id}/log         text/plain 로그 파일 덤프
+    GET  /admin/sources/yaml                 HTML sources.yaml 편집기 탭
+    POST /admin/sources/yaml                 YAML 검증·백업·저장 후 재렌더
+    GET  /admin/schedule                     HTML 스케줄 탭
+    POST /admin/schedule                     cron/interval 스케줄 등록
+    POST /admin/schedule/{job_id}/toggle     활성/비활성 토글
+    POST /admin/schedule/{job_id}/delete     스케줄 삭제
 
 보호:
     라우터 레벨 ``dependencies=[Depends(admin_user_required)]`` 로 GET/POST
@@ -47,6 +51,15 @@ from app.db.repository import (
     list_recent_scrape_runs,
 )
 from app.db.session import session_scope
+from app.scheduler import (
+    ScheduleValidationError,
+    add_cron_schedule,
+    add_interval_schedule,
+    delete_schedule,
+    is_scheduler_running,
+    list_schedules,
+    toggle_schedule,
+)
 from app.scrape_control import (
     ComposeEnvironmentError,
     ScrapeAlreadyRunningError,
@@ -582,6 +595,275 @@ def _sources_yaml_flash_url(message: str, *, level: str) -> str:
 
     query = urlencode({"flash": message, "flash_level": level})
     return f"/admin/sources/yaml?{query}"
+
+
+# ──────────────────────────────────────────────────────────────
+# [스케줄] 탭 (Phase 2 / 00025-6)
+# ──────────────────────────────────────────────────────────────
+
+
+def _schedule_flash_url(message: str, *, level: str) -> str:
+    """/admin/schedule?flash=...&flash_level=... redirect URL 빌더."""
+    from urllib.parse import urlencode
+
+    query = urlencode({"flash": message, "flash_level": level})
+    return f"/admin/schedule?{query}"
+
+
+@router.get("/schedule", response_class=HTMLResponse)
+def schedule_page(
+    request: Request,
+    flash: Optional[str] = Query(default=None),
+    flash_level: Optional[str] = Query(default=None),
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """[스케줄] 탭 — 등록된 스케줄 목록 + 신규 등록 폼.
+
+    템플릿 컨텍스트:
+        active_tab:         'schedule'.
+        schedules:          ScheduleSummary 리스트 (next_run_time 오름차순).
+        available_sources:  시작 폼에서 고를 수 있는 source id 목록.
+        scheduler_running:  APScheduler 가 기동되어 있는지.
+        flash / flash_level: 상단 안내 배지.
+        current_user:       네비 + is_admin 분기용.
+    """
+    try:
+        schedules = list_schedules()
+    except Exception as exc:
+        # jobstore 접근 실패 등 예외. UI 는 빈 목록으로 폴백하되 에러를 flash 로 노출.
+        logger.exception(
+            "스케줄 목록 조회 실패: {}: {}", type(exc).__name__, exc,
+        )
+        schedules = []
+        if flash is None:
+            flash = f"스케줄 목록 조회 실패: {exc}"
+            flash_level = "error"
+
+    return _templates.TemplateResponse(
+        request,
+        "admin/schedule.html",
+        {
+            "active_tab": "schedule",
+            "schedules": schedules,
+            "available_sources": get_available_source_ids(),
+            "scheduler_running": is_scheduler_running(),
+            "flash": flash,
+            "flash_level": flash_level or "success",
+            "current_user": current_user,
+        },
+    )
+
+
+def _parse_schedule_active_sources(
+    raw_values: list[str],
+    available: list[str],
+) -> list[str]:
+    """schedule 등록 폼의 active_sources 체크박스 검증.
+
+    [수집 제어] 탭의 _parse_active_sources_form 과 같은 정책 — 알 수 없는 id 는
+    거부 (sources.yaml 과 동기화 깨짐을 알리는 쪽이 안전).
+    """
+    cleaned: list[str] = []
+    for value in raw_values:
+        trimmed = value.strip()
+        if not trimmed:
+            continue
+        if trimmed not in available:
+            raise ScheduleValidationError(
+                f"알 수 없는 source id: {trimmed!r}. 허용: {', '.join(available)}"
+            )
+        if trimmed not in cleaned:
+            cleaned.append(trimmed)
+    return cleaned
+
+
+@router.post("/schedule", dependencies=[Depends(ensure_same_origin)])
+def schedule_add(
+    request: Request,
+    trigger_type: str = Form(...),
+    cron_expression: Optional[str] = Form(default=None),
+    interval_hours: Optional[int] = Form(default=None),
+    active_sources: list[str] = Form(default_factory=list),
+    enabled: Optional[str] = Form(default=None),
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """새 스케줄을 등록한다.
+
+    Form 필드:
+        trigger_type:    'cron' 또는 'interval' — 입력 분기.
+        cron_expression: trigger_type='cron' 일 때 사용. 5-필드 cron.
+        interval_hours:  trigger_type='interval' 일 때 사용. 양의 정수.
+        active_sources:  체크박스 multi 값. 비어 있으면 전체.
+        enabled:         체크박스 'on' 또는 누락. 기본은 등록 즉시 활성.
+
+    흐름 & 예외:
+        trigger_type 값이 유효하지 않거나 필드 누락이면 ScheduleValidationError
+        로 flash error redirect. add_*_schedule 이 raise 하는 동일 예외도 같은
+        경로로 처리. 성공 시 PRG 패턴(303) 로 /admin/schedule.
+    """
+    trigger_type_normalized = trigger_type.strip().lower()
+    should_enable = bool(enabled) and enabled != "off"
+
+    available = get_available_source_ids()
+    try:
+        normalized_sources = _parse_schedule_active_sources(active_sources, available)
+
+        if trigger_type_normalized == "cron":
+            if not cron_expression:
+                raise ScheduleValidationError(
+                    "cron 표현식이 누락되었습니다."
+                )
+            summary = add_cron_schedule(
+                cron_expression=cron_expression,
+                active_sources=normalized_sources,
+                enabled=should_enable,
+            )
+        elif trigger_type_normalized == "interval":
+            if interval_hours is None:
+                raise ScheduleValidationError(
+                    "매 N시간 값이 누락되었습니다."
+                )
+            summary = add_interval_schedule(
+                hours=interval_hours,
+                active_sources=normalized_sources,
+                enabled=should_enable,
+            )
+        else:
+            raise ScheduleValidationError(
+                f"지원하지 않는 trigger_type: {trigger_type!r}. "
+                "'cron' 또는 'interval' 만 허용합니다."
+            )
+    except ScheduleValidationError as exc:
+        logger.info(
+            "스케줄 등록 거부 — 검증 실패: 관리자={} ({})",
+            current_user.username, exc,
+        )
+        return RedirectResponse(
+            url=_schedule_flash_url(str(exc), level="error"),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    except Exception as exc:
+        # APScheduler 자체의 오류(jobstore 연결 실패 등)
+        logger.exception(
+            "스케줄 등록 실패(예기치 못한 예외): 관리자={} ({}: {})",
+            current_user.username, type(exc).__name__, exc,
+        )
+        return RedirectResponse(
+            url=_schedule_flash_url(
+                f"스케줄 등록 실패({type(exc).__name__}): {exc}",
+                level="error",
+            ),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    logger.info(
+        "스케줄 등록: 관리자={} job_id={} trigger_type={} spec={!r} enabled={}",
+        current_user.username,
+        summary.job_id,
+        summary.trigger_type,
+        summary.trigger_spec,
+        summary.enabled,
+    )
+    message = (
+        f"스케줄 등록 완료 (id={summary.job_id}, {summary.trigger_type}: "
+        f"{summary.trigger_spec}, enabled={summary.enabled})."
+    )
+    return RedirectResponse(
+        url=_schedule_flash_url(message, level="success"),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.post(
+    "/schedule/{job_id}/toggle",
+    dependencies=[Depends(ensure_same_origin)],
+)
+def schedule_toggle(
+    job_id: str,
+    enabled: str = Form(...),
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """스케줄을 활성/비활성 토글한다.
+
+    Form:
+        enabled: 'true' 또는 'false' 문자열. 체크박스 POST 와 맞추기 위해
+                 문자열로 받고 수동 파싱.
+    """
+    normalized = enabled.strip().lower()
+    if normalized not in ("true", "false"):
+        return RedirectResponse(
+            url=_schedule_flash_url(
+                f"enabled 값은 'true' 또는 'false' 여야 합니다 (입력: {enabled!r}).",
+                level="error",
+            ),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    target_enabled = normalized == "true"
+
+    try:
+        summary = toggle_schedule(job_id, enabled=target_enabled)
+    except ScheduleValidationError as exc:
+        logger.info(
+            "스케줄 토글 실패: 관리자={} job_id={} ({})",
+            current_user.username, job_id, exc,
+        )
+        return RedirectResponse(
+            url=_schedule_flash_url(str(exc), level="error"),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    logger.info(
+        "스케줄 토글 완료: 관리자={} job_id={} enabled={} next_run_time={}",
+        current_user.username,
+        job_id,
+        summary.enabled,
+        summary.next_run_time,
+    )
+    verb = "활성화" if target_enabled else "비활성화"
+    return RedirectResponse(
+        url=_schedule_flash_url(
+            f"스케줄 {verb} 완료 (id={job_id}).",
+            level="success",
+        ),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.post(
+    "/schedule/{job_id}/delete",
+    dependencies=[Depends(ensure_same_origin)],
+)
+def schedule_delete(
+    job_id: str,
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """스케줄을 삭제한다 (jobstore 에서 제거).
+
+    삭제 전에 확인 팝업은 UI JS 가 처리한다.
+    """
+    try:
+        delete_schedule(job_id)
+    except ScheduleValidationError as exc:
+        logger.info(
+            "스케줄 삭제 실패: 관리자={} job_id={} ({})",
+            current_user.username, job_id, exc,
+        )
+        return RedirectResponse(
+            url=_schedule_flash_url(str(exc), level="error"),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    logger.info(
+        "스케줄 삭제 완료: 관리자={} job_id={}",
+        current_user.username, job_id,
+    )
+    return RedirectResponse(
+        url=_schedule_flash_url(
+            f"스케줄 삭제 완료 (id={job_id}).",
+            level="success",
+        ),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 __all__ = [

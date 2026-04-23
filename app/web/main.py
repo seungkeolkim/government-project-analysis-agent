@@ -47,6 +47,7 @@ from app.db.repository import (
     mark_announcement_read,
 )
 from app.db.session import SessionLocal
+from app.scheduler import start_scheduler, stop_scheduler
 from app.scrape_control import cleanup_stale_running_runs
 from app.web.routes import admin_router
 
@@ -233,6 +234,26 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             type(exc).__name__, exc,
         )
 
+    # Phase 2(00025-6): APScheduler BackgroundScheduler 기동.
+    # stale cleanup 이 끝난 **뒤** 에 start 한다 — 스케줄 잡이 곧바로
+    # start_scrape_run 을 부르게 되면 방금 failed 로 정리한 lock 을 다시
+    # running 으로 올려야 하는데, cleanup 과 scheduler.start() 사이에 race
+    # 가 있으면 간헐적으로 lock 경합이 생길 수 있다. 순서 고정으로 방지.
+    #
+    # 재시작 후 복원: SQLAlchemyJobStore 가 scheduler_jobs 테이블에서 잡을
+    # 자동 로드. misfire_grace_time(기본 300초) 안에 들어오는 놓친 잡은
+    # coalesce=True 로 한 번에 합쳐 실행된다.
+    #
+    # 실패 시 정책: 수동 수집(/admin/scrape) 은 스케줄러가 없어도 동작해야
+    # 하므로 예외를 삼키고 웹 기동은 계속한다.
+    try:
+        start_scheduler()
+    except Exception as exc:
+        logger.exception(
+            "APScheduler 기동 실패(스킵, 수동 수집은 계속 가능): ({}: {})",
+            type(exc).__name__, exc,
+        )
+
     # sources.yaml 에서 소스 목록을 한 번만 읽어 라우트 클로저에 공유한다.
     available_source_ids: list[str] = get_available_source_ids()
 
@@ -262,6 +283,23 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # 라우터 자체에 admin_user_required dependency 가 걸려 있어 비로그인 401,
     # 비관리자 403. 본 subtask 범위는 [수집 제어] 탭 + startup stale cleanup.
     fastapi_app.include_router(admin_router)
+
+    # Phase 2(00025-6): shutdown 시 APScheduler 정지.
+    # docker-compose 의 `restart: unless-stopped` 와 결합해, 웹 프로세스가 정상
+    # 종료되면 잡도 깨끗이 멈췄다가 재기동 시 scheduler_jobs 테이블에서 자동
+    # 복원된다 (progress 손실 없음). wait=False 는 진행 중 잡(수집 subprocess)
+    # 을 기다리지 않고 즉시 shutdown — subprocess 자체는 별도 watcher 스레드가
+    # 관리하므로 웹이 죽어도 수집은 계속 돌다가 자기 ScrapeRun 을 마감한다.
+    @fastapi_app.on_event("shutdown")
+    def _shutdown_scheduler() -> None:  # noqa: D401 - FastAPI 훅
+        """FastAPI shutdown 훅 — scheduler 정지."""
+        try:
+            stop_scheduler(wait=False)
+        except Exception as exc:
+            logger.warning(
+                "APScheduler shutdown 중 예외(무시): {}: {}",
+                type(exc).__name__, exc,
+            )
 
     # ──────────────────────────────────────────────────────────
     # HTML: 목록 페이지

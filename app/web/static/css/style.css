@@ -1062,3 +1062,65 @@ body.is-anonymous .announcement-title-link--read {
     padding: 1px 4px;
     border-radius: 3px;
 }
+
+/* ---------- 스케줄 탭 (Phase 2 / 00025-6) ---------- */
+
+.admin-schedule__actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.admin-schedule__inline-form {
+    margin: 0;
+    display: inline-flex;
+}
+
+.admin-schedule__form {
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 14px 16px;
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.admin-schedule__fieldset {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+}
+
+.admin-schedule__text {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 13px;
+    color: #374151;
+    width: 100%;
+    max-width: 360px;
+}
+
+.admin-schedule__input {
+    padding: 6px 8px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    font: inherit;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 13px;
+}
+
+.admin-schedule__input:focus {
+    outline: none;
+    border-color: #60a5fa;
+    box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.35);
+}
+
+.admin-schedule__enabled {
+    margin-top: 2px;
+}
+
+.admin-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
