@@ -171,6 +171,14 @@ def scrape_control_page(
         flash / flash_level: 상단 안내 배지.
         current_user:     상단 네비 + is_admin 조건 분기용.
     """
+    # 00030-3 — /admin/scrape 500 원인 추적용 진입 로그. 이 라인이 없으면
+    # admin_user_required 이전 단계(쿠키/세션/User 로드) 문제, 있으나 그 다음
+    # DB 조회 / 템플릿 렌더에서 터졌다면 해당 구간 문제로 범위를 좁힐 수 있다.
+    logger.debug(
+        "admin.scrape_control_page 진입: user_id={} has_flash={}",
+        current_user.id,
+        flash is not None,
+    )
     with session_scope() as session:
         running_row = get_running_scrape_run(session)
         recent_rows = list_recent_scrape_runs(session, limit=RECENT_RUN_LIMIT)
@@ -179,6 +187,12 @@ def scrape_control_page(
 
     # sources.yaml 기반 등록 소스 목록. 변경 시 자동 반영 (session 과 무관).
     available_sources = get_available_source_ids()
+    logger.debug(
+        "admin.scrape_control_page DB 조회 완료: running={} recent_count={} sources_count={}",
+        running_payload is not None,
+        len(recent_payload),
+        len(available_sources),
+    )
 
     return _templates.TemplateResponse(
         request,
@@ -483,6 +497,7 @@ def sources_yaml_page(
     알린다. 빈 textarea 가 아니라 500 을 띄우면 관리자가 yaml 내용을 잃을 수
     있어, 복구 가능성을 남기는 편이 낫다.
     """
+    logger.debug("admin.sources_yaml_page 진입: user_id={}", current_user.id)
     try:
         yaml_text = load_sources_yaml_text()
         load_error: Optional[str] = None
@@ -627,6 +642,7 @@ def schedule_page(
         flash / flash_level: 상단 안내 배지.
         current_user:       네비 + is_admin 분기용.
     """
+    logger.debug("admin.schedule_page 진입: user_id={}", current_user.id)
     try:
         schedules = list_schedules()
     except Exception as exc:

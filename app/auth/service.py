@@ -279,6 +279,7 @@ def authenticate(
     except UsernamePolicyError:
         # 그래도 dummy 해시 검증을 한 번 수행해 timing 을 균일화한다.
         _password_context.dummy_verify()
+        logger.debug("authenticate: username 정책 위반 → 인증 실패")
         return None
 
     user = session.execute(
@@ -288,11 +289,14 @@ def authenticate(
     if user is None:
         # username 미존재. 응답 시간을 타 사용자 조회와 비슷하게 맞춘다.
         _password_context.dummy_verify()
+        logger.debug("authenticate: 미존재 username → 인증 실패")
         return None
 
     if not verify_password(password, user.password_hash):
+        logger.debug("authenticate: 비밀번호 불일치 user_id={}", user.id)
         return None
 
+    logger.debug("authenticate: 성공 user_id={} is_admin={}", user.id, user.is_admin)
     return user
 
 
@@ -394,6 +398,10 @@ def get_active_session(
     ).scalar_one_or_none()
 
     if user_session is None:
+        logger.debug(
+            "get_active_session: 미존재 session_id_prefix={!r}",
+            session_id[:8],
+        )
         return None
     # SQLite 는 DateTime(timezone=True) 의 tz 정보를 저장하지 못한다. SELECT
     # 직후 expires_at 이 naive 로 돌아오면 tz-aware now_ts 와 비교가 깨지므로
@@ -402,7 +410,18 @@ def get_active_session(
     # 공용 헬퍼로 승격됐다. auth 는 여기 하나에서만 사용한다.
     if as_utc(user_session.expires_at) <= as_utc(now_ts):
         # 만료 세션은 유효하지 않은 것으로 보고만 한다. 삭제는 하지 않는다.
+        logger.debug(
+            "get_active_session: 만료 session_id_prefix={!r} expires_at={} user_id={}",
+            session_id[:8],
+            user_session.expires_at.isoformat(),
+            user_session.user_id,
+        )
         return None
+    logger.debug(
+        "get_active_session: 유효 session_id_prefix={!r} user_id={}",
+        session_id[:8],
+        user_session.user_id,
+    )
     return user_session
 
 

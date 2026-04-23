@@ -47,8 +47,13 @@ from app.db.repository import (
     mark_announcement_read,
 )
 from app.db.session import SessionLocal
+from app.logging_setup import configure_logging
 from app.scheduler import start_scheduler, stop_scheduler
 from app.scrape_control import cleanup_stale_running_runs
+from app.web.observability import (
+    install_request_logging_middleware,
+    install_unhandled_exception_handler,
+)
 from app.web.routes import admin_router
 
 # ──────────────────────────────────────────────────────────────
@@ -72,11 +77,16 @@ _ALLOWED_SORT_VALUES: tuple[str, ...] = ("received_desc", "deadline_asc", "title
 
 def get_session() -> Iterator[Session]:
     """요청 단위 DB 세션 의존성."""
+    # 00030-3 — 요청 단위 DB 세션 lifecycle DEBUG 로그. 요청 미들웨어의
+    # request_id 컨텍스트가 함께 찍혀 "한 요청에 세션이 몇 번 열렸나" 확인이
+    # 쉽다. FastAPI 가 Depends 로 주입할 때마다 이 함수가 호출된다.
     session = SessionLocal()
+    logger.debug("web get_session open")
     try:
         yield session
     finally:
         session.close()
+        logger.debug("web get_session close")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -208,6 +218,18 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     팩토리 형태로 제공해 테스트에서 격리된 settings 를 주입할 수 있도록 한다.
     """
     effective_settings = settings or get_settings()
+
+    # 00030-1 — 웹 프로세스 부트스트랩 가장 먼저 로깅을 설정한다.
+    # 이전에는 configure_logging() 이 CLI 진입점(app.cli, scripts/*) 에서만
+    # 호출돼, uvicorn 이 기동한 FastAPI 프로세스에서는 loguru 가 기본 상태로
+    # 남아 LOG_LEVEL=DEBUG 가 무시되고 stdlib logging(uvicorn/starlette/
+    # fastapi/sqlalchemy/alembic) 이 loguru 로 라우팅되지 않았다. 결과적으로
+    # 미처리 예외의 stack trace 가 docker logs 에 전혀 남지 않는 문제가 있어,
+    # create_app() 최상단에서 명시적으로 호출하도록 고정한다.
+    # init_db() 내부에서 다시 호출될 가능성에 대비해 configure_logging 은
+    # idempotent 하게 구현돼 있다.
+    configure_logging(effective_settings)
+
     effective_settings.ensure_runtime_paths()
     init_db()
 
@@ -274,6 +296,16 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         StaticFiles(directory=str(STATIC_DIR)),
         name="static",
     )
+
+    # 00030-2 — HTTP access log 미들웨어 + 전역 예외 핸들러.
+    # 미들웨어는 라우터 mount 보다 먼저 등록해야 모든 라우트를 덮고, 예외
+    # 핸들러도 함께 설치해 라우트 안에서 터진 미처리 예외를 stack trace 와
+    # 함께 loguru 로 기록한다 (docker logs 가 비어 있던 문제 대응).
+    # FastAPI 기본 HTTPException/RequestValidationError 핸들러가 더 구체적이라
+    # 먼저 매칭되므로 4xx 경로는 본 핸들러를 거치지 않는다 (주석:
+    # app/web/observability.py 참조).
+    install_request_logging_middleware(fastapi_app)
+    install_unhandled_exception_handler(fastapi_app)
 
     # Phase 1b: 인증 라우터(register/login/logout/me) 를 mount 한다.
     # 기존 라우트와 충돌하지 않으며, /auth/* 와 /login, /register 를 노출한다.
