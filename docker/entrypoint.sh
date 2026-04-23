@@ -12,15 +12,6 @@
 
 set -eu
 
-# 00032 — docker CLI 조기 진단 (수집 제어 기능의 의존성).
-# 바이너리가 없어도 웹 UI 자체는 기동하므로 exit 하지 않고 경고만 남긴다.
-# 실제 에러는 수집 트리거 시 runner.py 의 _resolve_docker_binary() 가 발생시킨다.
-_docker_found="${DOCKER_BINARY:-$(command -v docker 2>/dev/null || true)}"
-if [ -z "$_docker_found" ] || ! [ -x "$_docker_found" ]; then
-    echo "[entrypoint] WARNING: docker CLI 를 찾지 못했습니다(경로: ${_docker_found:-없음}). 수집 트리거가 동작하지 않습니다. 이미지를 재빌드하세요: docker compose build app && docker compose up -d app" >&2
-fi
-unset _docker_found
-
 SOURCES_YAML_MOUNT="${SOURCES_YAML_MOUNT:-/run/config/sources.yaml}"
 SOURCES_YAML_TEMPLATE="/app/sources.yaml.template"
 

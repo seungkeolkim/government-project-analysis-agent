@@ -104,10 +104,7 @@ RUN apt-get update && \
     curl --fail --silent --show-error --location \
         "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_PLUGIN_VERSION}/docker-compose-linux-$(uname -m)" \
         -o /usr/libexec/docker/cli-plugins/docker-compose && \
-    chmod +x /usr/libexec/docker/cli-plugins/docker-compose && \
-    chmod a+rx /usr/bin/docker
-#   ↑ 00032: 비특권 UID(host UID/GID 로 실행) 에서도 docker CLI 를 실행할 수 있도록
-#     world-executable 보장. docker.io 패키지가 755 로 설치하지만 명시 보장 추가.
+    chmod +x /usr/libexec/docker/cli-plugins/docker-compose
 
 # 7) 런타임에 사용되는 로컬 디렉터리 기본 생성.
 #    compose 의 ./data 볼륨이 이를 덮어쓰지만, 단독 컨테이너 실행 시에도 동작하도록 준비한다.

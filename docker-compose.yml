@@ -61,11 +61,6 @@ services:
       # 동일 결과를 강제하므로 두 장치가 보완적으로 동작한다. HOST_TZ 를
       # .env 에 설정하면 기본값(Asia/Seoul) 을 덮어쓸 수 있다.
       - TZ=${HOST_TZ:-Asia/Seoul}
-      # 00032 — docker CLI 절대경로를 명시해 APScheduler 백그라운드 컨텍스트의
-      # 제한된 PATH 에서도 _resolve_docker_binary() 가 shutil.which 탐색 없이
-      # 곧바로 사용할 수 있게 한다. 이미지에 docker.io 가 설치된 경우(이미지
-      # 재빌드 후)에만 유효하다. 파일이 없으면 수집 트리거 시 명확한 에러 발생.
-      - DOCKER_BINARY=/usr/bin/docker
     ports:
       - "8000:8000"
     volumes:

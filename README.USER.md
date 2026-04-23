@@ -799,45 +799,6 @@ sqlite3 ./data/db/app.sqlite3 "DELETE FROM announcements WHERE is_current = 0;"
 
 ## 트러블슈팅
 
-### 수집 트리거 시 "docker CLI 바이너리를 찾지 못했습니다" 오류가 발생한다
-
-관리자 페이지 [지금 시작] 버튼 또는 스케줄러가 수집을 트리거할 때 아래 오류가 나타나는 경우:
-
-```
-docker CLI 바이너리를 찾지 못했습니다. app 컨테이너에 docker.io 패키지가 설치되어
-있는지, 또는 비특권 UID 가 해당 파일을 실행할 수 있는지 확인하세요 (이미지 재빌드가
-필요할 수 있습니다).
-```
-
-또는 `DOCKER_BINARY` 관련 오류가 나타나는 경우:
-
-```
-환경변수 DOCKER_BINARY='/usr/bin/docker' 가 유효한 실행 가능한 절대경로가 아닙니다...
-```
-
-**원인**: `app` 컨테이너 이미지가 `docker.io` 패키지 설치 단계(`docker/Dockerfile` step 6)가
-포함되기 전에 빌드된 버전이어서, 컨테이너 내부에 `/usr/bin/docker` 바이너리가 존재하지 않는다.
-
-**해결**: 이미지를 재빌드한 뒤 컨테이너를 재기동한다.
-
-```bash
-# 1) 현재 컨테이너 중지 및 이미지 재빌드
-docker compose build app
-
-# 2) 재기동
-docker compose up -d app
-
-# 3) 정상 설치 여부 확인
-docker compose exec app docker --version
-# 예) Docker version 20.10.x, build ...
-```
-
-> **기동 시 경고 메시지 확인**: 이미지가 구버전인 경우 컨테이너 기동 직후 로그에
-> `[entrypoint] WARNING: docker CLI 를 찾지 못했습니다` 경고가 출력된다.
-> 재빌드 후 이 경고가 사라지면 정상이다.
-
----
-
 ### admin 페이지에서 500 에러가 나는데 docker logs 가 비어 있다
 
 00030 이전 버전에서 발생하던 증상. 현재 버전에서는 loguru↔stdlib 브리지가 설치돼 있어 500 에러가 나면
