@@ -105,6 +105,39 @@ ls -la ./data/
 > **복구 범위.** `./data/` 전체를 재귀 변경하므로 `data/backups/` · `data/downloads/` ·
 > `data/logs/` 가 모두 포함된다. 특정 항목만 변경하려면 경로를 좁혀 실행한다.
 
+### 타임존 (기본 Asia/Seoul)
+
+`docker-compose.yml` 은 `app`·`scraper` 두 서비스에 **TZ=Asia/Seoul** 환경변수와
+호스트 **`/etc/localtime`** 의 읽기 전용 바인드 마운트를 함께 주입한다.
+결과적으로 컨테이너 안의 `date` 명령과 loguru 로그 타임스탬프가 KST(+0900)로
+표시된다. 별도 설정 없이 clone 후 `docker compose up` 만 하면 적용된다.
+
+> **DB 는 여전히 UTC 로 저장된다.** `scrape_runs.started_at` 등 모든 시각
+> 컬럼은 `datetime.now(tz=UTC)` 로 기록되며 이 변경은 화면/로그의 시각
+> 표시에만 영향을 준다. APScheduler 의 cron 표현식도 여전히 UTC 기준으로
+> 해석되므로(`BackgroundScheduler(timezone=timezone.utc)` 고정) 기존 스케줄
+> 해석 시각은 바뀌지 않는다. 예) `0 3 * * *` = 매일 UTC 03:00 = KST 12:00.
+
+다른 지역 타임존으로 운영하려면 `.env` 에 `HOST_TZ` 를 설정한다:
+
+```bash
+echo "HOST_TZ=UTC" >> .env               # 컨테이너만 UTC 로 회귀
+echo "HOST_TZ=Europe/Berlin" >> .env     # 다른 IANA 존으로 오버라이드
+docker compose up -d --force-recreate app
+```
+
+**revert 절차** (KST 동기화를 완전히 끄고 슬림 이미지 기본값인 UTC 로 돌아가는 경우):
+`docker-compose.yml` 의 두 서비스에서 ① `- TZ=${HOST_TZ:-Asia/Seoul}` 환경변수
+라인과 ② `- /etc/localtime:/etc/localtime:ro` 볼륨 라인을 제거한 뒤
+`docker compose up -d --force-recreate` 로 재생성한다.
+
+> **호스트 요구**: `/etc/localtime` 바인드 마운트는 Linux/macOS 의 기본 구성에
+> 존재한다. 해당 경로가 없는 최소 설치 환경이라면 compose 가 기동 시 오류를
+> 내므로, 볼륨 한 줄만 주석 처리하고 `HOST_TZ` 환경변수 주입만 유지한다
+> (다만 python:3.12-slim 에는 tzdata 전체가 내장되어 있지 않아 이름 조회가
+> 실패할 수 있어, 이때는 `docker/Dockerfile` 의 apt 설치 목록에 `tzdata` 를
+> 추가하고 이미지를 재빌드한다).
+
 ---
 
 ## 첫 관리자 계정 생성
