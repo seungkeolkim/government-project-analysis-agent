@@ -77,11 +77,16 @@ _ALLOWED_SORT_VALUES: tuple[str, ...] = ("received_desc", "deadline_asc", "title
 
 def get_session() -> Iterator[Session]:
     """요청 단위 DB 세션 의존성."""
+    # 00030-3 — 요청 단위 DB 세션 lifecycle DEBUG 로그. 요청 미들웨어의
+    # request_id 컨텍스트가 함께 찍혀 "한 요청에 세션이 몇 번 열렸나" 확인이
+    # 쉽다. FastAPI 가 Depends 로 주입할 때마다 이 함수가 호출된다.
     session = SessionLocal()
+    logger.debug("web get_session open")
     try:
         yield session
     finally:
         session.close()
+        logger.debug("web get_session close")
 
 
 # ──────────────────────────────────────────────────────────────

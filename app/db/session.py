@@ -13,6 +13,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import lru_cache
 
+from loguru import logger
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -91,15 +92,24 @@ def session_scope() -> Iterator[Session]:
         with session_scope() as session:
             session.add(obj)
     """
+    # 00030-3 — 트랜잭션 lifecycle 추적용 DEBUG 로그. 요청 컨텍스트 안에서는
+    # observability 미들웨어가 request_id 를 contextualize 해 두었기 때문에
+    # 이 라인에도 동일한 req=... 가 찍혀 한 요청이 session_scope 를 몇 번
+    # 여는지 쉽게 볼 수 있다. commit/rollback 은 별도 라인으로 남겨 어떤
+    # 경로로 종료됐는지 분리한다.
     session = SessionLocal()
+    logger.debug("session_scope open")
     try:
         yield session
         session.commit()
+        logger.debug("session_scope commit")
     except Exception:
         session.rollback()
+        logger.debug("session_scope rollback (예외 전파)")
         raise
     finally:
         session.close()
+        logger.debug("session_scope close")
 
 
 def reset_engine_cache() -> None:
