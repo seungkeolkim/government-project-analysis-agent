@@ -12,13 +12,14 @@
 1. [초기 설치 요약](#초기-설치-요약)
 2. [첫 관리자 계정 생성](#첫-관리자-계정-생성)
 3. [스크래퍼 실행 방법](#스크래퍼-실행-방법)
-4. [NTIS 수집 운영 특이사항](#ntis-수집-운영-특이사항)
-5. [증분 수집 동작 설명](#증분-수집-동작-설명)
-6. [웹 UI 검색/필터/중복 그룹 보기](#웹-ui-검색필터중복-그룹-보기)
-7. [로그 해석](#로그-해석)
-8. [DB 관리](#db-관리)
-9. [트러블슈팅](#트러블슈팅)
-10. [정기 운영 체크리스트](#정기-운영-체크리스트)
+4. [웹 기반 수집 제어](#웹-기반-수집-제어)
+5. [NTIS 수집 운영 특이사항](#ntis-수집-운영-특이사항)
+6. [증분 수집 동작 설명](#증분-수집-동작-설명)
+7. [웹 UI 검색/필터/중복 그룹 보기](#웹-ui-검색필터중복-그룹-보기)
+8. [로그 해석](#로그-해석)
+9. [DB 관리](#db-관리)
+10. [트러블슈팅](#트러블슈팅)
+11. [정기 운영 체크리스트](#정기-운영-체크리스트)
 
 ---
 
@@ -174,6 +175,163 @@ scrape:
 **동시 실행.** 같은 명령을 여러 터미널에서 동시에 실행할 수 있다.
 각 컨테이너가 `sources.yaml` 의 독립적인 복사본을 사용하므로 설정 경합이 발생하지 않는다.
 단, 동일 DB에 동시 쓰기하므로 SQLite WAL 이 활성화되어 있는지 확인한다.
+
+> **[00025 이후]** CLI 경로도 이제 `scrape_runs` 테이블에 `running` 상태 row 를
+> 만들어 웹/스케줄 경로와 공용 lock 에 참여한다. 웹이나 스케줄이 이미 수집
+> 중인 상태에서 CLI 를 기동하면 종료 코드 `2` 로 거부된다. 아래
+> [웹 기반 수집 제어](#웹-기반-수집-제어) 참고.
+
+---
+
+## 웹 기반 수집 제어
+
+Phase 2(Task 00025) 이후로는 관리자 페이지 `/admin` 에서 수집 실행·중단·스케줄
+등록과 `sources.yaml` 편집을 브라우저로 처리할 수 있다. 기존 CLI 경로
+(`docker compose --profile scrape run --rm scraper`) 는 회귀 없이 그대로 동작
+하며, 두 경로는 `scrape_runs` 테이블의 `status='running'` row 하나로 공용
+lock 을 건다 — 동시 실행은 자동으로 차단된다.
+
+### 전제 조건
+
+- 관리자 계정(`is_admin=True`) 이 필요하다. 자세한 내용은
+  [첫 관리자 계정 생성](#첫-관리자-계정-생성) 참고.
+- 호스트의 Docker 데몬 소켓을 app 컨테이너에 마운트한다. `docker-compose.yml`
+  의 `app.volumes` 에 이미 선언되어 있다.
+- 다음 두 환경변수를 `.env` 에 설정해야 웹 컨테이너가 호스트 dockerd 를
+  정상적으로 호출한다.
+
+```bash
+# 호스트 docker 그룹의 gid — app 컨테이너 내부 프로세스가 이 gid 를 보조 그룹으로
+# 들고 있어야 /var/run/docker.sock 에 접근할 수 있다.
+HOST_DOCKER_GID=$(getent group docker | cut -d: -f3)
+
+# 호스트의 프로젝트 루트 절대 경로 — docker compose 가 compose 파일 안의
+# 상대경로(./app, ./data 등)를 호스트 기준으로 해석하는 기준이 된다.
+HOST_PROJECT_DIR=$(pwd)
+```
+
+설정 후 `docker compose up app` 을 재기동하면 적용된다. 값이 잘못되었거나
+비어 있으면 수동 시작 버튼을 눌렀을 때 `ComposeEnvironmentError` 또는
+`Permission denied on /var/run/docker.sock` 이 flash 배지로 뜬다.
+
+> **보안 경고.** `/var/run/docker.sock` 마운트는 사실상 호스트 root 권한 부여와
+> 동등하다 (`docs/scrape_control_design.md §15.1`). FastAPI 는 절대 외부
+> 네트워크에 노출하지 않는다 — 로컬 또는 내부 VPN 안에서만 접근 가능하게 둔다.
+
+### 관리자 페이지 접근
+
+관리자로 로그인하면 상단 네비에 **관리자** 링크가 보인다. 클릭하면
+`/admin/scrape` 로 이동하고, 상단 탭(`수집 제어 · sources.yaml · 스케줄`) 으로
+기능 간 전환한다. 비관리자 계정이 `/admin/*` 경로를 직접 요청하면 `403` 을
+반환한다. 비로그인 요청은 `401` 이다.
+
+### [수집 제어] 탭 (`/admin/scrape`)
+
+- 현재 상태 블록: `running` 또는 `idle`. `running` 이면 id/pid/trigger/
+  `started_at` · `active_sources` 가 표시되고 **중단** 버튼이 노출된다.
+- **지금 시작** 폼: 실행할 소스를 체크박스로 고른다 (모두 미선택 = 전체).
+  POST `/admin/scrape/start` 로 제출되면 서버는 내부적으로
+  `docker compose --profile scrape run --rm scraper` 를 subprocess 로 띄우고
+  `ScrapeRun` row 에 pid 를 기록한다.
+- **중단** 버튼: POST `/admin/scrape/cancel` 이 SIGTERM 을 프로세스 그룹에
+  전파하고, docker compose v2 가 이를 컨테이너의 `python -m app.cli` 까지
+  릴레이한다. 스크래퍼는 현재 처리 중인 공고를 마무리한 뒤 정상 종료하고
+  `status='cancelled'` 로 마감된다 (공고 단위 atomic 보장 유지).
+- 최근 이력 테이블: 최근 20건의 ScrapeRun 요약. 각 행의 **로그** 링크는
+  `/admin/scrape/runs/{id}/log` — subprocess 의 stdout/stderr 파일을
+  `text/plain` 으로 반환한다(최대 1 MB, 초과 시 앞부분이 잘린다).
+- 5초 폴링: 페이지에 심어진 인라인 JavaScript 가 `/admin/scrape/status` 를
+  주기적으로 호출해 상태 블록과 최근 이력만 부분 갱신한다. 탭을 열어 둔
+  상태에서 재로드 없이 진행 상황이 반영된다.
+
+### [sources.yaml] 탭 (`/admin/sources/yaml`)
+
+- 진입 시 호스트 `sources.yaml` 원본을 textarea 에 로드한다. 파일이 아직
+  없으면 빈 상태로 시작하며, 저장 시 새로 생성된다.
+- 저장 파이프라인: **YAML 구문 → Pydantic `SourcesConfig.model_validate`**.
+  어느 단계라도 실패하면 원본을 손대지 않고, 실패 경로와 메시지를 화면 상단
+  에 나열한 채 textarea 내용은 그대로 보존한다 (사용자가 입력을 잃지 않는다).
+- 저장 직전에 `data/backups/sources/YYYYMMDD_HHMMSS.yaml` 로 원본을 백업한
+  뒤, 같은 디렉터리의 임시 파일 → `os.replace` 패턴으로 원자적으로 덮어쓴다
+  (bind mount 환경의 `EXDEV` 시에는 `open` + `fsync` fallback).
+- **이미 실행 중인 수집에는 영향이 없다.** `entrypoint.sh` 가 각 수집 실행
+  마다 `sources.yaml` 의 per-run 임시 복사본을 만들기 때문이다. 편집한 값은
+  **다음** 수집 실행부터 반영된다.
+- 편집 이력 열람 UI 는 Phase 5 범위다. 그때까지는 `data/backups/sources/`
+  디렉터리의 파일을 직접 확인한다.
+
+### [스케줄] 탭 (`/admin/schedule`)
+
+- APScheduler `BackgroundScheduler` 를 웹 프로세스 내부에서 가동한다. 잡은
+  SQLite `scheduler_jobs` 테이블에 저장되므로 **웹을 재기동해도 스케줄이
+  자동 복원**된다. docker-compose 의 `restart: unless-stopped` 정책과
+  결합해 실질적으로 연속 가동 상태가 유지된다.
+- trigger 는 두 가지:
+  - **cron 표현식** — 5-필드 cron(`분 시 일 월 요일`). 예) `0 3 * * *` 은 매일
+    UTC 03:00.
+  - **매 N시간 간단 모드** — 1~24 범위의 정수. 그 이상 주기는 cron 탭을 쓴다.
+- 각 스케줄은 활성/비활성 토글 및 삭제가 가능하다. 토글 시 `next_run_time`
+  이 재계산되며, 비활성은 잡을 삭제하지 않고 pause 상태로 둔다.
+- 스케줄이 트리거되면 `ScrapeRun.trigger='scheduled'` 로 새 실행이 시작된다.
+  마침 다른 수집이 진행 중이면 이번 주기는 건너뛰고 WARN 로그만 남긴 채
+  다음 주기를 기다린다 — 스케줄 자체는 중단되지 않는다.
+- **uvicorn 단일 워커 전제**. `docker-compose.yml` 의 `app.command` 가
+  `--workers` 를 지정하지 않아 uvicorn 기본값(=1) 을 사용한다. `--workers 2`
+  이상으로 변경하면 각 워커가 같은 잡을 독립적으로 실행해 중복 수집이
+  발생하므로 변경하지 않는다.
+- `misfire_grace_time=300s` + `coalesce=True` 로 재기동 직후 밀린 잡이 폭주
+  하지 않게 보호한다 (놓친 주기를 한 번으로 합쳐 실행).
+
+### 동시 실행 · lock 규칙
+
+CLI / 수동(웹) / 스케줄 세 경로 모두 `scrape_runs.status='running'` row 하나로
+lock 한다. 이미 실행 중이면 새 시도는 다음과 같이 처리된다.
+
+- 웹 **지금 시작** 버튼 → flash 배지 `이미 다른 수집이 진행 중입니다.` (409 의미).
+- CLI `docker compose --profile scrape run --rm scraper` → 종료 코드 `2` +
+  stderr `이미 다른 수집이 진행 중입니다 (ScrapeRun id=..., trigger='manual', pid=...).`.
+- 스케줄 트리거 → WARN 로그 후 건너뛰고 다음 주기 대기.
+
+중단 버튼으로 `cancelled` 처리가 완료되면 즉시 새 실행을 받을 수 있다.
+
+### startup stale cleanup
+
+웹이 재기동될 때 `scrape_runs` 중 **`pid IS NULL`** 이거나 **해당 pid 프로세스가
+호스트에 존재하지 않는** `running` row 는 `failed (stale ...)` 로 자동 정리된다.
+pid 가 살아 있는 경우는 보수적으로 그대로 두므로, 의도치 않게 진행 중인 수집이
+끊기는 일은 없다.
+
+수동 정리가 필요하면 DB 를 직접 수정한다.
+
+```bash
+sqlite3 ./data/db/app.sqlite3 \
+  "UPDATE scrape_runs SET status='failed', ended_at=datetime('now'), error_message='manual cleanup' WHERE status='running';"
+```
+
+### CLI 와 웹 병행
+
+웹 UI 로 전환했다고 해서 기존 CLI 를 폐기할 필요는 없다. 아래 세 조합 모두
+정상적으로 지원된다.
+
+- **웹만 사용** — 평소 운영에 권장. 스케줄 등록 + 필요 시 수동 버튼.
+- **CLI 만 사용** — 호스트 cron / systemd timer 에서 직접 호출. 이번 task 이후
+  CLI 도 `ScrapeRun(trigger='cli')` row 를 기록하고 자기 pid 를 남기므로
+  웹의 lock·stale cleanup 규칙에 자연스럽게 참여한다.
+- **혼합** — 웹에서 스케줄·수동 조작을 하되, 디버깅이 필요할 때 호스트 쉘에서
+  CLI 를 띄워 로그를 상세히 본다. 두 경로가 같은 lock 을 공유하므로 동시
+  실행은 자동 차단된다.
+
+### 관련 로그 예시
+
+```
+INFO  startup stale cleanup: 1건의 running ScrapeRun 을 failed 로 정리
+INFO  APScheduler 기동: tablename=scheduler_jobs misfire_grace_time=300s max_instances=1 coalesce=True
+INFO  관리자 'root_user' 의 수동 수집 시작: scrape_run_id=7 pid=12345 active_sources=['IRIS']
+INFO  스케줄 수집 기동 완료: scrape_run_id=8 pid=12346 active_sources=(전체)
+WARNING  스케줄 수집 건너뜀 — 이미 다른 수집 실행 중: scrape_run_id=7 trigger='manual'
+INFO  SIGTERM 수신 — 중단 요청을 기록했습니다. 현재 공고(첨부 포함)를 마무리하고 다음 경계에서 종료합니다.
+INFO  ScrapeRun 마감: id=7 status='cancelled' ended_at=...
+```
 
 ---
 

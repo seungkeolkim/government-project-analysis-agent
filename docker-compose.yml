@@ -3,6 +3,10 @@
 # 서비스 구성:
 #   - app:     FastAPI 기반 로컬 웹 UI. `docker compose up app` 으로 기동한다.
 #              포트 8000 을 호스트에 노출한다.
+#              Phase 2(00025)부터 웹이 subprocess 로 `docker compose --profile scrape run --rm scraper`
+#              를 호출해 스크래퍼를 기동할 수 있도록 호스트 docker socket 을 마운트한다.
+#              (docker-in-docker 아님 — 호스트 dockerd 를 원격 조작하는 방식.
+#               docs/scrape_control_design.md §5 참조)
 #   - scraper: 목록·상세·첨부 수집 워커. 장시간 상주 프로세스가 아니라
 #              필요할 때만 1회 실행하는 형태이므로 `profiles: [scrape]` 로 분리한다.
 #              실행: docker compose --profile scrape run --rm scraper
@@ -12,8 +16,17 @@
 #   - ./data:/app/data                            : SQLite DB 파일을 호스트에 영속 보관.
 #   - ./app:/app/app                              : 개발 편의를 위한 소스 바인드 마운트.
 #                                                   이미지 빌드 없이도 호스트의 코드 변경이 즉시 반영된다.
-#   - ./sources.yaml:/run/config/sources.yaml:ro  : 실행 설정 주입. 이미지 빌드 없이 수정 반영.
+#   - ./sources.yaml:/run/config/sources.yaml     : 실행 설정 주입. 이미지 빌드 없이 수정 반영.
 #                                                   entrypoint.sh 가 per-run 임시 복사본을 생성한다.
+#                                                   Phase 2(00025-5): app 서비스는 편집기 쓰기를 위해
+#                                                   :ro 를 **제거**했다. scraper 서비스는 원본을
+#                                                   실수로라도 수정하지 않도록 :ro 유지.
+#   - /var/run/docker.sock:/var/run/docker.sock   : (app 서비스만) 호스트 dockerd 원격 조작용.
+#                                                   docs/scrape_control_design.md §5.2 참조.
+#                                                   **보안 경고**: 이 소켓 마운트는 사실상 호스트
+#                                                   root 권한 부여와 동등하다 (동 문서 §15.1).
+#                                                   FastAPI 를 외부 네트워크에 노출하지 않는다는
+#                                                   기존 전제가 이 구성으로 더 강하게 요구된다.
 #
 # 환경변수는 프로젝트 루트의 `.env` 파일을 공통으로 사용한다.
 # (`.env.example` 을 복사하여 생성)
@@ -27,12 +40,43 @@ services:
     container_name: iris-agent-web
     env_file:
       - .env
+    # Phase 2(00025) — 웹 subprocess 가 호스트 dockerd 에 docker compose 호출을
+    # 내릴 때 필요한 환경변수를 명시 전파한다. .env 가 비어 있어도 compose spec
+    # 파싱이 깨지지 않도록 `${VAR:-}` fallback 을 사용한다. HOST_PROJECT_DIR 는
+    # scrape_control.runner 가 없으면 명확한 에러를 던지므로 .env 설정이 실질
+    # 필수다. 설명: docs/scrape_control_design.md §5.
+    environment:
+      - HOST_PROJECT_DIR=${HOST_PROJECT_DIR:-}
+      - COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-iris-agent}
     ports:
       - "8000:8000"
     volumes:
       - ./data:/app/data
       - ./app:/app/app
-      - ./sources.yaml:/run/config/sources.yaml:ro
+      # Phase 2(00025-5): 관리자 페이지의 [sources.yaml] 편집기가 호스트 원본
+      # 파일을 직접 수정해야 하므로 app 서비스에서는 `:ro` 를 제거한다.
+      # scraper 서비스는 per-run 임시 복사본만 사용해 원본을 건드리지 않으므로
+      # `:ro` 를 유지(아래 scraper.volumes 참조). 편집기 구현 주의사항:
+      #   - entrypoint.sh 가 기동 시 만드는 per-run 복사본과는 별개 파일이다.
+      #     편집기 → 원본 수정 → **다음** 수집 실행부터 반영.
+      #   - 원자적 쓰기는 NamedTemporaryFile + os.replace. bind mount 가 파일
+      #     단위일 때 EXDEV 가 나오면 app/sources/yaml_editor.py 가 직접
+      #     overwrite + fsync 로 fallback.
+      - ./sources.yaml:/run/config/sources.yaml
+      # 호스트 docker daemon 소켓을 마운트해 app 컨테이너에서 docker CLI 로
+      # 'docker compose --profile scrape run --rm scraper' 를 subprocess 호출할 수 있게 한다.
+      # docker-in-docker 가 아니라 호스트 dockerd 를 조작하는 방식이므로,
+      # 스크래퍼 컨테이너의 ./data / ./app / ./sources.yaml 바인드 마운트는
+      # 여전히 호스트 경로 기준으로 일관되게 적용된다.
+      # 보안상 root 권한 부여와 동등하다는 경고는 docs/scrape_control_design.md §15.1 참조.
+      - /var/run/docker.sock:/var/run/docker.sock
+    # 컨테이너 내부 유저가 호스트 docker 그룹의 gid 를 가지도록 group_add 로 주입한다.
+    # HOST_DOCKER_GID 는 호스트의 `getent group docker | cut -d: -f3` 값으로 .env 에 설정.
+    # Debian/Ubuntu 기본값이 999 인 경우가 많아 fallback 으로 둔다. 값 불일치 시
+    # app 컨테이너에서 `docker ps` 호출이 "Permission denied on docker.sock" 로 실패한다.
+    # docs/scrape_control_design.md §5.2 참조.
+    group_add:
+      - "${HOST_DOCKER_GID:-999}"
     command:
       - uvicorn
       - app.web.main:app

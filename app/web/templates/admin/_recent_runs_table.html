@@ -1,0 +1,51 @@
+{#
+  최근 ScrapeRun 이력 테이블 (Phase 2 / 00025-4).
+
+  서버 사이드 최초 렌더용. 이후 5초 폴링(/admin/scrape/status) 응답으로
+  동일 구조의 테이블을 JS 가 교체 렌더하므로, 컬럼 구성을 JS 쪽과 맞춘다.
+
+  컨텍스트 규약:
+    - recent_runs: 직렬화된 ScrapeRun dict 의 리스트 (최신순).
+#}
+{% if recent_runs and recent_runs | length > 0 %}
+<table class="admin-table">
+    <thead>
+        <tr>
+            <th>id</th>
+            <th>status</th>
+            <th>trigger</th>
+            <th>started_at</th>
+            <th>ended_at</th>
+            <th>요약</th>
+            <th>로그</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for run in recent_runs %}
+        <tr>
+            <td>{{ run.id }}</td>
+            <td>
+                {{ run.status }}
+                {% if run.error_message %}
+                <span class="admin-state__muted">({{ run.error_message }})</span>
+                {% endif %}
+            </td>
+            <td>{{ run.trigger }}</td>
+            <td>{{ run.started_at or '' }}</td>
+            <td>{{ run.ended_at or '' }}</td>
+            <td>
+                {% set totals = run.source_counts.totals if run.source_counts else None %}
+                {% if totals %}
+                    성공 {{ totals.success | default(0) }} / 실패 {{ totals.failure | default(0) }}
+                {% endif %}
+            </td>
+            <td>
+                <a href="/admin/scrape/runs/{{ run.id }}/log">로그</a>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p class="admin-state__muted">아직 실행 이력이 없습니다.</p>
+{% endif %}

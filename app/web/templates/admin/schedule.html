@@ -1,0 +1,166 @@
+{#
+  [스케줄] 탭 — APScheduler 스케줄 관리 UI (Phase 2 / 00025-6).
+
+  구성:
+    1. flash 배지 (등록/토글/삭제 결과).
+    2. scheduler 미기동 경고 (가동 실패 시 목록/등록 모두 비활성).
+    3. 현재 스케줄 목록 테이블 — id / trigger / active_sources / next_run /
+       토글·삭제 버튼.
+    4. 신규 스케줄 등록 폼 — cron 과 interval 두 영역.
+
+  컨텍스트 규약:
+    - active_tab:        'schedule'
+    - schedules:         ScheduleSummary 리스트 (next_run_time 오름차순).
+    - available_sources: ['IRIS', 'NTIS'] 등.
+    - scheduler_running: bool — False 면 목록·폼 disabled 표시.
+    - flash / flash_level: 상단 배지 내용.
+    - current_user:      네비 분기용.
+#}
+{% extends "admin/base.html" %}
+
+{% block admin_content %}
+{% if flash %}
+<div class="admin-flash admin-flash--{{ flash_level | default('success') }}" role="status">
+    {{ flash }}
+</div>
+{% endif %}
+
+{% if not scheduler_running %}
+<div class="admin-flash admin-flash--error" role="alert">
+    APScheduler 가 기동되지 않았습니다. 웹 서버를 재기동해도 이 메시지가 계속
+    보이면 로그에서 <code>APScheduler 기동 실패</code> 항목을 확인하세요.
+</div>
+{% endif %}
+
+{# ── 등록된 스케줄 목록 ────────────────────────────────────────── #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">등록된 스케줄</h3>
+
+    {% if schedules and schedules | length > 0 %}
+    <table class="admin-table">
+        <thead>
+            <tr>
+                <th>id</th>
+                <th>타입</th>
+                <th>trigger_spec</th>
+                <th>active_sources</th>
+                <th>상태</th>
+                <th>다음 실행</th>
+                <th>액션</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for schedule in schedules %}
+            <tr>
+                <td>{{ schedule.job_id }}</td>
+                <td>{{ schedule.trigger_type }}</td>
+                <td>{{ schedule.trigger_spec }}</td>
+                <td>
+                    {% if schedule.active_sources %}
+                        {{ schedule.active_sources | join(', ') }}
+                    {% else %}
+                        <span class="admin-state__muted">(전체)</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if schedule.enabled %}
+                        <span class="admin-badge admin-badge--running">활성</span>
+                    {% else %}
+                        <span class="admin-badge admin-badge--idle">비활성</span>
+                    {% endif %}
+                </td>
+                <td>{{ schedule.next_run_time or '—' }}</td>
+                <td class="admin-schedule__actions">
+                    <form method="post"
+                          action="/admin/schedule/{{ schedule.job_id }}/toggle"
+                          class="admin-schedule__inline-form">
+                        <input type="hidden" name="enabled"
+                               value="{{ 'false' if schedule.enabled else 'true' }}">
+                        <button type="submit"
+                                class="admin-button admin-button--secondary">
+                            {% if schedule.enabled %}비활성화{% else %}활성화{% endif %}
+                        </button>
+                    </form>
+                    <form method="post"
+                          action="/admin/schedule/{{ schedule.job_id }}/delete"
+                          class="admin-schedule__inline-form"
+                          onsubmit="return confirm('스케줄 {{ schedule.job_id }} 을 삭제할까요?');">
+                        <button type="submit"
+                                class="admin-button admin-button--danger">
+                            삭제
+                        </button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="admin-state__muted">등록된 스케줄이 없습니다. 아래 폼에서 새로 등록하세요.</p>
+    {% endif %}
+</section>
+
+{# ── 새 스케줄 등록 ──────────────────────────────────────────── #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">새 스케줄 등록</h3>
+    <p class="admin-state__muted">
+        두 가지 트리거 중 하나를 선택하세요. <code>cron</code> 은 5-필드 표준
+        cron 표현식(분 시 일 월 요일), <code>interval</code> 은 '매 N시간'
+        간단 모드입니다. 등록 즉시 활성됩니다(체크박스로 비활성 선택 가능).
+    </p>
+
+    {# --- cron trigger 등록 폼 --- #}
+    <form method="post" action="/admin/schedule"
+          class="admin-form admin-schedule__form">
+        <input type="hidden" name="trigger_type" value="cron">
+        <fieldset class="admin-fieldset admin-schedule__fieldset">
+            <legend class="admin-fieldset__legend">cron 표현식</legend>
+            <label class="admin-schedule__text">
+                <span>5-필드 cron (분 시 일 월 요일)</span>
+                <input type="text" name="cron_expression"
+                       class="admin-schedule__input" placeholder="예) 0 3 * * *"
+                       spellcheck="false" autocomplete="off">
+            </label>
+        </fieldset>
+
+        {% include "admin/_schedule_sources_fieldset.html" %}
+
+        <label class="admin-checkbox admin-schedule__enabled">
+            <input type="checkbox" name="enabled" value="on" checked>
+            <span>등록 즉시 활성</span>
+        </label>
+
+        <button type="submit" class="admin-button admin-button--primary"
+                {% if not scheduler_running %}disabled{% endif %}>
+            cron 스케줄 등록
+        </button>
+    </form>
+
+    {# --- interval trigger 등록 폼 --- #}
+    <form method="post" action="/admin/schedule"
+          class="admin-form admin-schedule__form">
+        <input type="hidden" name="trigger_type" value="interval">
+        <fieldset class="admin-fieldset admin-schedule__fieldset">
+            <legend class="admin-fieldset__legend">매 N시간 간단 모드</legend>
+            <label class="admin-schedule__text">
+                <span>N 시간마다 실행 (1~24)</span>
+                <input type="number" name="interval_hours"
+                       class="admin-schedule__input" min="1" max="24"
+                       placeholder="예) 6" autocomplete="off">
+            </label>
+        </fieldset>
+
+        {% include "admin/_schedule_sources_fieldset.html" %}
+
+        <label class="admin-checkbox admin-schedule__enabled">
+            <input type="checkbox" name="enabled" value="on" checked>
+            <span>등록 즉시 활성</span>
+        </label>
+
+        <button type="submit" class="admin-button admin-button--primary"
+                {% if not scheduler_running %}disabled{% endif %}>
+            interval 스케줄 등록
+        </button>
+    </form>
+</section>
+{% endblock %}

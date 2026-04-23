@@ -1,0 +1,22 @@
+{#
+  스케줄 등록 폼에서 '실행할 source 선택' 체크박스 묶음 (Phase 2 / 00025-6).
+
+  cron 폼과 interval 폼이 동일한 필드를 사용하므로 파셜로 분리한다.
+  컨텍스트 규약:
+    - available_sources: [ 'IRIS', 'NTIS' ] 등.
+#}
+<fieldset class="admin-fieldset admin-schedule__fieldset">
+    <legend class="admin-fieldset__legend">
+        실행할 소스 (모두 미선택 = 전체)
+    </legend>
+    {% for source_id in available_sources %}
+    <label class="admin-checkbox">
+        <input type="checkbox" name="active_sources" value="{{ source_id }}">
+        <span>{{ source_id }}</span>
+    </label>
+    {% else %}
+    <p class="admin-state__muted">
+        등록된 소스가 없습니다. sources.yaml 을 먼저 설정하세요.
+    </p>
+    {% endfor %}
+</fieldset>

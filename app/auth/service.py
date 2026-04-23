@@ -37,7 +37,7 @@ from app.auth.constants import (
     SESSION_TOKEN_BYTES,
     USERNAME_PATTERN,
 )
-from app.db.models import User, UserSession
+from app.db.models import User, UserSession, as_utc
 
 
 # ──────────────────────────────────────────────────────────────
@@ -317,30 +317,6 @@ def _resolve_now(now: datetime | None) -> datetime:
     return _NowProvider.utcnow()
 
 
-def _as_utc(value: datetime) -> datetime:
-    """naive ``datetime`` 을 UTC tz-aware 로, 이미 tz-aware 라면 그대로 반환한다.
-
-    SQLAlchemy ``DateTime(timezone=True)`` 는 SQLite 백엔드에서 timezone 정보를
-    저장하지 못해, INSERT 시 tz-aware 로 넣어도 SELECT 시점에는 naive
-    ``datetime`` 으로 되돌아온다. 이 상태에서 ``datetime.now(tz=UTC)`` 같은
-    tz-aware 시각과 직접 비교하면 ``TypeError: can't compare offset-naive and
-    offset-aware datetimes`` 가 발생한다.
-
-    본 헬퍼는 비교 직전에 양쪽 값을 모두 UTC tz-aware 로 정규화하는 데 사용한다.
-    저장된 값이 UTC 라는 컨벤션(create_session 이 항상 UTC 로 INSERT) 에 의존
-    하므로, naive 값은 UTC tz 를 부여해도 의미가 보존된다.
-
-    Args:
-        value: tz-aware 또는 naive ``datetime``.
-
-    Returns:
-        tz-aware UTC ``datetime``.
-    """
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value
-
-
 def create_session(
     session: Session,
     user: User,
@@ -422,7 +398,9 @@ def get_active_session(
     # SQLite 는 DateTime(timezone=True) 의 tz 정보를 저장하지 못한다. SELECT
     # 직후 expires_at 이 naive 로 돌아오면 tz-aware now_ts 와 비교가 깨지므로
     # 양쪽 값을 모두 UTC tz-aware 로 정규화한 뒤에 비교한다.
-    if _as_utc(user_session.expires_at) <= _as_utc(now_ts):
+    # as_utc 는 Phase 2 에서 scrape_runs 비교에도 재사용하기 위해 app/db/models.py
+    # 공용 헬퍼로 승격됐다. auth 는 여기 하나에서만 사용한다.
+    if as_utc(user_session.expires_at) <= as_utc(now_ts):
         # 만료 세션은 유효하지 않은 것으로 보고만 한다. 삭제는 하지 않는다.
         return None
     return user_session

@@ -1,0 +1,41 @@
+{#
+  관리자 페이지 공통 레이아웃 (Phase 2 / 00025-4).
+
+  - site-level base.html 을 상속하여 상단 헤더/네비게이션을 공유한다.
+  - admin-level 레이아웃에는 **탭 네비** 를 둔다: [수집 제어] [sources.yaml] [스케줄]
+    후속 subtask(00025-5 / 00025-6) 가 sources.yaml / 스케줄 탭 라우트를 추가할 때
+    여기에 탭 링크만 이미 존재해 UI 가 자연스럽게 연결된다.
+  - placeholder 라우트는 두지 않으므로(guidance), 아직 구현되지 않은 탭 링크를
+    클릭하면 404 가 떨어진다. 이는 일시적 상태이며 본 task 완료 시 해소된다.
+    대안으로 'disabled' 상태로 흐리게 노출도 가능했지만 guidance 는 '탭 active
+    분기만 정의' 를 명시하므로 링크는 그대로 활성 상태로 둔다.
+
+  컨텍스트 규약:
+    - active_tab: 'scrape' | 'sources' | 'schedule'. 현재 탭에 active 클래스 부여.
+    - current_user: 상단 네비용. admin 페이지는 current_user.is_admin=True 보장.
+#}
+{% extends "base.html" %}
+
+{% block page_title %}관리자 · {{ super() }}{% endblock %}
+
+{% block content %}
+<section class="admin-wrap">
+    <header class="admin-header">
+        <h2 class="admin-title">관리자 페이지</h2>
+        <p class="admin-subtitle">수집 제어 · 설정 · 스케줄 관리 (is_admin 전용)</p>
+    </header>
+
+    <nav class="admin-tabs" aria-label="관리자 탭">
+        <a class="admin-tab {% if active_tab == 'scrape' %}admin-tab--active{% endif %}"
+           href="/admin/scrape">수집 제어</a>
+        <a class="admin-tab {% if active_tab == 'sources' %}admin-tab--active{% endif %}"
+           href="/admin/sources/yaml">sources.yaml</a>
+        <a class="admin-tab {% if active_tab == 'schedule' %}admin-tab--active{% endif %}"
+           href="/admin/schedule">스케줄</a>
+    </nav>
+
+    <div class="admin-body">
+        {% block admin_content %}{% endblock %}
+    </div>
+</section>
+{% endblock %}

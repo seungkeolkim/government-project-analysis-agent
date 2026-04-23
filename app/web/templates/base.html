@@ -33,7 +33,12 @@
             </div>
             <nav class="site-nav" aria-label="사용자 메뉴">
                 {% if current_user %}
-                    {# 로그인 상태: 사용자명 + 로그아웃 버튼 (POST 폼) #}
+                    {# 로그인 상태: (관리자면 '관리자' 링크) + 사용자명 + 로그아웃 버튼 #}
+                    {% if current_user.is_admin %}
+                        {# Phase 2 — is_admin=True 인 사용자에게만 관리자 페이지 진입 링크를 보여준다.
+                           비관리자는 URL 을 직접 쳐도 403 이 떨어진다 (admin_user_required). #}
+                        <a class="site-nav__link site-nav__link--admin" href="/admin/scrape">관리자</a>
+                    {% endif %}
                     <span class="site-nav__user">{{ current_user.username }}</span>
                     <form class="site-nav__logout-form" method="post" action="/auth/logout">
                         <button type="submit" class="site-nav__logout-button">로그아웃</button>

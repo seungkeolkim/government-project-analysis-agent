@@ -49,6 +49,15 @@ dependencies = [
     # 명시적으로 함께 고정한다.
     "passlib[bcrypt]>=1.7,<2.0",
     "bcrypt>=4.0,<5.0",
+
+    # 스케줄러 (Phase 2 / 00025 — 웹 프로세스 내부 APScheduler BackgroundScheduler)
+    # docs/scrape_control_design.md §13 참조. SQLAlchemyJobStore 로 scheduler_jobs
+    # 테이블에 job 을 영속화해 웹 재시작 시 스케줄을 복원한다.
+    # **주의**: APScheduler 4.x 는 API 가 대대적으로 바뀌어(async-first, data store
+    # 추상화 개편) 3.x 코드와 호환되지 않는다. 본 task 는 3.x 라인에 고정한다.
+    # (실제 import 는 00025-6 스케줄 탭 통합 시점까지 지연 — 선언만 먼저 넣어 둬도
+    # 기동에 영향을 주지 않는다.)
+    "apscheduler>=3.10,<4.0",
 ]
 
 [project.optional-dependencies]

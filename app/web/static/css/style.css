@@ -740,3 +740,387 @@ body.is-anonymous .announcement-title-link--read {
     font-weight: 500;
     color: #1f2937;
 }
+
+/* ---------- 관리자 페이지 (Phase 2 / 00025-4) ---------- */
+/*
+ * /admin/* 하위 페이지의 공통 레이아웃.
+ * base.html 은 그대로 사용하고, admin/base.html 이 admin-wrap 을 감싼다.
+ * 탭 네비 + 상태 배지 + 테이블 + 폼 등.
+ */
+.admin-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.admin-header {
+    border-bottom: 1px solid #e5e7eb;
+    padding-bottom: 12px;
+}
+
+.admin-title {
+    margin: 0 0 4px;
+    font-size: 22px;
+    color: #111827;
+}
+
+.admin-subtitle {
+    margin: 0;
+    color: #6b7280;
+    font-size: 13px;
+}
+
+.admin-tabs {
+    display: flex;
+    gap: 4px;
+    border-bottom: 1px solid #e5e7eb;
+    margin-bottom: 4px;
+}
+
+.admin-tab {
+    padding: 8px 14px;
+    border-bottom: 2px solid transparent;
+    color: #6b7280;
+    font-size: 14px;
+    transition: color 0.15s, border-color 0.15s;
+}
+
+.admin-tab:hover {
+    color: #1f2937;
+}
+
+.admin-tab--active {
+    color: #1d4ed8;
+    border-bottom-color: #1d4ed8;
+    font-weight: 600;
+}
+
+.admin-body {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+}
+
+.admin-section {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.admin-section__heading {
+    margin: 0;
+    font-size: 16px;
+    color: #111827;
+    font-weight: 600;
+}
+
+.admin-flash {
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-size: 14px;
+    border: 1px solid transparent;
+}
+
+.admin-flash--success {
+    background: #ecfdf5;
+    color: #047857;
+    border-color: #a7f3d0;
+}
+
+.admin-flash--error {
+    background: #fef2f2;
+    color: #b91c1c;
+    border-color: #fecaca;
+}
+
+.admin-state {
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 14px 16px;
+}
+
+.admin-state__running,
+.admin-state__idle {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.admin-state__label {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    font-size: 14px;
+    color: #1f2937;
+}
+
+.admin-state__text {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 13px;
+    color: #374151;
+}
+
+.admin-state__muted {
+    margin: 0;
+    color: #6b7280;
+    font-size: 13px;
+}
+
+.admin-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.6;
+}
+
+.admin-badge--running {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.admin-badge--idle {
+    background: #e5e7eb;
+    color: #4b5563;
+}
+
+.admin-form {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 0;
+}
+
+.admin-form--start {
+    gap: 12px;
+}
+
+.admin-fieldset {
+    border: 1px dashed #d1d5db;
+    border-radius: 4px;
+    padding: 8px 12px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+}
+
+.admin-fieldset__legend {
+    padding: 0 4px;
+    font-size: 12px;
+    color: #6b7280;
+}
+
+.admin-checkbox {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 14px;
+    color: #1f2937;
+    cursor: pointer;
+}
+
+.admin-button {
+    appearance: none;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 6px 16px;
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+    align-self: flex-start;
+}
+
+.admin-button--primary {
+    background: #1d4ed8;
+    color: #ffffff;
+}
+
+.admin-button--primary:hover {
+    background: #1e40af;
+}
+
+.admin-button--danger {
+    background: #dc2626;
+    color: #ffffff;
+}
+
+.admin-button--danger:hover {
+    background: #b91c1c;
+}
+
+.admin-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.admin-table thead th {
+    text-align: left;
+    padding: 6px 8px;
+    background: #f3f4f6;
+    color: #374151;
+    border-bottom: 1px solid #e5e7eb;
+    font-weight: 600;
+}
+
+.admin-table tbody td {
+    padding: 6px 8px;
+    border-bottom: 1px solid #f3f4f6;
+    vertical-align: top;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    color: #1f2937;
+}
+
+.site-nav__link--admin {
+    color: #b91c1c;
+    font-weight: 600;
+}
+
+/* ---------- sources.yaml 편집기 (Phase 2 / 00025-5) ---------- */
+
+.admin-yaml-form {
+    gap: 12px;
+}
+
+.admin-yaml__textarea {
+    width: 100%;
+    min-height: 420px;
+    padding: 10px 12px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    background: #0f172a;
+    color: #e2e8f0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    resize: vertical;
+    white-space: pre;
+    overflow-wrap: normal;
+    overflow-x: auto;
+    tab-size: 2;
+}
+
+.admin-yaml__textarea:focus {
+    outline: none;
+    border-color: #60a5fa;
+    box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.35);
+}
+
+.admin-yaml__actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.admin-button--secondary {
+    background: #ffffff;
+    color: #1f2937;
+    border: 1px solid #d1d5db;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+}
+
+.admin-button--secondary:hover {
+    background: #f3f4f6;
+}
+
+.admin-yaml__errors {
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #991b1b;
+    border-radius: 6px;
+    padding: 12px 14px;
+}
+
+.admin-yaml__errors-title {
+    margin: 0 0 8px;
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.admin-yaml__errors-list {
+    margin: 0;
+    padding-left: 20px;
+    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.admin-yaml__errors-list code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 12px;
+    color: #7f1d1d;
+    background: #ffffff;
+    padding: 1px 4px;
+    border-radius: 3px;
+}
+
+/* ---------- 스케줄 탭 (Phase 2 / 00025-6) ---------- */
+
+.admin-schedule__actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.admin-schedule__inline-form {
+    margin: 0;
+    display: inline-flex;
+}
+
+.admin-schedule__form {
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 14px 16px;
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.admin-schedule__fieldset {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+}
+
+.admin-schedule__text {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 13px;
+    color: #374151;
+    width: 100%;
+    max-width: 360px;
+}
+
+.admin-schedule__input {
+    padding: 6px 8px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    font: inherit;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 13px;
+}
+
+.admin-schedule__input:focus {
+    outline: none;
+    border-color: #60a5fa;
+    box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.35);
+}
+
+.admin-schedule__enabled {
+    margin-top: 2px;
+}
+
+.admin-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}

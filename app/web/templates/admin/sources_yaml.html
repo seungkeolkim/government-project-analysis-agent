@@ -1,0 +1,66 @@
+{#
+  [sources.yaml] 탭 — 편집기 (Phase 2 / 00025-5).
+
+  구성:
+    1. flash 배지 (저장 성공/실패 안내).
+    2. 검증 실패 시 error_details 리스트.
+    3. textarea + 저장 버튼.
+
+  입력 보존:
+    실패 경로(GET load_error, POST 검증 실패, POST OS 에러) 모두 yaml_text 를
+    컨텍스트에 그대로 담아 돌려준다 — 사용자가 수정한 내용을 잃지 않는다.
+
+  컨텍스트 규약:
+    - active_tab:     'sources'
+    - yaml_text:      textarea 초기값.
+    - flash:          상단 배지 메시지 (없으면 None).
+    - flash_level:    'success' | 'error'.
+    - error_details:  검증 실패 시 사용자에게 보일 path 별 에러 목록. 빈 리스트면 숨김.
+    - current_user:   상단 네비 + is_admin 분기용.
+#}
+{% extends "admin/base.html" %}
+
+{% block admin_content %}
+{% if flash %}
+<div class="admin-flash admin-flash--{{ flash_level | default('success') }}" role="status">
+    {{ flash }}
+</div>
+{% endif %}
+
+{% if error_details and error_details | length > 0 %}
+<div class="admin-yaml__errors" role="alert">
+    <p class="admin-yaml__errors-title">검증 실패 상세</p>
+    <ul class="admin-yaml__errors-list">
+        {% for detail in error_details %}
+        <li><code>{{ detail }}</code></li>
+        {% endfor %}
+    </ul>
+</div>
+{% endif %}
+
+<section class="admin-section">
+    <h3 class="admin-section__heading">sources.yaml 편집</h3>
+    <p class="admin-state__muted">
+        저장 시 YAML 구문 검증 → Pydantic <code>SourcesConfig</code> 검증을 모두 통과해야
+        기록됩니다. 저장 직전 원본은 <code>data/backups/sources/YYYYMMDD_HHMMSS.yaml</code> 로
+        백업됩니다. 이미 실행 중인 스크래퍼는 자기 임시 복사본을 사용하므로 영향 받지 않으며,
+        다음 수집 실행부터 새 값이 반영됩니다.
+    </p>
+
+    <form class="admin-form admin-yaml-form" method="post" action="/admin/sources/yaml">
+        <textarea
+            class="admin-yaml__textarea"
+            name="yaml_text"
+            rows="28"
+            spellcheck="false"
+            autocomplete="off"
+        >{{ yaml_text }}</textarea>
+        <div class="admin-yaml__actions">
+            <button type="submit" class="admin-button admin-button--primary">저장</button>
+            <a class="admin-button admin-button--secondary" href="/admin/sources/yaml">
+                취소 (다시 로드)
+            </a>
+        </div>
+    </form>
+</section>
+{% endblock %}
