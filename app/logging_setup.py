@@ -156,12 +156,20 @@ def configure_logging(settings: Settings | None = None) -> None:
     diagnose_flag = level_name == "DEBUG"
 
     logger.remove()
+    # 00030-2 — HTTP 미들웨어에서 ``logger.contextualize(request_id=...)`` 로
+    # 주입한 요청 ID 를 모든 로그 라인에 자동 노출하도록 기본값을 ``"-"`` 로
+    # 둔다. 요청 컨텍스트 밖(초기화·스케줄러·CLI)에서는 ``req=-`` 로 찍혀
+    # "요청 기반 로그가 아님" 을 명확히 한다. ``logger.configure(extra=...)`` 은
+    # 전역 기본 extras 를 덮어쓰므로 현재 사용 중인 다른 extra 키가 있다면
+    # 함께 나열해야 하지만, 본 레포지토리에는 아직 없다.
+    logger.configure(extra={"request_id": "-"})
     logger.add(
         sys.stderr,
         level=level_name,
         format=(
             "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> "
             "| <level>{level: <8}</level> "
+            "| <magenta>req={extra[request_id]}</magenta> "
             "| <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> "
             "- <level>{message}</level>"
         ),

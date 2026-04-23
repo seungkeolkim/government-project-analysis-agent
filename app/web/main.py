@@ -50,6 +50,10 @@ from app.db.session import SessionLocal
 from app.logging_setup import configure_logging
 from app.scheduler import start_scheduler, stop_scheduler
 from app.scrape_control import cleanup_stale_running_runs
+from app.web.observability import (
+    install_request_logging_middleware,
+    install_unhandled_exception_handler,
+)
 from app.web.routes import admin_router
 
 # ──────────────────────────────────────────────────────────────
@@ -287,6 +291,16 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         StaticFiles(directory=str(STATIC_DIR)),
         name="static",
     )
+
+    # 00030-2 — HTTP access log 미들웨어 + 전역 예외 핸들러.
+    # 미들웨어는 라우터 mount 보다 먼저 등록해야 모든 라우트를 덮고, 예외
+    # 핸들러도 함께 설치해 라우트 안에서 터진 미처리 예외를 stack trace 와
+    # 함께 loguru 로 기록한다 (docker logs 가 비어 있던 문제 대응).
+    # FastAPI 기본 HTTPException/RequestValidationError 핸들러가 더 구체적이라
+    # 먼저 매칭되므로 4xx 경로는 본 핸들러를 거치지 않는다 (주석:
+    # app/web/observability.py 참조).
+    install_request_logging_middleware(fastapi_app)
+    install_unhandled_exception_handler(fastapi_app)
 
     # Phase 1b: 인증 라우터(register/login/logout/me) 를 mount 한다.
     # 기존 라우트와 충돌하지 않으며, /auth/* 와 /login, /register 를 노출한다.
