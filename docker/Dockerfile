@@ -10,10 +10,13 @@ FROM python:3.12-slim
 #  - PYTHONUNBUFFERED: 로그가 버퍼링 없이 즉시 출력되도록 한다.
 #  - PYTHONDONTWRITEBYTECODE: 컨테이너 내부에 .pyc 를 남기지 않는다.
 #  - PIP_NO_CACHE_DIR: 빌드 이미지 크기 축소.
+#  - PLAYWRIGHT_BROWSERS_PATH: playwright install 이전에 선언해야 이 경로로 바이너리가
+#    설치된다. /root/.cache 대신 /opt/playwright 에 설치해 비특권 UID 에서도 접근 가능.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 
 # 컨테이너 내부 작업 디렉터리. 파이썬 패키지 `app` 는 /app/app 에 위치하게 된다.
 WORKDIR /app
@@ -60,12 +63,15 @@ RUN pip install --upgrade pip && pip install -e .
 # 5) Playwright headless chromium 브라우저 설치.
 #    --with-deps: python:3.12-slim 에 없는 시스템 라이브러리(libnss3, libatk,
 #    libgbm 등)를 함께 설치한다. root 권한이 필요하며 이미지 크기가 ~400 MB 증가한다.
-#    브라우저 바이너리는 /root/.cache/ms-playwright 에 저장된다.
+#    브라우저 바이너리는 PLAYWRIGHT_BROWSERS_PATH(/opt/playwright) 에 저장된다.
 #
 #    빌드 후 smoke 테스트:
 #      docker compose --profile scrape run --rm scraper \
 #        python -c 'from playwright.async_api import async_playwright; print("ok")'
-RUN playwright install --with-deps chromium
+RUN playwright install --with-deps chromium && \
+    chmod -R a+rX "${PLAYWRIGHT_BROWSERS_PATH}"
+#   ↑ 대문자 X: 디렉터리 및 이미 실행 비트가 있는 파일에만 x 추가 (바이너리 실행권 보존).
+#     비특권 UID 로 컨테이너가 기동될 때 chromium 바이너리에 접근 가능하도록 한다.
 
 # 6) docker CLI + compose v2 plugin 설치 (Phase 2 / 00025 웹 수집 제어용).
 #    - 웹이 subprocess 로 `docker compose --profile scrape run --rm scraper` 를 호출해
@@ -101,12 +107,20 @@ RUN apt-get update && \
 
 # 7) 런타임에 사용되는 로컬 디렉터리 기본 생성.
 #    compose 의 ./data 볼륨이 이를 덮어쓰지만, 단독 컨테이너 실행 시에도 동작하도록 준비한다.
-RUN mkdir -p /app/data/db /app/data/downloads
+#    data/logs 를 명시 생성하여 비특권 UID 기동 시에도 로그 디렉터리가 존재하도록 한다.
+RUN mkdir -p /app/data/db /app/data/downloads /app/data/logs
 
 # 8) 엔트리포인트 스크립트.
 #    sources.yaml per-run copy 격리 및 SOURCES_CONFIG_PATH 주입을 담당한다.
 COPY docker/entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
+# 9) 비특권 UID 실행을 위한 권한 개방.
+#    - /app 하위 전체: 코드/패키지를 임의 UID 가 읽을 수 있도록 a+rX (쓰기 비트는 건드리지 않음).
+#    - /app/data 하위: SQLite DB·다운로드·로그 등 런타임 쓰기 대상. a+rwX 로 추가 허용.
+#      compose 바인드 마운트(./data)가 있을 때는 호스트 디렉터리 권한이 우선하나,
+#      단독 컨테이너 실행 시에도 비특권 UID 가 파일을 생성할 수 있어야 한다.
+RUN chmod +x /app/entrypoint.sh && \
+    chmod -R a+rX /app && \
+    chmod -R a+rwX /app/data
 
 # FastAPI 로컬 웹 UI 노출 포트.
 EXPOSE 8000
