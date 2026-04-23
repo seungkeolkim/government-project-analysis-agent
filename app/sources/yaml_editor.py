@@ -220,33 +220,85 @@ def validate_sources_yaml_text(text: str) -> SourcesConfig:
 # ──────────────────────────────────────────────────────────────
 
 
+def _overwrite_with_fsync(target: Path, content: str) -> None:
+    """대상 파일을 open('w') + fsync 로 직접 덮어쓴다 — 원자 쓰기 fallback.
+
+    atomic rename(os.replace) 가 불가능한 두 가지 상황에서 공유된다:
+      - ``os.replace`` 가 EXDEV 반환 (tmp 와 target 이 다른 mount).
+      - ``NamedTemporaryFile`` 생성이 EACCES/EPERM 로 실패 (부모 dir 에 쓰기
+        권한 없음 — 파일 단위 bind mount 의 부모가 비쓰기 tmpfs 인 경우 전형).
+
+    'w' 모드는 기존 파일을 truncate 한 뒤 새 내용을 쓰므로 **중간 상태가**
+    관찰될 수 있다. 원자성이 약하지만 sources.yaml 은 수 KB 수준이라 write 는
+    단일 syscall 단위로 끝나며, 저장 전 백업(save_sources_yaml_text) 이 이미
+    원본 보존을 담당하므로 실무상 충분하다.
+
+    호출자가 사전에 백업을 확보했다는 전제이며, 본 함수 자체는 백업을 만들지
+    않는다. fsync 까지 확실히 디스크에 플러시한 뒤 반환한다.
+    """
+    with open(target, "w", encoding="utf-8") as direct_handle:
+        direct_handle.write(content)
+        direct_handle.flush()
+        os.fsync(direct_handle.fileno())
+
+
 def _atomic_write(target: Path, content: str) -> None:
     """NamedTemporaryFile + os.replace 로 대상 파일을 원자적으로 갱신한다.
 
     동일 FS 내부에서는 ``os.replace`` 가 POSIX atomic rename 이므로 중간 상태가
-    관찰되지 않는다. bind mount 가 **파일 단위** 일 때는 tmp(컨테이너 tmpfs) 와
-    target(호스트 FS) 이 다른 mount 를 건너 rename 해야 해 ``EXDEV`` 가 발생한다.
-    이 경우 open('w') + fsync 로 직접 overwrite 한다 — 원자성은 약해지지만
-    대상 파일은 수 KB 수준이라 write 자체가 짧아 실무상 충분하다. 이 fallback
-    은 개별 호출자가 알 필요 없이 내부에서 처리된다.
+    관찰되지 않는다. bind mount 가 **파일 단위** 일 때는 두 가지 실패 경로가
+    나타나며, 양쪽 모두 직접 overwrite(``_overwrite_with_fsync``) 로 fallback
+    한다:
+
+      1. tmp 는 생성됐지만 ``os.replace`` 가 ``EXDEV`` (Cross-device link
+         error) 로 실패 — tmp 와 target 이 서로 다른 mount 에 속한 경우.
+      2. ``NamedTemporaryFile`` 생성 자체가 ``EACCES``/``EPERM`` 로 실패 —
+         target.parent 디렉터리가 비특권 UID 에게 쓰기 권한을 주지 않는 경우.
+         compose 가 ``./sources.yaml:/run/config/sources.yaml`` 로 파일만
+         bind mount 한 표준 구성에서는 ``/run/config/`` 부모 dir 가 tmpfs 이며
+         호스트 UID 로 기동된 app 컨테이너가 그 안에 tmp 파일을 못 만든다
+         (사용자 원문 보고된 현상). 이 경우 target 파일 자체는 호스트의
+         sources.yaml 권한을 그대로 상속받아 쓰기 가능하므로 직접 overwrite
+         는 성공한다.
+
+    Fallback 경로의 원자성은 약하지만 저장 전 백업(save_sources_yaml_text) 이
+    원본 보존을 책임지므로, 부분 쓰기 상태가 유지되는 극단 케이스에서도 백업
+    으로부터 복구 가능하다.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
 
     tmp_path: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=str(target.parent),
-            prefix=f".{target.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as tmp_handle:
-            tmp_handle.write(content)
-            tmp_handle.flush()
-            os.fsync(tmp_handle.fileno())
-            tmp_path = Path(tmp_handle.name)
+        # (1) NamedTemporaryFile 생성 시도. EACCES/EPERM 이면 fallback 으로 직행.
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=str(target.parent),
+                prefix=f".{target.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp_handle:
+                tmp_handle.write(content)
+                tmp_handle.flush()
+                os.fsync(tmp_handle.fileno())
+                tmp_path = Path(tmp_handle.name)
+        except OSError as exc:
+            # EACCES(13)=Permission denied, EPERM(1)=Operation not permitted.
+            # 그 외 OSError 는 실제 디스크/경로 오류이므로 그대로 전파해 백업
+            # 존재를 믿고 호출자에게 알린다.
+            if exc.errno not in (errno.EACCES, errno.EPERM):
+                raise
+            logger.warning(
+                "sources.yaml 원자 쓰기용 임시 파일 생성 불가 — bind mount 부모 "
+                "dir 쓰기 권한 부재(errno={}: {}). overwrite fallback 으로 진행: "
+                "parent={} target={}",
+                exc.errno, exc.strerror, target.parent, target,
+            )
+            _overwrite_with_fsync(target, content)
+            return
 
+        # (2) tmp → target 원자적 교체 시도. EXDEV 면 fallback.
         try:
             os.replace(tmp_path, target)
             tmp_path = None  # replace 성공 — 삭제 대상 없음
@@ -254,18 +306,14 @@ def _atomic_write(target: Path, content: str) -> None:
         except OSError as exc:
             if exc.errno != errno.EXDEV:
                 raise
-            # bind mount 파일이 다른 device 에 매핑된 경우.
             logger.warning(
                 "os.replace EXDEV 감지 — bind mount 파일 단위 감지됨. "
                 "직접 overwrite + fsync 로 fallback: target={}",
                 target,
             )
 
-        # fallback — 직접 overwrite
-        with open(target, "w", encoding="utf-8") as direct_handle:
-            direct_handle.write(content)
-            direct_handle.flush()
-            os.fsync(direct_handle.fileno())
+        # EXDEV fallback — 직접 overwrite.
+        _overwrite_with_fsync(target, content)
 
     finally:
         # 위 경로 중 어디에서 예외가 났든 tmp 가 남으면 제거.

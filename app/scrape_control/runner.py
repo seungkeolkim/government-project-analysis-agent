@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import threading
@@ -106,12 +107,83 @@ class StartResult:
 # ──────────────────────────────────────────────────────────────
 
 
+# docker CLI 바이너리 탐색 시 관행적 후보 경로. shutil.which 가 실패한
+# 경우(스케줄러 실행 컨텍스트의 PATH 가 제한적일 때 등) 에만 시도한다.
+#
+# Dockerfile 에서 Debian `docker.io` 패키지를 설치하므로 컨테이너 안의
+# 정규 경로는 /usr/bin/docker 다. 호스트 직접 실행 개발 환경 등에서는
+# /usr/local/bin/docker 에 있을 수 있어 2차 후보로 둔다.
+_DEFAULT_DOCKER_BINARY_PATHS: tuple[str, ...] = (
+    "/usr/bin/docker",
+    "/usr/local/bin/docker",
+)
+
+# 환경변수로 직접 지정할 수 있는 오버라이드 키. 운영자가 비표준 위치에
+# docker CLI 를 둔 경우(예: /opt/docker-ce/bin/docker) 의 비상 수단.
+_DOCKER_BINARY_ENV_VAR: str = "DOCKER_BINARY"
+
+
+def _resolve_docker_binary() -> str:
+    """subprocess.Popen 에 사용할 docker CLI 의 절대경로를 결정한다.
+
+    기존 코드는 argv[0] 을 문자열 \"docker\" 로 두어 execvpe 의 PATH 탐색에
+    의존했지만, APScheduler 백그라운드 실행 컨텍스트처럼 PATH 가 축소된
+    환경에서는 ``FileNotFoundError: [Errno 2] No such file or directory: 'docker'``
+    가 발생할 수 있다. 이를 예방하고, 탐색 실패 시에는 ScrapeRun 을 failed 로
+    마감하며 운영자에게 명확한 진단 메시지를 남기는 것이 본 함수의 역할이다.
+
+    우선순위:
+        1. 환경변수 ``DOCKER_BINARY`` 로 절대경로가 주어진 경우 그대로 사용한다.
+        2. ``shutil.which('docker')`` — 현재 프로세스 PATH 기준 탐색.
+        3. 관행 경로(_DEFAULT_DOCKER_BINARY_PATHS) 를 순차 점검.
+
+    Returns:
+        실행 가능한 docker CLI 의 절대경로.
+
+    Raises:
+        ComposeEnvironmentError: 모든 후보에서 바이너리를 찾지 못했거나
+            DOCKER_BINARY 가 유효하지 않은 경로를 가리킬 때.
+    """
+    override = os.environ.get(_DOCKER_BINARY_ENV_VAR, "").strip()
+    if override:
+        # 오버라이드 값이 절대경로이고 실제 실행 가능한 파일을 가리켜야만
+        # 허용한다. 상대경로·존재하지 않는 경로는 거부해 침묵 오작동을 막는다.
+        if (
+            os.path.isabs(override)
+            and os.path.isfile(override)
+            and os.access(override, os.X_OK)
+        ):
+            return override
+        raise ComposeEnvironmentError(
+            f"환경변수 {_DOCKER_BINARY_ENV_VAR}={override!r} 가 유효한 "
+            "실행 가능한 절대경로가 아닙니다. docker CLI 바이너리의 절대경로를 "
+            "지정하거나 환경변수를 제거하세요."
+        )
+
+    discovered = shutil.which("docker")
+    if discovered:
+        return discovered
+
+    for candidate in _DEFAULT_DOCKER_BINARY_PATHS:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+
+    raise ComposeEnvironmentError(
+        "docker CLI 바이너리를 찾지 못했습니다. app 컨테이너에 docker.io 패키지가 "
+        "설치되어 있는지, 또는 비특권 UID 가 해당 파일을 실행할 수 있는지 확인하세요 "
+        "(이미지 재빌드가 필요할 수 있습니다). 비표준 경로를 쓰는 경우 환경변수 "
+        f"{_DOCKER_BINARY_ENV_VAR} 로 docker CLI 의 절대경로를 주입할 수 있습니다. "
+        "탐색 범위: PATH(shutil.which) · "
+        f"{', '.join(_DEFAULT_DOCKER_BINARY_PATHS)}."
+    )
+
+
 def build_compose_command(active_sources: list[str]) -> list[str]:
     """docker compose 호출에 사용할 argv 를 만든다.
 
     최종 argv 예시:
 
-        docker compose \\
+        /usr/bin/docker compose \\
             -f /app/docker-compose.yml \\
             --project-directory /home/user/project \\
             -p iris-agent \\
@@ -119,6 +191,14 @@ def build_compose_command(active_sources: list[str]) -> list[str]:
             run --rm \\
             -e SCRAPE_ACTIVE_SOURCES=IRIS,NTIS \\
             scraper
+
+    ``argv[0]`` 은 ``_resolve_docker_binary()`` 가 반환하는 **절대경로** 다.
+    예전에는 문자열 ``\"docker\"`` 를 그대로 넘겨 execvpe 의 PATH 탐색에
+    의존했으나, APScheduler 의 백그라운드 실행 컨텍스트 등에서는 PATH 가
+    제한적이어서 ``FileNotFoundError: [Errno 2] No such file or directory:
+    'docker'`` 가 발생할 수 있다. 이를 피하고자 argv[0] 을 절대경로로 고정한다.
+    compose v2 플러그인은 ``/usr/libexec/docker/cli-plugins`` 에서 docker CLI
+    가 자동 탐색하므로 ``compose`` 서브커맨드 체계는 건드리지 않는다.
 
     ``--project-directory`` 로 **호스트 경로** 를 지정해야 compose 가 compose
     파일의 상대경로(``./app`` 등) 를 호스트 기준 절대경로로 전개해 dockerd 에
@@ -134,8 +214,14 @@ def build_compose_command(active_sources: list[str]) -> list[str]:
         ``subprocess.Popen`` 에 그대로 전달 가능한 argv 리스트.
 
     Raises:
-        ComposeEnvironmentError: HOST_PROJECT_DIR 미설정.
+        ComposeEnvironmentError: HOST_PROJECT_DIR 미설정, 또는 docker CLI
+            바이너리를 app 컨테이너 내에서 찾지 못한 경우.
     """
+    # docker CLI 바이너리 위치를 먼저 확정한다. 탐색 실패 시 이 함수를 호출한
+    # start_scrape_run 이 ScrapeRun 을 failed 로 마감하고 에러 메시지를 UI
+    # '로그' 컬럼에 노출한다.
+    docker_binary = _resolve_docker_binary()
+
     host_project_dir = os.environ.get(HOST_PROJECT_DIR_ENV_VAR, "").strip()
     if not host_project_dir:
         raise ComposeEnvironmentError(
@@ -151,7 +237,7 @@ def build_compose_command(active_sources: list[str]) -> list[str]:
     ).strip() or DEFAULT_COMPOSE_PROJECT_NAME
 
     argv: list[str] = [
-        "docker",
+        docker_binary,
         "compose",
         "-f",
         COMPOSE_FILE_IN_CONTAINER,
