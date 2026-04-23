@@ -61,11 +61,6 @@ services:
       # 동일 결과를 강제하므로 두 장치가 보완적으로 동작한다. HOST_TZ 를
       # .env 에 설정하면 기본값(Asia/Seoul) 을 덮어쓸 수 있다.
       - TZ=${HOST_TZ:-Asia/Seoul}
-      # 00032 — docker CLI 절대경로를 명시해 APScheduler 백그라운드 컨텍스트의
-      # 제한된 PATH 에서도 _resolve_docker_binary() 가 shutil.which 탐색 없이
-      # 곧바로 사용할 수 있게 한다. 이미지에 docker.io 가 설치된 경우(이미지
-      # 재빌드 후)에만 유효하다. 파일이 없으면 수집 트리거 시 명확한 에러 발생.
-      - DOCKER_BINARY=/usr/bin/docker
     ports:
       - "8000:8000"
     volumes:
@@ -97,6 +92,9 @@ services:
       - /etc/localtime:/etc/localtime:ro
       # 운영자 CLI 스크립트(create_admin.py 등) 노출.
       - ./scripts:/app/scripts
+      # 컨테이너 내부 compose subprocess 가 `--project-directory ${HOST_PROJECT_DIR}`
+      # 기준으로 .env 를 stat 하므로 호스트 .env 를 동일 경로에 읽기 전용으로 마운트.
+      - ./.env:${HOST_PROJECT_DIR}/.env:ro
     # 컨테이너 내부 유저가 호스트 docker 그룹의 gid 를 가지도록 group_add 로 주입한다.
     # HOST_DOCKER_GID 는 호스트의 `getent group docker | cut -d: -f3` 값으로 .env 에 설정.
     # Debian/Ubuntu 기본값이 999 인 경우가 많아 fallback 으로 둔다. 값 불일치 시
