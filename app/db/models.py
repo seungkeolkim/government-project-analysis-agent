@@ -51,6 +51,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     event,
+    text,
 )
 from sqlalchemy.orm import (
     DeclarativeBase,
@@ -67,6 +68,33 @@ def _utcnow() -> datetime:
     SQLAlchemy 의 default/onupdate 콜러블로 사용한다.
     """
     return datetime.now(tz=UTC)
+
+
+def as_utc(value: datetime) -> datetime:
+    """naive ``datetime`` 을 UTC tz-aware 로, 이미 tz-aware 라면 그대로 반환한다.
+
+    SQLAlchemy ``DateTime(timezone=True)`` 는 SQLite 백엔드에서 timezone 정보를
+    저장하지 못해, INSERT 시 tz-aware 로 넣어도 SELECT 시점에는 naive
+    ``datetime`` 으로 되돌아온다. 이 상태에서 ``datetime.now(tz=UTC)`` 같은
+    tz-aware 시각과 직접 비교하면 ``TypeError: can't compare offset-naive and
+    offset-aware datetimes`` 가 발생한다.
+
+    본 헬퍼는 비교 직전에 양쪽 값을 UTC tz-aware 로 정규화하는 데 사용한다.
+    저장된 값이 UTC 라는 프로젝트 컨벤션에 의존하므로, naive 값은 UTC tz 를
+    부여해도 의미가 보존된다.
+
+    원래 ``app.auth.service._as_utc`` 로 존재하던 private 헬퍼를 Phase 2 에서
+    scrape_runs 비교 로직에서도 재사용하기 위해 공용 모듈로 승격했다.
+
+    Args:
+        value: tz-aware 또는 naive ``datetime``.
+
+    Returns:
+        tz-aware UTC ``datetime``.
+    """
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
 
 
 class Base(DeclarativeBase):
@@ -1063,6 +1091,133 @@ def _favorite_folder_before_update(
     _enforce_favorite_folder_depth(session, target)
 
 
+# ──────────────────────────────────────────────────────────────
+# ScrapeRun (Phase 2 / 00025 — 수집 실행 1회 요약)
+# ──────────────────────────────────────────────────────────────
+
+# ScrapeRun.status / ScrapeRun.trigger 의 허용값.
+# DB CHECK 제약(ck_scrape_runs_status / ck_scrape_runs_trigger)이 이 값 집합을
+# 강제하며, ORM 쪽 service 레이어(app/scrape_control/)에서 INSERT 전 동일
+# 도메인으로 검증한다 — 바깥에서 임의 문자열이 DB 까지 도달하지 않게 막는다.
+SCRAPE_RUN_STATUSES: tuple[str, ...] = (
+    "running",
+    "completed",
+    "cancelled",
+    "failed",
+    "partial",
+)
+SCRAPE_RUN_TRIGGERS: tuple[str, ...] = ("manual", "scheduled", "cli")
+
+# terminal 상태(더 이상 진행 중이 아닌 상태) 집합. finalize 의 idempotent 체크에 사용.
+SCRAPE_RUN_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {"completed", "cancelled", "failed", "partial"}
+)
+
+
+class ScrapeRun(Base):
+    """수집 실행 1회의 요약.
+
+    Phase 1a migration(``20260422_1500_b2c5e8f1a934_phase1a_new_tables.py`` §12)
+    에서 테이블 DDL 은 이미 생성되어 있고, Phase 2(00025) 에서 ORM 을 얹어
+    수동(웹)/자동(스케줄)/CLI 3경로에서 공통으로 기록하도록 한다.
+
+    설계:
+        - running row 는 동시 1개만 존재(app 레벨 lock).
+          create_scrape_run 이 사전 SELECT 로 검증한다.
+        - pid 는 subprocess.Popen 이후 set_scrape_run_pid 로 주입한다.
+          cli 경로에서는 자기 자신의 pid 를 넣어 stale cleanup 과 관리
+          일관성을 맞춘다.
+        - source_counts 는 JSON 으로 누적·최종 요약을 둘 다 담을 수 있는
+          자유 스키마. 세부는 docs/scrape_control_design.md §7.5 참조.
+        - status / trigger 은 좁은 문자열 도메인(위 상수). DB CHECK 가 있고
+          ORM 컬럼의 server_default 역시 migration 과 1:1 일치시킨다.
+
+    컬럼/인덱스 이름은 migration 과 정확히 일치해야 한다 (autogenerate diff 비움).
+    """
+
+    __tablename__ = "scrape_runs"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        doc="수집 실행이 개시된 시각(UTC).",
+    )
+
+    ended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        doc="수집이 종료된 시각(UTC). running 중에는 NULL.",
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        # migration DDL 이 server_default=sa.text(\"'running'\") 를 준 것과 1:1 일치시켜야
+        # autogenerate diff 가 비는 상태가 유지된다 (docs/db_portability.md §4).
+        server_default=text("'running'"),
+        default="running",
+        doc="실행 상태. SCRAPE_RUN_STATUSES 중 하나.",
+    )
+
+    trigger: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        doc="실행 트리거. SCRAPE_RUN_TRIGGERS 중 하나.",
+    )
+
+    source_counts: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        doc="소스별/전체 수집 결과 요약 (자유 스키마 JSON). "
+            "docs/scrape_control_design.md §7.5 참조.",
+    )
+
+    error_message: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="실패/부분 성공 시의 요약 메시지. 진단용 — UI 에 노출.",
+    )
+
+    pid: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        doc="subprocess pid (웹 경로) 또는 cli 프로세스 pid. "
+            "stale cleanup 에서 프로세스 존재 여부 확인에 사용.",
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running', 'completed', 'cancelled', 'failed', 'partial')",
+            name="ck_scrape_runs_status",
+        ),
+        CheckConstraint(
+            "trigger IN ('manual', 'scheduled', 'cli')",
+            name="ck_scrape_runs_trigger",
+        ),
+        Index("ix_scrape_runs_started_at", "started_at"),
+        Index("ix_scrape_runs_status", "status"),
+    )
+
+    def is_terminal(self) -> bool:
+        """현재 status 가 terminal(완료·중단·실패·부분) 상태인지 반환."""
+        return self.status in SCRAPE_RUN_TERMINAL_STATUSES
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현."""
+        return (
+            f"<ScrapeRun id={self.id} status={self.status!r} "
+            f"trigger={self.trigger!r} pid={self.pid}>"
+        )
+
+
 __all__ = [
     "Base",
     "Announcement",
@@ -1073,6 +1228,11 @@ __all__ = [
     "FavoriteFolder",
     "RelevanceJudgment",
     "RelevanceJudgmentHistory",
+    "ScrapeRun",
+    "SCRAPE_RUN_STATUSES",
+    "SCRAPE_RUN_TERMINAL_STATUSES",
+    "SCRAPE_RUN_TRIGGERS",
     "User",
     "UserSession",
+    "as_utc",
 ]

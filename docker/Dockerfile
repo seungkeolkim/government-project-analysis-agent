@@ -40,6 +40,15 @@ COPY alembic ./alembic
 #     마운트가 누락된 경우에만 활성화된다.
 COPY sources.yaml.template ./
 
+# 3c) docker-compose.yml 이미지 내 복사 (Phase 2 / 00025).
+#     app 컨테이너의 runner 가 subprocess 로 `docker compose ...` 를 호출할 때
+#     참조할 compose 파일. `-f /app/docker-compose.yml` 로 명시 전달한다.
+#     compose CLI 는 이 파일을 **읽기만** 하고, 실제 mount/service 관리는
+#     호스트 dockerd 가 수행한다(docker.sock 마운트로 원격 조작).
+#     상대 경로(예: ./app)는 `docker compose --project-directory $HOST_PROJECT_DIR`
+#     를 통해 HOST 기준 절대경로로 해석된다. docs/scrape_control_design.md §5.3 참조.
+COPY docker-compose.yml ./
+
 # 4) 파이썬 의존성 및 패키지 editable 설치.
 #    editable(-e) 로 설치해야 compose 의 ./app 바인드 마운트와 함께
 #    호스트의 소스 변경이 즉시 반영된다.

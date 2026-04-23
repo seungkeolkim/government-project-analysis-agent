@@ -84,6 +84,10 @@ from app.db.models import (
     CanonicalProject,
     RelevanceJudgment,
     RelevanceJudgmentHistory,
+    SCRAPE_RUN_STATUSES,
+    SCRAPE_RUN_TERMINAL_STATUSES,
+    SCRAPE_RUN_TRIGGERS,
+    ScrapeRun,
 )
 from app.sources.config_schema import load_sources_config
 
@@ -1663,6 +1667,305 @@ def mark_announcement_read(
     return existing
 
 
+# ──────────────────────────────────────────────────────────────
+# ScrapeRun — Phase 2 / 00025 수집 실행 제어 (docs/scrape_control_design.md §7)
+# ──────────────────────────────────────────────────────────────
+#
+# 모든 ScrapeRun 헬퍼는 기존 repository 규약을 따른다:
+#   - 호출자가 전달한 session 을 그대로 사용한다 (새 세션을 열지 않는다).
+#   - flush 까지만 수행하고 commit 은 호출자의 session_scope 가 담당한다.
+#   - status / trigger 도메인은 app/db/models.py 상수로 고정(외부 문자열 차단).
+
+
+def _validate_scrape_run_trigger(trigger: str) -> str:
+    """trigger 문자열이 DB CHECK 제약과 동일한 도메인에 속하는지 검증한다.
+
+    service 레이어에서 동일 검증을 중복 수행하지만, repository 직접 호출에서도
+    안전하도록 여기서도 최종 방어선을 둔다. 불일치면 ``ValueError``.
+    """
+    if trigger not in SCRAPE_RUN_TRIGGERS:
+        raise ValueError(
+            f"알 수 없는 ScrapeRun.trigger 값: {trigger!r}. "
+            f"허용: {sorted(SCRAPE_RUN_TRIGGERS)}"
+        )
+    return trigger
+
+
+def _validate_scrape_run_status(status: str) -> str:
+    """status 문자열이 DB CHECK 제약과 동일한 도메인인지 검증한다."""
+    if status not in SCRAPE_RUN_STATUSES:
+        raise ValueError(
+            f"알 수 없는 ScrapeRun.status 값: {status!r}. "
+            f"허용: {sorted(SCRAPE_RUN_STATUSES)}"
+        )
+    return status
+
+
+def get_running_scrape_run(session: Session) -> ScrapeRun | None:
+    """status='running' 인 ScrapeRun 을 조회한다.
+
+    정상 운영에서는 0 또는 1개. 2개 이상이라면 stale cleanup 이 필요한 상태이며,
+    본 함수는 ``started_at`` 내림차순 첫 번째 row 를 반환한다 (가장 최근에
+    기동된 실행을 활성 lock 으로 간주).
+
+    Args:
+        session: 호출자 세션.
+
+    Returns:
+        진행 중인 ``ScrapeRun`` 또는 ``None``.
+    """
+    return session.execute(
+        select(ScrapeRun)
+        .where(ScrapeRun.status == "running")
+        .order_by(ScrapeRun.started_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+def list_recent_scrape_runs(
+    session: Session,
+    *,
+    limit: int = 20,
+) -> list[ScrapeRun]:
+    """최근 ScrapeRun 을 started_at 내림차순으로 반환한다.
+
+    관리자 UI 의 [수집 제어] 탭에서 최근 이력을 표시하는 데 쓴다.
+
+    Args:
+        session: 호출자 세션.
+        limit:   반환할 최대 row 수. 양의 정수.
+
+    Returns:
+        최근 ``ScrapeRun`` 목록 (최신순). 데이터가 없으면 빈 리스트.
+    """
+    if limit <= 0:
+        raise ValueError(f"limit 는 양의 정수여야 합니다: {limit!r}")
+    return list(
+        session.execute(
+            select(ScrapeRun)
+            .order_by(ScrapeRun.started_at.desc())
+            .limit(limit)
+        ).scalars()
+    )
+
+
+def create_scrape_run(
+    session: Session,
+    *,
+    trigger: str,
+    source_counts: dict[str, Any] | None = None,
+) -> ScrapeRun:
+    """running 상태의 ScrapeRun row 를 생성한다.
+
+    Lock 의무:
+        호출자는 이 함수를 부르기 전에 :func:`get_running_scrape_run` 으로
+        현재 running row 가 없음을 확인해야 한다. 동일 세션·동일 트랜잭션에서
+        수행하면 SELECT→INSERT 사이 race 가 방지된다 (SQLite 는 기본
+        serialized, Postgres 전환 시 advisory lock 으로 업그레이드 고려).
+        본 함수 자체는 중복 running row 를 강제로 막지 않는다 — 호출자 책임.
+
+    Args:
+        session:       호출자 세션.
+        trigger:       'manual' / 'scheduled' / 'cli' 중 하나. 그 외는 ValueError.
+        source_counts: 초기 JSON (예: {\"active_sources\": [\"IRIS\"]}).
+                       None 이면 빈 dict.
+
+    Returns:
+        flush 완료된 ``ScrapeRun`` 인스턴스 (id 할당됨).
+    """
+    _validate_scrape_run_trigger(trigger)
+    row = ScrapeRun(
+        trigger=trigger,
+        status="running",
+        source_counts=source_counts if source_counts is not None else {},
+        # started_at 은 모델의 default=_utcnow 가 채운다.
+    )
+    session.add(row)
+    session.flush()
+    logger.info(
+        "ScrapeRun 생성: id={} trigger={} source_counts={}",
+        row.id, row.trigger, row.source_counts,
+    )
+    return row
+
+
+def set_scrape_run_pid(session: Session, run_id: int, pid: int) -> None:
+    """ScrapeRun.pid 를 갱신한다.
+
+    subprocess.Popen 직후 호출해 중단 경로(``os.killpg``) 가 쓸 pid 를 기록한다.
+    cli 경로는 자기 자신의 pid 를 기록해 stale cleanup 로직과 일관성을 맞춘다.
+
+    Args:
+        session: 호출자 세션.
+        run_id:  대상 ScrapeRun PK.
+        pid:     양의 정수. 0 이하면 ValueError.
+
+    Raises:
+        ValueError: run_id 에 해당하는 row 가 없거나 pid 가 비정상값.
+    """
+    if pid <= 0:
+        raise ValueError(f"pid 는 양의 정수여야 합니다: {pid!r}")
+    row = session.get(ScrapeRun, run_id)
+    if row is None:
+        raise ValueError(f"ScrapeRun id={run_id} 를 찾을 수 없습니다.")
+    row.pid = pid
+    session.flush()
+
+
+def finalize_scrape_run(
+    session: Session,
+    run_id: int,
+    *,
+    status: str,
+    source_counts: dict[str, Any] | None = None,
+    error_message: str | None = None,
+) -> bool:
+    """ScrapeRun 을 terminal 상태로 마감한다 (idempotent).
+
+    동작:
+        - 대상 row 가 이미 terminal 이면 변경 없이 False 반환.
+          cli 가 자체 finalize 한 뒤 웹의 watcher 가 subprocess 종료를 보고
+          재호출하는 케이스를 안전하게 처리하기 위함 (설계 문서 §9.2).
+        - running 이면 ended_at=_utcnow(), status/source_counts/error_message
+          를 업데이트하고 True 반환.
+
+    Args:
+        session:       호출자 세션.
+        run_id:        대상 ScrapeRun PK.
+        status:        SCRAPE_RUN_TERMINAL_STATUSES 중 하나. running 은 금지.
+        source_counts: 최종 요약. None 이면 기존 값 유지.
+        error_message: 실패·부분 성공 시 진단 메시지.
+
+    Returns:
+        실제로 마감이 적용되었으면 True. 이미 terminal 이었으면 False.
+
+    Raises:
+        ValueError: run_id 없음 / status 가 허용 값이 아님 / status='running' 을 전달.
+    """
+    _validate_scrape_run_status(status)
+    if status == "running":
+        raise ValueError(
+            "finalize_scrape_run 에 status='running' 을 전달할 수 없습니다. "
+            "terminal 상태(completed/cancelled/failed/partial) 중 하나를 넘기세요."
+        )
+
+    row = session.get(ScrapeRun, run_id)
+    if row is None:
+        raise ValueError(f"ScrapeRun id={run_id} 를 찾을 수 없습니다.")
+
+    if row.is_terminal():
+        # 이미 마감된 row — 호출자가 안심하고 재호출할 수 있도록 no-op.
+        logger.debug(
+            "finalize_scrape_run skip (이미 terminal): id={} 기존 status={!r} "
+            "재요청 status={!r}",
+            run_id, row.status, status,
+        )
+        return False
+
+    row.status = status
+    row.ended_at = datetime.now(tz=UTC)
+    if source_counts is not None:
+        row.source_counts = source_counts
+    if error_message is not None:
+        row.error_message = error_message
+    session.flush()
+    logger.info(
+        "ScrapeRun 마감: id={} status={!r} ended_at={} error_message={!r}",
+        row.id, row.status,
+        row.ended_at.isoformat() if row.ended_at else None,
+        error_message,
+    )
+    return True
+
+
+def fail_stale_running_runs(
+    session: Session,
+    *,
+    pid_alive_checker: Any = None,
+) -> int:
+    """web startup 시점의 stale cleanup — 미관리 상태의 running row 를 failed 로 정리한다.
+
+    판정 규칙 (사용자 원문: "pid 없는 running row 를 failed 로 정리"):
+        - pid IS NULL 이면 Popen 직전에 죽은 실행 — 무조건 stale.
+        - pid IS NOT NULL 이지만 해당 프로세스가 존재하지 않으면 stale.
+          기본 체커(``pid_alive_checker=None``) 는 ``os.kill(pid, 0)`` 시도 후
+          ``ProcessLookupError`` 를 stale 로, 그 외 예외는 살아있는 것으로 해석.
+        - pid 가 살아 있어도 **다른 프로세스** 일 수 있지만(재부팅 후 동일 pid 재할당),
+          본 stale cleanup 은 안전 쪽으로 "살아있으면 그대로 두기" 를 택한다.
+          완전한 orphan 감지는 향후 호스트 측 컨테이너 상태 조회로 보강 가능.
+
+    모든 매칭 row 는 status='failed', ended_at=_utcnow(),
+    error_message='stale (web restart)' 로 마감된다.
+
+    Args:
+        session:           호출자 세션.
+        pid_alive_checker: 테스트 주입용 콜러블 ``(pid: int) -> bool``.
+                           True 면 살아있는 것으로 간주. None 이면 os.kill 기본 구현.
+
+    Returns:
+        stale 로 마감된 row 수.
+    """
+    import os
+
+    def _default_checker(pid: int) -> bool:
+        """os.kill(pid, 0) 으로 프로세스 존재 여부 확인.
+
+        Linux/macOS 에서는 존재하면 no-op, 없으면 ProcessLookupError.
+        권한 문제(PermissionError) 는 "살아 있지만 내가 못 건드림" 으로 해석.
+        """
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # 다른 유저의 프로세스 — 존재는 함. 보수적으로 살아있다고 본다.
+            return True
+        except OSError:
+            # 기타 예외는 stale 로 취급해 복구 가능하게 한다.
+            return False
+
+    checker = pid_alive_checker if pid_alive_checker is not None else _default_checker
+
+    running_rows = session.execute(
+        select(ScrapeRun).where(ScrapeRun.status == "running")
+    ).scalars().all()
+
+    cleaned = 0
+    now_ts = datetime.now(tz=UTC)
+    for row in running_rows:
+        is_stale = False
+        if row.pid is None:
+            is_stale = True
+            reason = "pid_null"
+        elif not checker(row.pid):
+            is_stale = True
+            reason = f"pid_{row.pid}_not_found"
+        else:
+            reason = "pid_alive"
+
+        if not is_stale:
+            logger.warning(
+                "ScrapeRun id={} 는 pid={} 가 살아 있어 stale cleanup 에서 건너뜁니다. "
+                "수동으로 상태를 확인하세요.",
+                row.id, row.pid,
+            )
+            continue
+
+        row.status = "failed"
+        row.ended_at = now_ts
+        row.error_message = f"stale (web restart, {reason})"
+        cleaned += 1
+        logger.info(
+            "ScrapeRun id={} 를 stale 로 마감: pid={} reason={}",
+            row.id, row.pid, reason,
+        )
+
+    if cleaned:
+        session.flush()
+    return cleaned
+
+
 __all__ = [
     "UpsertResult",
     "CanonicalGroupRow",
@@ -1688,4 +1991,10 @@ __all__ = [
     "get_attachments_by_announcement",
     "get_read_announcement_id_set",
     "mark_announcement_read",
+    "get_running_scrape_run",
+    "list_recent_scrape_runs",
+    "create_scrape_run",
+    "set_scrape_run_pid",
+    "finalize_scrape_run",
+    "fail_stale_running_runs",
 ]

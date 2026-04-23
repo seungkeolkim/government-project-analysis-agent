@@ -110,6 +110,36 @@ def current_user_required(
     return user
 
 
+def admin_user_required(
+    user: User = Depends(current_user_required),
+) -> User:
+    """관리자(``is_admin=True``) 사용자를 반환한다. 비관리자면 403.
+
+    Phase 2(00025) 관리자 페이지 라우트가 공통으로 의존한다.
+    ``current_user_required`` 를 기반으로 하므로 비로그인은 **먼저** 401 로 걸러지며,
+    그 뒤 is_admin 플래그로 403 을 분기한다. 비관리자가 403 응답만 보고 라우트의
+    존재 자체는 인지할 수 있다는 점은 의도된 설계(로컬 팀 전용 UI).
+
+    is_admin 부여는 DB 직접 수정(``scripts/create_admin.py`` + Phase 1b SQL)
+    으로만 가능하며, UI 에서 부여하는 경로는 Phase 5 범위.
+
+    Args:
+        user: ``current_user_required`` 가 통과시킨 로그인 User.
+
+    Returns:
+        관리자 권한이 확인된 User.
+
+    Raises:
+        HTTPException(403): 로그인했으나 ``is_admin=False``.
+    """
+    if not user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="관리자만 접근할 수 있습니다.",
+        )
+    return user
+
+
 def ensure_same_origin(request: Request) -> None:
     """POST 요청의 Origin/Referer 헤더가 현재 host 와 일치하는지 확인한다.
 
@@ -143,6 +173,7 @@ def ensure_same_origin(request: Request) -> None:
 
 
 __all__ = [
+    "admin_user_required",
     "current_user_optional",
     "current_user_required",
     "ensure_same_origin",
