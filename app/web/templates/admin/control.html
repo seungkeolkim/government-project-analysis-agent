@@ -159,7 +159,9 @@
     function buildStartFormHtml() {
       // idle 상태에서 보여줄 '지금 시작' 폼 HTML 을 생성한다.
       // 서버 사이드 Jinja 렌더 결과와 DOM 구조/클래스가 같아야 CSS 가 동일하게
-      // 적용된다. 서버 측 admin/control.html 의 {% else %} 블록과 대응.
+      // 적용된다. 서버 측 admin/control.html 의 else 분기(대기/idle) 블록과 대응.
+      // (여기 주석에는 Jinja 태그 리터럴을 쓰지 않는다 — Jinja 파서가
+      //  script 블록 안 주석까지 태그로 해석해 TemplateSyntaxError 가 난다.)
       var sources = getAvailableSourcesFromDom();
       var checkboxesHtml;
       if (sources.length === 0) {
