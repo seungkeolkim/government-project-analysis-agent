@@ -30,6 +30,8 @@ dependencies = [
     "fastapi>=0.110,<1.0",
     "uvicorn[standard]>=0.29,<1.0",
     "jinja2>=3.1,<4.0",
+    # FastAPI Form/File 파싱 (multipart/form-data) — app/auth/routes.py 의 로그인/회원가입에서 사용
+    "python-multipart>=0.0.9,<1.0",
 
     # 설정/검증
     "pydantic>=2.6,<3.0",
