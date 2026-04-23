@@ -96,6 +96,7 @@ ARG DOCKER_COMPOSE_PLUGIN_VERSION=v2.29.7
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         docker.io \
+        docker-cli \
         curl \
         ca-certificates && \
     rm -rf /var/lib/apt/lists/* && \
