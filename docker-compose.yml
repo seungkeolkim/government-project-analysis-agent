@@ -16,8 +16,11 @@
 #   - ./data:/app/data                            : SQLite DB 파일을 호스트에 영속 보관.
 #   - ./app:/app/app                              : 개발 편의를 위한 소스 바인드 마운트.
 #                                                   이미지 빌드 없이도 호스트의 코드 변경이 즉시 반영된다.
-#   - ./sources.yaml:/run/config/sources.yaml:ro  : 실행 설정 주입. 이미지 빌드 없이 수정 반영.
+#   - ./sources.yaml:/run/config/sources.yaml     : 실행 설정 주입. 이미지 빌드 없이 수정 반영.
 #                                                   entrypoint.sh 가 per-run 임시 복사본을 생성한다.
+#                                                   Phase 2(00025-5): app 서비스는 편집기 쓰기를 위해
+#                                                   :ro 를 **제거**했다. scraper 서비스는 원본을
+#                                                   실수로라도 수정하지 않도록 :ro 유지.
 #   - /var/run/docker.sock:/var/run/docker.sock   : (app 서비스만) 호스트 dockerd 원격 조작용.
 #                                                   docs/scrape_control_design.md §5.2 참조.
 #                                                   **보안 경고**: 이 소켓 마운트는 사실상 호스트
@@ -50,7 +53,16 @@ services:
     volumes:
       - ./data:/app/data
       - ./app:/app/app
-      - ./sources.yaml:/run/config/sources.yaml:ro
+      # Phase 2(00025-5): 관리자 페이지의 [sources.yaml] 편집기가 호스트 원본
+      # 파일을 직접 수정해야 하므로 app 서비스에서는 `:ro` 를 제거한다.
+      # scraper 서비스는 per-run 임시 복사본만 사용해 원본을 건드리지 않으므로
+      # `:ro` 를 유지(아래 scraper.volumes 참조). 편집기 구현 주의사항:
+      #   - entrypoint.sh 가 기동 시 만드는 per-run 복사본과는 별개 파일이다.
+      #     편집기 → 원본 수정 → **다음** 수집 실행부터 반영.
+      #   - 원자적 쓰기는 NamedTemporaryFile + os.replace. bind mount 가 파일
+      #     단위일 때 EXDEV 가 나오면 app/sources/yaml_editor.py 가 직접
+      #     overwrite + fsync 로 fallback.
+      - ./sources.yaml:/run/config/sources.yaml
       # 호스트 docker daemon 소켓을 마운트해 app 컨테이너에서 docker CLI 로
       # 'docker compose --profile scrape run --rm scraper' 를 subprocess 호출할 수 있게 한다.
       # docker-in-docker 가 아니라 호스트 dockerd 를 조작하는 방식이므로,

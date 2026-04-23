@@ -1,17 +1,20 @@
-"""관리자 페이지 라우터 (Phase 2 / 00025-4).
+"""관리자 페이지 라우터 (Phase 2 / 00025-4, 00025-5).
 
 사용자 원문의 '관리자 페이지 (app/web/routes/admin.py)' 섹션을 구현한다.
-탭 3개 중 본 subtask 에서는 **[수집 제어]** 만 구현하고, [sources.yaml] 과
-[스케줄] 탭은 **탭 링크만** base 템플릿에 둔 채 진입 라우트는 후속 subtask
-(00025-5 / 00025-6) 가 추가한다 — placeholder 라우트는 일부러 두지 않는다.
+탭 3개 중:
+    - [수집 제어]:   00025-4 에서 구현 완료.
+    - [sources.yaml]: 00025-5 에서 추가 (본 subtask).
+    - [스케줄]:      00025-6 에서 추가 예정 — 탭 링크만 base 템플릿에 있다.
 
 엔드포인트:
     GET  /admin                         → 307 redirect /admin/scrape
     GET  /admin/scrape                  HTML 수집 제어 탭
     GET  /admin/scrape/status           JSON (5초 폴링용)
-    POST /admin/scrape/start            수동 수집 시작 → 302 /admin/scrape
-    POST /admin/scrape/cancel           중단 요청 → 302 /admin/scrape
+    POST /admin/scrape/start            수동 수집 시작 → 303 /admin/scrape
+    POST /admin/scrape/cancel           중단 요청 → 303 /admin/scrape
     GET  /admin/scrape/runs/{id}/log    text/plain 로그 파일 덤프
+    GET  /admin/sources/yaml            HTML sources.yaml 편집기 탭
+    POST /admin/sources/yaml            YAML 검증·백업·저장 후 재렌더
 
 보호:
     라우터 레벨 ``dependencies=[Depends(admin_user_required)]`` 로 GET/POST
@@ -50,6 +53,11 @@ from app.scrape_control import (
     request_cancel,
     scrape_run_log_path,
     start_scrape_run,
+)
+from app.sources.yaml_editor import (
+    SourcesYamlValidationError,
+    load_sources_yaml_text,
+    save_sources_yaml_text,
 )
 
 # ──────────────────────────────────────────────────────────────
@@ -407,6 +415,173 @@ def scrape_run_log(run_id: int) -> Response:
         content=body_bytes.decode("utf-8", errors="replace"),
         media_type="text/plain; charset=utf-8",
     )
+
+
+# ──────────────────────────────────────────────────────────────
+# [sources.yaml] 탭 (Phase 2 / 00025-5)
+# ──────────────────────────────────────────────────────────────
+
+
+def _render_sources_yaml_page(
+    request: Request,
+    *,
+    current_user: User,
+    yaml_text: str,
+    flash: Optional[str],
+    flash_level: str,
+    error_details: Optional[list[str]] = None,
+    status_code: int = status.HTTP_200_OK,
+) -> Response:
+    """[sources.yaml] 탭 템플릿을 렌더하는 공통 헬퍼.
+
+    GET 진입, POST 성공 후 재렌더, POST 실패(textarea 값 보존) 모두 이 함수를
+    통과해 코드 중복을 없앤다. error_details 가 주어지면 템플릿이 에러 블록을
+    표시한다.
+    """
+    return _templates.TemplateResponse(
+        request,
+        "admin/sources_yaml.html",
+        {
+            "active_tab": "sources",
+            "yaml_text": yaml_text,
+            "flash": flash,
+            "flash_level": flash_level,
+            "error_details": error_details or [],
+            "current_user": current_user,
+        },
+        status_code=status_code,
+    )
+
+
+@router.get("/sources/yaml", response_class=HTMLResponse)
+def sources_yaml_page(
+    request: Request,
+    flash: Optional[str] = Query(default=None),
+    flash_level: Optional[str] = Query(default=None),
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """sources.yaml 편집 폼을 렌더한다.
+
+    호스트 바인드 마운트 원본(컨테이너 기준 /run/config/sources.yaml) 을 그대로
+    읽어 textarea 에 채운다. 파일이 없으면 빈 textarea 로 진입한다 — 편집 후
+    저장하면 신규 생성된다.
+
+    파일 읽기 중 OSError 가 나면 편집 UI 를 띄우되 에러 배지를 통해 상황을
+    알린다. 빈 textarea 가 아니라 500 을 띄우면 관리자가 yaml 내용을 잃을 수
+    있어, 복구 가능성을 남기는 편이 낫다.
+    """
+    try:
+        yaml_text = load_sources_yaml_text()
+        load_error: Optional[str] = None
+    except OSError as exc:
+        logger.exception(
+            "sources.yaml 로드 실패: ({}: {})", type(exc).__name__, exc,
+        )
+        yaml_text = ""
+        load_error = (
+            f"sources.yaml 읽기 중 OS 오류가 발생했습니다: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    # 쿼리스트링 flash 가 있으면 그걸 우선, 없으면 load_error 노출.
+    effective_flash = flash if flash else load_error
+    effective_level = flash_level if flash_level else ("error" if load_error else "success")
+
+    return _render_sources_yaml_page(
+        request,
+        current_user=current_user,
+        yaml_text=yaml_text,
+        flash=effective_flash,
+        flash_level=effective_level,
+        error_details=None,
+    )
+
+
+@router.post("/sources/yaml", dependencies=[Depends(ensure_same_origin)])
+def sources_yaml_save(
+    request: Request,
+    yaml_text: str = Form(...),
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """sources.yaml 저장 처리.
+
+    검증 실패:
+        - YAML syntax 오류 / Pydantic 검증 실패 — 파일 변경 없음(사용자 원문:
+          '실패 시 에러 + 저장 안 함'). 원문을 그대로 textarea 에 돌려주고
+          (guidance: '변경사항을 잃지 않도록') error_details 를 표시한다.
+
+    검증 성공:
+        - 원본 파일을 data/backups/sources/YYYYMMDD_HHMMSS.yaml 로 백업한 뒤
+          원자적 쓰기. 성공 flash 로 GET 리다이렉트 (PRG 패턴).
+
+    OS 에러(백업/쓰기 실패):
+        - 500 계열 에러로 간주해 textarea 값을 유지한 채 에러 메시지 표시.
+    """
+    # textarea 가 submit 시 개행 코드 정규화(기본 CRLF → LF). Python 기본
+    # request form 처리가 이미 값을 str 로 주지만, 안전하게 한 번 더 정규화.
+    submitted_text = yaml_text.replace("\r\n", "\n").replace("\r", "\n")
+
+    try:
+        result = save_sources_yaml_text(submitted_text)
+    except SourcesYamlValidationError as exc:
+        # 검증 실패 — textarea 원문을 그대로 돌려주고 error_details 노출.
+        # PRG 가 아닌 동일 url 에 200 재렌더 — 새로고침 시 form 재전송 경고가
+        # 뜰 수 있지만, 에러 맥락을 유지하려면 이게 더 안전.
+        logger.info(
+            "sources.yaml 저장 거부 — 검증 실패: 관리자={} message={!r} details={}",
+            current_user.username, exc.message, exc.details,
+        )
+        return _render_sources_yaml_page(
+            request,
+            current_user=current_user,
+            yaml_text=submitted_text,
+            flash=exc.message,
+            flash_level="error",
+            error_details=exc.details,
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    except OSError as exc:
+        logger.exception(
+            "sources.yaml 저장 중 OS 오류: 관리자={} ({}: {})",
+            current_user.username, type(exc).__name__, exc,
+        )
+        return _render_sources_yaml_page(
+            request,
+            current_user=current_user,
+            yaml_text=submitted_text,
+            flash=(
+                f"저장 중 OS 오류가 발생했습니다 ({type(exc).__name__}): {exc}. "
+                "파일 권한 또는 디스크 상태를 확인하세요."
+            ),
+            flash_level="error",
+            error_details=None,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    # 성공 — PRG 패턴(POST-Redirect-GET).
+    backup_note = (
+        f" 백업: {result.backup_path.name}" if result.backup_path is not None else " (기존 원본 없음 — 백업 생략)"
+    )
+    message = f"저장 완료 ({result.byte_count} bytes).{backup_note}"
+    logger.info(
+        "sources.yaml 저장 완료: 관리자={} target={} bytes={} backup={}",
+        current_user.username,
+        result.target_path,
+        result.byte_count,
+        result.backup_path,
+    )
+    return RedirectResponse(
+        url=_sources_yaml_flash_url(message, level="success"),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+def _sources_yaml_flash_url(message: str, *, level: str) -> str:
+    """/admin/sources/yaml?flash=...&flash_level=... redirect URL 빌더."""
+    from urllib.parse import urlencode
+
+    query = urlencode({"flash": message, "flash_level": level})
+    return f"/admin/sources/yaml?{query}"
 
 
 __all__ = [

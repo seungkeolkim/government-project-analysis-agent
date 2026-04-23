@@ -981,3 +981,84 @@ body.is-anonymous .announcement-title-link--read {
     color: #b91c1c;
     font-weight: 600;
 }
+
+/* ---------- sources.yaml 편집기 (Phase 2 / 00025-5) ---------- */
+
+.admin-yaml-form {
+    gap: 12px;
+}
+
+.admin-yaml__textarea {
+    width: 100%;
+    min-height: 420px;
+    padding: 10px 12px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    background: #0f172a;
+    color: #e2e8f0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    resize: vertical;
+    white-space: pre;
+    overflow-wrap: normal;
+    overflow-x: auto;
+    tab-size: 2;
+}
+
+.admin-yaml__textarea:focus {
+    outline: none;
+    border-color: #60a5fa;
+    box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.35);
+}
+
+.admin-yaml__actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.admin-button--secondary {
+    background: #ffffff;
+    color: #1f2937;
+    border: 1px solid #d1d5db;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+}
+
+.admin-button--secondary:hover {
+    background: #f3f4f6;
+}
+
+.admin-yaml__errors {
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #991b1b;
+    border-radius: 6px;
+    padding: 12px 14px;
+}
+
+.admin-yaml__errors-title {
+    margin: 0 0 8px;
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.admin-yaml__errors-list {
+    margin: 0;
+    padding-left: 20px;
+    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.admin-yaml__errors-list code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 12px;
+    color: #7f1d1d;
+    background: #ffffff;
+    padding: 1px 4px;
+    border-radius: 3px;
+}
