@@ -29,6 +29,17 @@
 </div>
 {% endif %}
 
+{#
+  available_sources 를 JS 가 읽을 수 있도록 JSON script 태그로 심어둔다.
+  폴링 JS 가 running → idle 전이 시 '지금 시작' 폼을 재구성할 때 체크박스
+  source id 목록의 소스가 된다. type="application/json" 이라 브라우저가
+  스크립트로 실행하지 않으며, Jinja `|tojson` 이 적절한 HTML 이스케이프를
+  포함한 JSON 문자열을 생성해 XSS 로부터 안전하다.
+#}
+<script type="application/json" id="admin-available-sources">
+{{ available_sources | tojson }}
+</script>
+
 {# ── 현재 상태 블록 ──────────────────────────────────────────── #}
 <section class="admin-section">
     <h3 class="admin-section__heading">현재 상태</h3>
@@ -111,17 +122,99 @@
       return value || "";
     }
 
+    function escapeHtml(value) {
+      // JS 에서 innerHTML 로 주입할 문자열(체크박스 value/label 등) 안전 처리.
+      // 서버 Jinja 템플릿은 자동 이스케이프하지만 클라이언트 렌더 경로에서는
+      // 수동으로 처리해야 XSS 를 막는다. 특히 source id 는 sources.yaml 에서
+      // 오는 값이라 관리자가 직접 입력하는 문자열이다.
+      return String(value).replace(/[&<>"']/g, function (ch) {
+        switch (ch) {
+          case "&": return "&amp;";
+          case "<": return "&lt;";
+          case ">": return "&gt;";
+          case "\"": return "&quot;";
+          case "'": return "&#39;";
+          default: return ch;
+        }
+      });
+    }
+
+    function getAvailableSourcesFromDom() {
+      // 서버가 심어둔 <script type="application/json" id="admin-available-sources">
+      // 를 읽어 source id 목록을 반환한다. 실패 시 빈 배열 — 시작 폼은
+      // '등록된 소스가 없습니다' 안내 문구로 fallback.
+      var holder = document.getElementById("admin-available-sources");
+      if (!holder) {
+        return [];
+      }
+      try {
+        var parsed = JSON.parse(holder.textContent || "[]");
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (err) {
+        console.warn("[admin polling] available_sources parse failed", err);
+        return [];
+      }
+    }
+
+    function buildStartFormHtml() {
+      // idle 상태에서 보여줄 '지금 시작' 폼 HTML 을 생성한다.
+      // 서버 사이드 Jinja 렌더 결과와 DOM 구조/클래스가 같아야 CSS 가 동일하게
+      // 적용된다. 서버 측 admin/control.html 의 {% else %} 블록과 대응.
+      var sources = getAvailableSourcesFromDom();
+      var checkboxesHtml;
+      if (sources.length === 0) {
+        checkboxesHtml =
+          '<p class="admin-state__muted">' +
+          '등록된 소스가 없습니다. sources.yaml 을 먼저 설정하세요.' +
+          '</p>';
+      } else {
+        checkboxesHtml = sources.map(function (sourceId) {
+          var safe = escapeHtml(sourceId);
+          return (
+            '<label class="admin-checkbox">' +
+            '<input type="checkbox" name="active_sources" value="' + safe + '">' +
+            '<span>' + safe + '</span>' +
+            '</label>'
+          );
+        }).join("");
+      }
+      return (
+        '<p class="admin-state__label">' +
+        '<span class="admin-badge admin-badge--idle">대기</span>' +
+        '<span class="admin-state__text">현재 진행 중인 수집이 없습니다.</span>' +
+        '</p>' +
+        '<form class="admin-form admin-form--start" method="post" action="/admin/scrape/start">' +
+        '<fieldset class="admin-fieldset">' +
+        '<legend class="admin-fieldset__legend">' +
+        '소스 선택 (모두 체크 해제 = 전체)' +
+        '</legend>' +
+        checkboxesHtml +
+        '</fieldset>' +
+        '<button type="submit" class="admin-button admin-button--primary">' +
+        '지금 시작' +
+        '</button>' +
+        '</form>'
+      );
+    }
+
     function renderRunningBlock(container, running) {
       if (!running) {
+        // idle 상태.
+        //   1) 이미 idle 블록이 렌더되어 있으면(서버 최초 렌더 또는 이전 폴링
+        //      결과가 유지 중) 덮어쓰지 않는다. 덮어쓰면 사용자가 방금
+        //      체크한 source 선택이 5초마다 초기화되고, 서버 사이드 최초
+        //      시작 폼이 즉시 placeholder 로 치환되는 원래 버그가 재현된다.
+        //   2) 최초 wrapper 가 비어 있거나(createElement 직후) running →
+        //      idle 로 전이했을 때만 시작 폼을 재구성한다.
+        if (
+          container.classList &&
+          container.classList.contains("admin-state__idle")
+        ) {
+          return;
+        }
         container.className = "admin-state__idle";
-        container.innerHTML =
-          '<p class="admin-state__label">' +
-          '<span class="admin-badge admin-badge--idle">대기</span>' +
-          '<span class="admin-state__text">현재 진행 중인 수집이 없습니다.</span>' +
-          '</p>' +
-          '<p class="admin-state__muted">' +
-          '  폼이 숨겨졌습니다. 새 수집을 시작하려면 페이지를 새로고침하세요.' +
-          '</p>';
+        container.removeAttribute("data-running-id");
+        container.innerHTML = buildStartFormHtml();
         return;
       }
       container.className = "admin-state__running";
