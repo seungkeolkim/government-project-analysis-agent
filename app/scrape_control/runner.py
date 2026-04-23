@@ -156,8 +156,10 @@ def _resolve_docker_binary() -> str:
             return override
         raise ComposeEnvironmentError(
             f"환경변수 {_DOCKER_BINARY_ENV_VAR}={override!r} 가 유효한 "
-            "실행 가능한 절대경로가 아닙니다. docker CLI 바이너리의 절대경로를 "
-            "지정하거나 환경변수를 제거하세요."
+            "실행 가능한 절대경로가 아닙니다. 파일이 존재하지 않거나 실행 권한이 "
+            "없습니다. app 이미지가 docker.io 설치 전에 빌드된 경우 이미지 재빌드가 "
+            "필요합니다: docker compose build app && docker compose up -d app. "
+            "다른 경로를 쓴다면 환경변수를 올바른 절대경로로 갱신하거나 제거하세요."
         )
 
     discovered = shutil.which("docker")
