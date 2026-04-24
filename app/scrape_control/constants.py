@@ -22,6 +22,16 @@ from app.config import PROJECT_ROOT
 # 비어 있는 상태로 주입하거나 미주입이면 sources.yaml 의 기존 active_sources 를 그대로 사용.
 SCRAPE_ACTIVE_SOURCES_ENV_VAR: Final[str] = "SCRAPE_ACTIVE_SOURCES"
 
+# 웹/스케줄러가 이미 생성해둔 ScrapeRun.id 를 subprocess CLI 로 이어주기 위한 키.
+# 웹/스케줄러 경로는 start_scrape_run 에서 create_scrape_run 으로 running row 를
+# 먼저 INSERT 하고 subprocess 를 기동한다. 이 환경변수가 주입되면 subprocess 측
+# cli._async_main 은 **새 ScrapeRun row 를 만들지 않고** 기존 row 를 이어받아
+# 마감까지 수행한다. 이로써 '웹이 방금 만든 running row 를 자기 자신이 또 조회해서
+# 중복 running 으로 오판 후 exit 2 하는' 자기참조 문제를 제거한다 (task 00034).
+# 값 포맷: ScrapeRun.id 의 정수 문자열 (예: "42"). 비어있거나 정수 파싱 실패 시
+# CLI 는 기존 경로(trigger='cli' 로 자체 create_scrape_run) 로 동작한다.
+SCRAPE_RUN_ID_ENV_VAR: Final[str] = "SCRAPE_RUN_ID"
+
 # 호스트 프로젝트 루트의 절대 경로. 웹 컨테이너가 호스트 dockerd 에 mount 지시를
 # 내릴 때 상대경로 해석의 기준이 된다(`docker compose --project-directory $HOST_PROJECT_DIR`).
 # 설계 문서 §5.3 참조. 본 subtask(00025-3) 에서 runner 가 읽어 사용한다.
@@ -94,6 +104,7 @@ __all__ = [
     "ExternalTrigger",
     "HOST_PROJECT_DIR_ENV_VAR",
     "SCRAPE_ACTIVE_SOURCES_ENV_VAR",
+    "SCRAPE_RUN_ID_ENV_VAR",
     "SCRAPE_RUN_LOG_DIRNAME",
     "scrape_run_log_path",
     "scrape_run_log_root",
