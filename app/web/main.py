@@ -44,6 +44,7 @@ from app.db.repository import (
     get_read_announcement_id_set,
     get_relevance_by_canonical_id_map,
     get_relevance_history_by_canonical_id_map,
+    get_siblings_by_canonical_id_map,
     list_announcements,
     list_canonical_groups,
     mark_announcement_read,
@@ -448,6 +449,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     "relevance_map": relevance_map,
                     "history_map": history_map,
                     "my_relevance_map": my_relevance_map,
+                    # Phase 3b — group_mode 에서는 expand 없음; undefined 방지.
+                    "siblings_map": {},
                 },
             )
         else:
@@ -469,6 +472,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 if ann.canonical_group_id is not None
             }
             group_size_map = get_group_size_map(session, cgids)
+            # 동일과제 expand — 비로그인도 표시하므로 user 분기 밖에서 batch 조회.
+            siblings_map = get_siblings_by_canonical_id_map(session, list(cgids))
             ann_with_sizes = [
                 (
                     ann,
@@ -538,6 +543,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     "relevance_map": relevance_map,
                     "history_map": history_map,
                     "my_relevance_map": my_relevance_map,
+                    # Phase 3b — 동일과제 expand 데이터 (비로그인 포함).
+                    "siblings_map": siblings_map,
                 },
             )
 
@@ -608,6 +615,19 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             _my_rj = None
             _hist_list = []
 
+        # 동일과제 섹션 — 비로그인도 표시. 현재 공고는 목록에서 제외.
+        if announcement.canonical_group_id is not None:
+            _sib_map = get_siblings_by_canonical_id_map(
+                session, [announcement.canonical_group_id]
+            )
+            _siblings = [
+                s
+                for s in _sib_map.get(announcement.canonical_group_id, [])
+                if s["id"] != announcement.id
+            ]
+        else:
+            _siblings = []
+
         return templates.TemplateResponse(
             request,
             "detail.html",
@@ -621,6 +641,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 "rj_list": _rj_list,
                 "my_rj": _my_rj,
                 "hist_list": _hist_list,
+                # Phase 3b — 동일과제 섹션 (비로그인 포함).
+                "siblings": _siblings,
             },
         )
 

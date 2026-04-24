@@ -2423,6 +2423,7 @@ def get_siblings_by_canonical_id_map(
             Announcement.source_type,
             Announcement.deadline_at,
             Announcement.status,
+            Announcement.canonical_key_scheme,
         ).where(
             Announcement.canonical_group_id.in_(ids),
             Announcement.is_current.is_(True),
@@ -2430,7 +2431,7 @@ def get_siblings_by_canonical_id_map(
     ).all()
 
     result: dict[int, list[dict]] = {}
-    for ann_id, cid, title, source_type, deadline_at, status in rows:
+    for ann_id, cid, title, source_type, deadline_at, status, key_scheme in rows:
         result.setdefault(cid, []).append(
             {
                 "id": ann_id,
@@ -2438,6 +2439,7 @@ def get_siblings_by_canonical_id_map(
                 "source_type": source_type,
                 "deadline_at": deadline_at,
                 "status": status,
+                "canonical_key_scheme": key_scheme,
             }
         )
     return result

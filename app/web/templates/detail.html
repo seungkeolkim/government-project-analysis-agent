@@ -163,4 +163,32 @@
     <p class="empty-attachments">첨부파일이 없거나 아직 다운로드되지 않았습니다.</p>
 {% endif %}
 
+{# ── Phase 3b — 동일 과제 섹션 (비로그인 포함) ── #}
+{% if siblings %}
+<h3 class="siblings-section-title">동일 과제 ({{ siblings | length }}건)</h3>
+<ul class="siblings-list siblings-list--detail">
+    {% for sib in siblings %}
+    <li class="siblings-list__item">
+        <a class="siblings-list__link" href="/announcements/{{ sib.id }}">
+            {{ sib.title }}
+        </a>
+        <span class="source-badge source-{{ sib.source_type | lower }}">
+            {{ sib.source_type }}
+        </span>
+        {% if sib.canonical_key_scheme == 'official' %}
+        <span class="match-scheme-badge match-scheme-official">[공식]</span>
+        {% elif sib.canonical_key_scheme == 'fuzzy' %}
+        <span class="match-scheme-badge match-scheme-fuzzy">[유사]</span>
+        {% endif %}
+        <span class="status-badge status-{{ sib.status.name | lower }}">
+            {{ sib.status.value }}
+        </span>
+        {% if sib.deadline_at %}
+        <span class="siblings-deadline">마감 {{ sib.deadline_at.strftime("%Y-%m-%d") }}</span>
+        {% endif %}
+    </li>
+    {% endfor %}
+</ul>
+{% endif %}
+
 {% endblock %}
