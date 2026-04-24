@@ -1776,3 +1776,171 @@ button.canonical-count-badge.siblings-toggle--open {
 .fav-modal__cancel-btn:hover {
     background: #f3f4f6;
 }
+
+/* ────────────────────────────────────────────────────────────────
+   즐겨찾기 페이지 레이아웃 (Phase 3b / 00036-7)
+   ──────────────────────────────────────────────────────────────── */
+
+/* 2-panel flex container */
+.fav-page {
+    display: flex;
+    gap: 20px;
+    align-items: flex-start;
+    min-height: 400px;
+}
+
+/* ── 좌 사이드바 ── */
+.fav-page__sidebar {
+    flex: 0 0 220px;
+    min-width: 0;
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 14px 12px;
+}
+
+.fav-page__sidebar-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin: 0 0 10px;
+    color: #111827;
+}
+
+/* ── 폴더 목록 ── */
+.fav-sidebar-list {
+    list-style: none;
+    margin: 0 0 12px;
+    padding: 0;
+}
+
+.fav-sidebar-list--child {
+    margin: 2px 0 2px 14px;
+}
+
+.fav-sidebar-empty {
+    font-size: 12px;
+    color: #9ca3af;
+    padding: 4px 0;
+}
+
+/* ── 폴더 항목 ── */
+.fav-sidebar-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    border-radius: 4px;
+    padding: 4px 6px;
+    transition: background 0.1s;
+}
+
+.fav-sidebar-item:hover {
+    background: #f3f4f6;
+}
+
+.fav-sidebar-item--active {
+    background: #eff6ff;
+    border-left: 3px solid #3b82f6;
+    padding-left: 4px;
+}
+
+.fav-sidebar-item--child {
+    font-size: 13px;
+    padding: 3px 6px;
+}
+
+.fav-sidebar-item__link {
+    flex: 1;
+    font-size: 13px;
+    color: #1d4ed8;
+    text-decoration: none;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.fav-sidebar-item__link:hover {
+    text-decoration: underline;
+}
+
+.fav-sidebar-item--active .fav-sidebar-item__link {
+    font-weight: 600;
+    color: #1e40af;
+}
+
+.fav-sidebar-item__actions {
+    display: none;
+    gap: 2px;
+}
+
+.fav-sidebar-item:hover .fav-sidebar-item__actions {
+    display: flex;
+}
+
+.fav-sidebar-item__btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 12px;
+    color: #6b7280;
+    padding: 1px 4px;
+    border-radius: 3px;
+    line-height: 1;
+}
+
+.fav-sidebar-item__btn:hover {
+    background: #e5e7eb;
+    color: #374151;
+}
+
+.fav-sidebar-item__delete-btn:hover {
+    background: #fee2e2;
+    color: #dc2626;
+}
+
+/* ── 폴더 추가 영역 ── */
+.fav-sidebar-add {
+    border-top: 1px solid #e5e7eb;
+    padding-top: 10px;
+}
+
+.fav-sidebar-add__btns {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+}
+
+/* ── 우 메인 패널 ── */
+.fav-page__main {
+    flex: 1;
+    min-width: 0;
+}
+
+.fav-page__hint {
+    color: #9ca3af;
+    font-size: 14px;
+    margin-top: 40px;
+    text-align: center;
+}
+
+/* 제거 버튼 컬럼 */
+.col-fav-remove {
+    width: 56px;
+    text-align: center;
+    white-space: nowrap;
+}
+
+.fav-entry-remove-btn {
+    font-size: 12px;
+    padding: 3px 8px;
+    background: #fff;
+    border: 1px solid #d1d5db;
+    border-radius: 3px;
+    cursor: pointer;
+    color: #374151;
+}
+
+.fav-entry-remove-btn:hover {
+    background: #fee2e2;
+    border-color: #fca5a5;
+    color: #dc2626;
+}

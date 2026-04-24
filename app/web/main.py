@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from loguru import logger
@@ -42,6 +42,8 @@ from app.db.repository import (
     get_available_source_ids,
     get_group_size_map,
     get_favorite_entry_map,
+    get_folder_tree_for_user,
+    list_favorites_with_announcements,
     get_read_announcement_id_set,
     get_relevance_by_canonical_id_map,
     get_relevance_history_by_canonical_id_map,
@@ -660,6 +662,81 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 "siblings": _siblings,
                 # Phase 3b — 별 아이콘 초기 상태 (로그인 시만).
                 "fav_entry_id": _fav_entry_id,
+            },
+        )
+
+    # ──────────────────────────────────────────────────────────
+    # HTML: 즐겨찾기 전용 탭 페이지 (Phase 3b / 00036-7)
+    # ──────────────────────────────────────────────────────────
+
+    @fastapi_app.get("/favorites", response_class=HTMLResponse, response_model=None)
+    def favorites_page(
+        request: Request,
+        folder_id: Optional[int] = Query(None),
+        page: int = Query(1, ge=1),
+        session: Session = Depends(get_session),
+        current_user: User | None = Depends(current_user_optional),
+    ) -> HTMLResponse | RedirectResponse:
+        """즐겨찾기 전용 탭 페이지.
+
+        비로그인 시 /login?next=/favorites 로 리다이렉트한다.
+        좌 폴더 트리(SSR) + 우 폴더 내 공고 목록(SSR) 2-panel 레이아웃을 반환한다.
+        """
+        if current_user is None:
+            return RedirectResponse(
+                url="/login?next=/favorites",
+                status_code=status.HTTP_302_FOUND,
+            )
+
+        page_size = 20
+        folder_tree = get_folder_tree_for_user(session, user_id=current_user.id)
+
+        items: list[dict] = []
+        total = 0
+        total_pages = 1
+        selected_folder_id: int | None = folder_id
+
+        if selected_folder_id is not None:
+            items, total = list_favorites_with_announcements(
+                session,
+                folder_id=selected_folder_id,
+                page=page,
+                page_size=page_size,
+            )
+            total_pages = max(1, ceil(total / page_size))
+
+        # 관련성 배지 데이터 (즐겨찾기 항목의 canonical_project_id 목록)
+        canonical_ids = [it["canonical_project_id"] for it in items]
+        relevance_map: dict = {}
+        history_map: dict = {}
+        my_relevance_map: dict = {}
+        if canonical_ids:
+            relevance_map = get_relevance_by_canonical_id_map(session, canonical_ids)
+            history_map = get_relevance_history_by_canonical_id_map(
+                session, canonical_ids
+            )
+            my_relevance_map = {
+                cid: next(
+                    (rj for rj in rjs if rj.user_id == current_user.id), None
+                )
+                for cid, rjs in relevance_map.items()
+            }
+
+        return templates.TemplateResponse(
+            request,
+            "favorites.html",
+            {
+                "current_user": current_user,
+                "folder_tree": folder_tree,
+                "selected_folder_id": selected_folder_id,
+                "entries": items,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": total_pages,
+                "relevance_map": relevance_map,
+                "history_map": history_map,
+                "my_relevance_map": my_relevance_map,
             },
         )
 
