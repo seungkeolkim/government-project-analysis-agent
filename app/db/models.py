@@ -1009,6 +1009,11 @@ class FavoriteFolder(Base):
         back_populates="parent",
         foreign_keys=lambda: [FavoriteFolder.parent_id],
     )
+    entries: Mapped[list[FavoriteEntry]] = relationship(
+        "FavoriteEntry",
+        back_populates="folder",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -1089,6 +1094,78 @@ def _favorite_folder_before_update(
     if session is None:
         return
     _enforce_favorite_folder_depth(session, target)
+
+
+# ──────────────────────────────────────────────────────────────
+# FavoriteEntry (Phase 3b / 00036 — 즐겨찾기 항목)
+# ──────────────────────────────────────────────────────────────
+
+
+class FavoriteEntry(Base):
+    """즐겨찾기 항목. canonical 단위로 저장하므로 IRIS/NTIS cross-source 중복이 없다.
+
+    Phase 1a migration (§7) 에서 DDL 이 이미 생성되어 있다. 이 클래스는 그 테이블에
+    ORM 을 얹는다.
+
+    UNIQUE(folder_id, canonical_project_id) 로 동일 폴더에 같은 canonical 중복 금지.
+    폴더 삭제(folder_id FK CASCADE) 또는 canonical 삭제(canonical_project_id FK CASCADE)
+    시 항목도 연쇄 삭제된다.
+    """
+
+    __tablename__ = "favorite_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    folder_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "favorite_folders.id",
+            name="fk_favorite_entries_folder_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        doc="소속 폴더 PK.",
+    )
+
+    canonical_project_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "canonical_projects.id",
+            name="fk_favorite_entries_canonical_project_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+        doc="즐겨찾기한 canonical 과제 PK.",
+    )
+
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        doc="즐겨찾기 추가 시각(UTC).",
+    )
+
+    folder: Mapped[FavoriteFolder] = relationship(
+        "FavoriteFolder",
+        back_populates="entries",
+    )
+    canonical_project: Mapped[CanonicalProject] = relationship("CanonicalProject")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "folder_id",
+            "canonical_project_id",
+            name="uq_favorite_entries_folder_canonical",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현을 반환한다."""
+        return (
+            f"<FavoriteEntry id={self.id} folder_id={self.folder_id} "
+            f"canonical_project_id={self.canonical_project_id}>"
+        )
 
 
 # ──────────────────────────────────────────────────────────────
@@ -1225,6 +1302,7 @@ __all__ = [
     "AnnouncementUserState",
     "Attachment",
     "CanonicalProject",
+    "FavoriteEntry",
     "FavoriteFolder",
     "RelevanceJudgment",
     "RelevanceJudgmentHistory",
