@@ -1,0 +1,52 @@
+{#
+  관련성 배지 + 툴팁 매크로 (Phase 3a / 00035-3).
+
+  사용법:
+    {% from "_relevance_badge_macro.html" import relevance_badge %}
+    {{ relevance_badge(cid, rj_list, my_rj, hist_list) }}
+
+  인자:
+    cid       int              canonical_project_id
+    rj_list   list[RelevanceJudgment]   전체 사용자 현재 판정 목록 (user 관계 selectinload 됨)
+    my_rj     RelevanceJudgment|None    현재 로그인 사용자의 판정
+    hist_list list[HistoryWithUser]     판정 이력 (최신순, 최대 3건 표시)
+
+  주의:
+    - <script> 블록 안에서 Jinja2 태그를 쓰지 않는다 (00031 선례).
+    - 데이터는 모두 data-* 속성으로 JS 에 전달한다.
+    - onclick 에서 event.stopPropagation() 을 호출해 row 링크와 충돌을 방지한다.
+#}
+{% macro relevance_badge(cid, rj_list, my_rj, hist_list) %}
+<span class="rj-wrap"
+      data-canonical-id="{{ cid }}"
+      data-my-verdict="{{ my_rj.verdict if my_rj else '' }}"
+      data-my-reason="{{ my_rj.reason if my_rj and my_rj.reason else '' }}">
+    <button class="rj-badge rj-badge--{{ 'related' if my_rj and my_rj.verdict == '관련' else ('unrelated' if my_rj and my_rj.verdict == '무관' else 'unreviewed') }}"
+            type="button"
+            title="클릭하여 관련성 판정"
+            onclick="openRelevanceModal(this.closest('.rj-wrap')); event.stopPropagation();">
+        {{ my_rj.verdict if my_rj else '미검토' }}
+    </button>
+    {% if rj_list or hist_list %}
+    <div class="rj-tooltip" role="tooltip">
+        {% if rj_list %}
+        <p class="rj-tooltip__heading">현재 판정</p>
+        {% for rj in rj_list %}
+        <div class="rj-tooltip__item">
+            <span class="rj-tooltip__user">{{ rj.user.username }}</span>:
+            <span class="{{ 'rj-verdict--related' if rj.verdict == '관련' else 'rj-verdict--unrelated' }}">{{ rj.verdict }}</span>{% if rj.reason %} <span class="rj-tooltip__reason">— {{ rj.reason }}</span>{% endif %}
+        </div>
+        {% endfor %}
+        {% endif %}
+        {% if hist_list %}
+        <p class="rj-tooltip__heading">이력</p>
+        {% for hw in hist_list[:3] %}
+        <div class="rj-tooltip__item">
+            <span class="rj-tooltip__icon">{% if hw.history.archive_reason == 'content_changed' %}📝{% elif hw.history.archive_reason == 'user_overwrite' %}✏️{% elif hw.history.archive_reason == 'admin_override' %}🔧{% else %}📋{% endif %}</span><span class="rj-tooltip__user">{{ hw.username }}</span>: {{ hw.history.verdict }}{% if hw.history.reason %} <span class="rj-tooltip__reason">— {{ hw.history.reason }}</span>{% endif %}
+        </div>
+        {% endfor %}
+        {% endif %}
+    </div>
+    {% endif %}
+</span>
+{% endmacro %}

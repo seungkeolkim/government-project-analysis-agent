@@ -63,5 +63,9 @@
             <small>로컬 전용 · 외부 공개 금지</small>
         </div>
     </footer>
+
+    {# Phase 3a — 관련성 판정 모달. 로그인 시에만 렌더된다. #}
+    {% include "_relevance_modal.html" %}
+    <script src="/static/js/relevance.js"></script>
 </body>
 </html>

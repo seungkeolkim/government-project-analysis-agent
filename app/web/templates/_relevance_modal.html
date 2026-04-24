@@ -1,0 +1,42 @@
+{#
+  관련성 판정 모달 (Phase 3a / 00035-3) — 로그인 사용자 전용.
+
+  base.html 이 </body> 직전에 {% include "_relevance_modal.html" %} 로 삽입한다.
+  비로그인(current_user 가 None/Undefined) 이면 렌더하지 않는다.
+
+  JS(relevance.js)가 window.openRelevanceModal() 을 통해 이 dialog 를 제어한다.
+  <form method="dialog">: JS의 e.preventDefault() 가 자동 닫기를 막고 fetch 응답 후 닫는다.
+#}
+{% if current_user %}
+<dialog id="relevance-modal" aria-labelledby="rj-modal-title">
+    <div class="rj-modal__inner">
+        <h3 class="rj-modal__title" id="rj-modal-title">관련성 판정</h3>
+        <form id="relevance-form" method="dialog">
+            <div class="rj-modal__verdict-group">
+                <label class="rj-modal__verdict-label">
+                    <input type="radio" name="verdict" value="관련"> 관련
+                </label>
+                <label class="rj-modal__verdict-label">
+                    <input type="radio" name="verdict" value="무관"> 무관
+                </label>
+            </div>
+            <label class="rj-modal__reason-label" for="modal-reason">사유 (선택)</label>
+            <textarea id="modal-reason"
+                      class="rj-modal__reason-textarea"
+                      name="reason"
+                      placeholder="판정 사유를 간단히 입력하세요."></textarea>
+            <p class="rj-modal__error" id="modal-error-msg" role="alert" aria-live="polite"></p>
+            <div class="rj-modal__actions">
+                <button type="submit" class="rj-modal__save-btn">저장</button>
+                <button type="button"
+                        id="relevance-delete-btn"
+                        class="rj-modal__delete-btn"
+                        style="display:none">판정 취소</button>
+                <button type="button"
+                        id="relevance-cancel-btn"
+                        class="rj-modal__cancel-btn">닫기</button>
+            </div>
+        </form>
+    </div>
+</dialog>
+{% endif %}

@@ -23,10 +23,12 @@
     - available_sources: list[str]
     - current_user:     User | None  (상단 네비 분기용)
     - read_id_set:      set[int]  (Phase 1b — 로그인 사용자의 읽은 공고 id.
-                                   비로그인 시 빈 set. 제목 링크의 bold/normal
-                                   분기에 사용하며, body.is-anonymous CSS override
-                                   가 비로그인 시 시각적 차이를 중립화한다.)
+                                   비로그인 시 빈 set.)
+    - relevance_map:    dict[int, list[RelevanceJudgment]]  (Phase 3a — canonical_id → 전체 사용자 판정)
+    - history_map:      dict[int, list[HistoryWithUser]]    (Phase 3a — canonical_id → 판정 이력)
+    - my_relevance_map: dict[int, RelevanceJudgment|None]   (Phase 3a — canonical_id → 현재 사용자 판정)
 #}
+{% from "_relevance_badge_macro.html" import relevance_badge %}
 {% extends "base.html" %}
 
 {% block page_title %}공고 목록{% endblock %}
@@ -98,6 +100,8 @@
                 <th class="col-source">소스</th>
                 <th class="col-status">상태</th>
                 <th class="col-deadline">마감일</th>
+                {# Phase 3a — 관련성 컬럼: 로그인 시에만 렌더. 비로그인은 컬럼 자체 제거(colspan 오류 방지). #}
+                {% if current_user %}<th class="col-relevance">관련성</th>{% endif %}
             </tr>
         </thead>
         <tbody>
@@ -106,10 +110,7 @@
             {% for gr in groups %}
             <tr>
                 <td class="col-title">
-                    {# Phase 1b — 읽음 여부에 따라 bold/normal 보조 클래스를 부여.
-                       비로그인 시에는 read_id_set 이 빈 set 이라 모든 항목이 unread
-                       클래스를 달지만, style.css 의 body.is-anonymous 규칙이
-                       시각적 차이를 중립화한다. #}
+                    {# Phase 1b — 읽음 여부에 따라 bold/normal 보조 클래스를 부여. #}
                     <a class="announcement-title-link
                               {% if gr.representative.id in read_id_set %}announcement-title-link--read
                               {% else %}announcement-title-link--unread{% endif %}"
@@ -158,10 +159,24 @@
                         -
                     {% endif %}
                 </td>
+                {# Phase 3a — 관련성 배지 셀 (로그인 시에만) #}
+                {% if current_user %}
+                <td class="col-relevance">
+                    {% set cid = gr.representative.canonical_group_id %}
+                    {% if cid %}
+                    {{ relevance_badge(
+                        cid,
+                        relevance_map.get(cid, []),
+                        my_relevance_map.get(cid),
+                        history_map.get(cid, [])
+                    ) }}
+                    {% else %}-{% endif %}
+                </td>
+                {% endif %}
             </tr>
             {% else %}
             <tr>
-                <td colspan="5" class="empty-row">조건에 맞는 공고가 없습니다.</td>
+                <td colspan="{% if current_user %}6{% else %}5{% endif %}" class="empty-row">조건에 맞는 공고가 없습니다.</td>
             </tr>
             {% endfor %}
 
@@ -200,10 +215,24 @@
                         -
                     {% endif %}
                 </td>
+                {# Phase 3a — 관련성 배지 셀 (로그인 시에만) #}
+                {% if current_user %}
+                <td class="col-relevance">
+                    {% set cid = ann.canonical_group_id %}
+                    {% if cid %}
+                    {{ relevance_badge(
+                        cid,
+                        relevance_map.get(cid, []),
+                        my_relevance_map.get(cid),
+                        history_map.get(cid, [])
+                    ) }}
+                    {% else %}-{% endif %}
+                </td>
+                {% endif %}
             </tr>
             {% else %}
             <tr>
-                <td colspan="5" class="empty-row">조건에 맞는 공고가 없습니다.</td>
+                <td colspan="{% if current_user %}6{% else %}5{% endif %}" class="empty-row">조건에 맞는 공고가 없습니다.</td>
             </tr>
             {% endfor %}
             {% endif %}
