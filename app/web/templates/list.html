@@ -6,6 +6,7 @@
     - 분리 표시 모드(기본): 각 소스 공고를 개별 row 로, 동일 과제 N건 배지 표시
     - 묶어 보기 모드: canonical 그룹 1건 대표 row + <details> expand 로 소스별 구성원 표시
     - 페이지네이션 — 필터/정렬/그룹 상태를 URL query param 으로 보존
+    - Phase 3a — 관련성 배지 컬럼 + 체크박스 bulk 읽음/안읽음
 
   입력 컨텍스트 (main.py index_page 가 주입):
     - group_mode:       bool
@@ -27,6 +28,10 @@
     - relevance_map:    dict[int, list[RelevanceJudgment]]  (Phase 3a — canonical_id → 전체 사용자 판정)
     - history_map:      dict[int, list[HistoryWithUser]]    (Phase 3a — canonical_id → 판정 이력)
     - my_relevance_map: dict[int, RelevanceJudgment|None]   (Phase 3a — canonical_id → 현재 사용자 판정)
+
+  컬럼 수 계산 (colspan 에 사용):
+    비로그인: 5  (제목 / 기관 / 소스 / 상태 / 마감일)
+    로그인:   7  (체크박스 + 위 5개 + 관련성)
 #}
 {% from "_relevance_badge_macro.html" import relevance_badge %}
 {% extends "base.html" %}
@@ -91,10 +96,40 @@
     </p>
 </section>
 
+{# Phase 3a — bulk 읽음 툴바. 로그인 시에만 렌더. 체크박스 선택 전엔 JS 로 숨김.
+   data-* 속성으로 현재 필터 파라미터를 JS 에 전달한다 (Jinja2-in-script 금지).
+   data-total: "필터 전체 M건 선택" 링크에 표시할 카운트. #}
+{% if current_user %}
+<div id="bulk-toolbar" class="bulk-toolbar"
+     style="display:none"
+     data-status="{{ status }}"
+     data-search="{{ search }}"
+     data-source="{{ source }}"
+     data-total="{{ total }}">
+    <span id="bulk-count-label" class="bulk-toolbar__count">0개 선택</span>
+    <button type="button" id="bulk-read-btn" class="bulk-toolbar__btn">읽음</button>
+    <button type="button" id="bulk-unread-btn" class="bulk-toolbar__btn">안읽음</button>
+    <button type="button" id="bulk-clear-btn" class="bulk-toolbar__btn bulk-toolbar__btn--clear">선택 해제</button>
+    {# 헤더 체크박스로 페이지 전체 선택 후에만 노출되는 "필터 전체 선택" 링크 영역. #}
+    <span id="bulk-all-filter-wrap" class="bulk-toolbar__filter-wrap" style="display:none">
+        ·&nbsp;<a href="#" id="bulk-all-filter-link" class="bulk-select-all-filter">현재 필터 결과 전체 {{ total }}건 선택</a>
+        <span id="bulk-all-filter-selected" style="display:none">
+            전체 {{ total }}건 선택됨&nbsp;<a href="#" id="bulk-deselect-filter" class="bulk-select-all-filter">해제</a>
+        </span>
+    </span>
+</div>
+{% endif %}
+
 <section class="list-table-wrap">
     <table class="list-table">
         <thead>
             <tr>
+                {# Phase 3a — 체크박스 컬럼: 로그인 시에만 렌더. #}
+                {% if current_user %}
+                <th class="col-check">
+                    <input type="checkbox" id="check-all-page" title="현재 페이지 전체 선택">
+                </th>
+                {% endif %}
                 <th class="col-title">제목</th>
                 <th class="col-agency">기관</th>
                 <th class="col-source">소스</th>
@@ -109,6 +144,12 @@
             {# ── 묶어 보기 모드: canonical 그룹 단위 대표 1건 + expand ────────────── #}
             {% for gr in groups %}
             <tr>
+                {# Phase 3a — 체크박스 셀: 대표 공고 id 를 값으로 사용. #}
+                {% if current_user %}
+                <td class="col-check">
+                    <input type="checkbox" class="row-check" value="{{ gr.representative.id }}" aria-label="선택">
+                </td>
+                {% endif %}
                 <td class="col-title">
                     {# Phase 1b — 읽음 여부에 따라 bold/normal 보조 클래스를 부여. #}
                     <a class="announcement-title-link
@@ -176,7 +217,7 @@
             </tr>
             {% else %}
             <tr>
-                <td colspan="{% if current_user %}6{% else %}5{% endif %}" class="empty-row">조건에 맞는 공고가 없습니다.</td>
+                <td colspan="{% if current_user %}7{% else %}5{% endif %}" class="empty-row">조건에 맞는 공고가 없습니다.</td>
             </tr>
             {% endfor %}
 
@@ -184,6 +225,12 @@
             {# ── 분리 표시 모드(기본): 각 소스 공고 개별 row ─────────────────────── #}
             {% for ann, group_size in ann_with_sizes %}
             <tr>
+                {# Phase 3a — 체크박스 셀: announcement id 를 값으로 사용. #}
+                {% if current_user %}
+                <td class="col-check">
+                    <input type="checkbox" class="row-check" value="{{ ann.id }}" aria-label="선택">
+                </td>
+                {% endif %}
                 <td class="col-title">
                     {# Phase 1b — 읽음 여부 분기 (그룹 모드와 동일 규칙). #}
                     <a class="announcement-title-link
@@ -232,7 +279,7 @@
             </tr>
             {% else %}
             <tr>
-                <td colspan="{% if current_user %}6{% else %}5{% endif %}" class="empty-row">조건에 맞는 공고가 없습니다.</td>
+                <td colspan="{% if current_user %}7{% else %}5{% endif %}" class="empty-row">조건에 맞는 공고가 없습니다.</td>
             </tr>
             {% endfor %}
             {% endif %}

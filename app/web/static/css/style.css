@@ -1403,3 +1403,83 @@ body.is-anonymous .announcement-title-link--read {
     flex-shrink: 0;
     margin-top: 6px;
 }
+
+/* ── Phase 3a bulk 체크박스 컬럼 ── */
+.col-check {
+    width: 32px;
+    text-align: center;
+    padding: 8px 4px;
+    vertical-align: middle;
+}
+
+.col-check input[type="checkbox"] {
+    cursor: pointer;
+    width: 16px;
+    height: 16px;
+    accent-color: #1d4ed8;
+}
+
+/* ── Phase 3a bulk 툴바 ── */
+.bulk-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    border-radius: 6px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+    font-size: 14px;
+}
+
+.bulk-toolbar__count {
+    font-weight: 600;
+    color: #1e40af;
+    margin-right: 4px;
+    white-space: nowrap;
+}
+
+.bulk-toolbar__btn {
+    padding: 4px 12px;
+    border-radius: 4px;
+    border: 1px solid #93c5fd;
+    background: #ffffff;
+    color: #1d4ed8;
+    cursor: pointer;
+    font-size: 13px;
+    white-space: nowrap;
+}
+
+.bulk-toolbar__btn:hover {
+    background: #dbeafe;
+}
+
+.bulk-toolbar__btn--clear {
+    color: #6b7280;
+    border-color: #d1d5db;
+}
+
+.bulk-toolbar__btn--clear:hover {
+    background: #f3f4f6;
+}
+
+.bulk-toolbar__filter-wrap {
+    font-size: 13px;
+    color: #374151;
+    white-space: nowrap;
+}
+
+.bulk-select-all-filter {
+    color: #1d4ed8;
+    text-decoration: underline;
+    cursor: pointer;
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 13px;
+}
+
+.bulk-select-all-filter:hover {
+    color: #1e40af;
+}

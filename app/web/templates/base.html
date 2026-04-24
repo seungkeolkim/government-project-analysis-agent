@@ -67,5 +67,7 @@
     {# Phase 3a — 관련성 판정 모달. 로그인 시에만 렌더된다. #}
     {% include "_relevance_modal.html" %}
     <script src="/static/js/relevance.js"></script>
+    {# Phase 3a — bulk 읽음 처리. 목록 페이지 외에는 #bulk-toolbar 없어 early-return. #}
+    <script src="/static/js/bulk.js"></script>
 </body>
 </html>
