@@ -234,14 +234,20 @@
                 </td>
                 {% endif %}
                 <td class="col-title">
-                    {# Phase 3b — 별 아이콘: 로그인 + canonical 있을 때만 렌더. #}
-                    {% if current_user and ann.canonical_group_id %}
+                    {# task 00037 #4 — 별 아이콘을 announcement 단위로 재배선.
+                       로그인 상태면 canonical 매칭 여부와 무관하게 별을 렌더한다.
+                       초기 상태는 favorite_entry_map(키: announcement_id) 로 판정한다.
+                       data-canonical-id 는 \"동일 과제 모두 저장\" 라디오 UI 와 이후
+                       동일 canonical 형제 row 의 동기화에 사용한다(없으면 빈 문자열). #}
+                    {% if current_user %}
+                    {% set ann_is_fav = ann.id in favorite_entry_map %}
                     <button type="button"
-                            class="fav-star {% if ann.canonical_group_id in favorite_entry_map %}fav-star--active{% endif %}"
-                            title="{% if ann.canonical_group_id in favorite_entry_map %}즐겨찾기 제거{% else %}즐겨찾기 추가{% endif %}"
-                            data-canonical-id="{{ ann.canonical_group_id }}"
-                            data-entry-id="{{ favorite_entry_map.get(ann.canonical_group_id, '') }}">
-                        {% if ann.canonical_group_id in favorite_entry_map %}★{% else %}☆{% endif %}
+                            class="fav-star {% if ann_is_fav %}fav-star--active{% endif %}"
+                            title="{% if ann_is_fav %}즐겨찾기 제거{% else %}즐겨찾기 추가{% endif %}"
+                            data-announcement-id="{{ ann.id }}"
+                            data-canonical-id="{{ ann.canonical_group_id or '' }}"
+                            data-entry-id="{{ favorite_entry_map.get(ann.id, '') }}">
+                        {% if ann_is_fav %}★{% else %}☆{% endif %}
                     </button>
                     {% endif %}
                     {# Phase 1b — 읽음 여부 분기 (그룹 모드와 동일 규칙). #}

@@ -247,6 +247,22 @@
         );
     });
 
+    // ── task 00037 #3: 폴더 이동 버튼 ─────────────────────────
+    // 기존 폴더 선택 모달(favorites.js 의 window.favoritesModal)을 \"이동 모드\"
+    // 로 열어 재사용한다. 드래그 앤 드롭은 구현하지 않음(사용자 원문 명시).
+    // favorites.js 가 미로드된 경계(예: 비로그인 → 포함 안 됨)에서는 조용히 패스.
+    document.addEventListener('click', function (e) {
+        var btn = e.target.closest('.fav-entry-move-btn');
+        if (!btn) { return; }
+        e.stopPropagation();
+        if (!window.favoritesModal || typeof window.favoritesModal.openMoveMode !== 'function') {
+            return;
+        }
+        var entryId = btn.dataset.entryId;
+        var fromFolderId = btn.dataset.fromFolderId || null;
+        window.favoritesModal.openMoveMode(entryId, fromFolderId);
+    });
+
     // ── confirm dialog helper ────────────────────────────────
     function showConfirm(title, message, callback) {
         confirmTitle.textContent   = title;

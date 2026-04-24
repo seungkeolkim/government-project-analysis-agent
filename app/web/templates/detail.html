@@ -30,12 +30,15 @@
 {# Phase 3a — 제목 + 관련성 배지를 나란히 배치. 비로그인/canonical 없으면 배지 생략. #}
 <div class="detail-title-wrap">
     <h2 class="detail-title">{{ announcement.title }}</h2>
-    {# Phase 3b — 별 아이콘: 로그인 + canonical 있을 때만 렌더. #}
-    {% if current_user and canonical_id %}
+    {# task 00037 #4 — 별 아이콘을 announcement 단위로 재배선.
+       canonical 매칭 여부와 무관하게 로그인 상태라면 별을 렌더한다.
+       data-canonical-id 는 \"동일 과제 모두 저장\" 라디오 플로우에서 사용된다. #}
+    {% if current_user %}
     <button type="button"
             class="fav-star {% if fav_entry_id %}fav-star--active{% endif %}"
             title="{% if fav_entry_id %}즐겨찾기 제거{% else %}즐겨찾기 추가{% endif %}"
-            data-canonical-id="{{ canonical_id }}"
+            data-announcement-id="{{ announcement.id }}"
+            data-canonical-id="{{ canonical_id or '' }}"
             data-entry-id="{{ fav_entry_id or '' }}">
         {% if fav_entry_id %}★{% else %}☆{% endif %}
     </button>

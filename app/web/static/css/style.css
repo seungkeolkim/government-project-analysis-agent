@@ -1658,6 +1658,45 @@ button.canonical-count-badge.siblings-toggle--open {
     margin-bottom: 10px;
 }
 
+/* task 00037 #4 — 저장 범위 라디오(\"이 공고만 / 동일 과제 모두\") 영역.
+   모달 상단의 눈에 띄는 위치에 배치하되 폴더 트리보다 위쪽. 이동 모드에서는
+   dialog[data-mode=\"move\"] 하위 선택자로 숨긴다. */
+.fav-scope-group {
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    padding: 6px 10px 8px;
+    margin: 0 0 10px;
+    background: #f9fafb;
+}
+
+.fav-scope-group__legend {
+    font-size: 12px;
+    font-weight: 600;
+    color: #374151;
+    padding: 0 4px;
+}
+
+.fav-scope-option {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 0;
+    font-size: 13px;
+    color: #1f2937;
+    cursor: pointer;
+}
+
+.fav-scope-option input[type="radio"] {
+    cursor: pointer;
+}
+
+/* 이동 모드에서는 라디오 + 새 폴더 만들기 영역을 숨기고 트리 선택만 가능하게
+   한다. JS 가 #fav-modal 의 data-mode 를 토글해 분기를 만든다. */
+#fav-modal[data-mode="move"] .fav-scope-group,
+#fav-modal[data-mode="move"] .fav-new-folder-row {
+    display: none;
+}
+
 .fav-folder-tree__loading,
 .fav-folder-tree__empty,
 .fav-folder-tree__error {
@@ -2031,11 +2070,21 @@ button.canonical-count-badge.siblings-toggle--open {
     text-align: center;
 }
 
-/* 제거 버튼 컬럼 */
-.col-fav-remove {
-    width: 56px;
+/* task 00037 #3: 동작(이동/제거) 컬럼 — 두 버튼을 수평 배치한다. */
+.col-fav-actions {
+    width: 112px;
     text-align: center;
     white-space: nowrap;
+}
+
+.col-fav-actions .fav-entry-move-btn,
+.col-fav-actions .fav-entry-remove-btn {
+    display: inline-block;
+    margin-right: 4px;
+}
+
+.col-fav-actions .fav-entry-remove-btn:last-child {
+    margin-right: 0;
 }
 
 .fav-entry-remove-btn {
@@ -2052,4 +2101,22 @@ button.canonical-count-badge.siblings-toggle--open {
     background: #fee2e2;
     border-color: #fca5a5;
     color: #dc2626;
+}
+
+/* task 00037 #3: 폴더 이동 버튼 — 제거 버튼과 동일 기본 스타일,
+   hover 색은 파랑 계열(삭제/이동 의미 구분). */
+.fav-entry-move-btn {
+    font-size: 12px;
+    padding: 3px 8px;
+    background: #fff;
+    border: 1px solid #d1d5db;
+    border-radius: 3px;
+    cursor: pointer;
+    color: #374151;
+}
+
+.fav-entry-move-btn:hover {
+    background: #eff6ff;
+    border-color: #93c5fd;
+    color: #1d4ed8;
 }
