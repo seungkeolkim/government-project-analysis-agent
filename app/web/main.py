@@ -42,6 +42,8 @@ from app.db.repository import (
     get_available_source_ids,
     get_group_size_map,
     get_read_announcement_id_set,
+    get_relevance_by_canonical_id_map,
+    get_relevance_history_by_canonical_id_map,
     list_announcements,
     list_canonical_groups,
     mark_announcement_read,
@@ -54,7 +56,7 @@ from app.web.observability import (
     install_request_logging_middleware,
     install_unhandled_exception_handler,
 )
-from app.web.routes import admin_router
+from app.web.routes import admin_router, bulk_router, relevance_router
 
 # ──────────────────────────────────────────────────────────────
 # 상수
@@ -316,6 +318,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # 비관리자 403. 본 subtask 범위는 [수집 제어] 탭 + startup stale cleanup.
     fastapi_app.include_router(admin_router)
 
+    # Phase 3a(00035-2): 관련성 판정 라우터(/canonical/{id}/relevance*) mount.
+    fastapi_app.include_router(relevance_router)
+
+    # Phase 3a(00035-4): 읽음 bulk 라우터(/announcements/bulk-mark-*) mount.
+    fastapi_app.include_router(bulk_router)
+
     # Phase 2(00025-6): shutdown 시 APScheduler 정지.
     # docker-compose 의 `restart: unless-stopped` 와 결합해, 웹 프로세스가 정상
     # 종료되면 잡도 깨끗이 멈췄다가 재기동 시 scheduler_jobs 테이블에서 자동
@@ -386,8 +394,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             )
             total_pages = ceil(total_count / page_size) if total_count > 0 else 1
 
-            # Phase 1b — 로그인 사용자에 한해 대표 공고들의 read 여부를
-            # 한 번에 조회한다 (N+1 방지). 비로그인은 빈 set.
+            # Phase 1b — 로그인 사용자에 한해 대표 공고들의 read/relevance 를
+            # 한 번에 조회한다 (N+1 방지). 비로그인은 빈 값.
             if current_user is not None:
                 representative_ids = [gr.representative.id for gr in groups]
                 read_id_set = get_read_announcement_id_set(
@@ -395,8 +403,23 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     user_id=current_user.id,
                     announcement_ids=representative_ids,
                 )
+                # Phase 3a — 관련성 batch 조회 (N+1 방지: 쿼리 2개 추가).
+                canonical_ids = list({
+                    gr.representative.canonical_group_id
+                    for gr in groups
+                    if gr.representative.canonical_group_id is not None
+                })
+                relevance_map = get_relevance_by_canonical_id_map(session, canonical_ids)
+                history_map = get_relevance_history_by_canonical_id_map(session, canonical_ids)
+                my_relevance_map = {
+                    cid: next((rj for rj in rjs if rj.user_id == current_user.id), None)
+                    for cid, rjs in relevance_map.items()
+                }
             else:
                 read_id_set = set()
+                relevance_map = {}
+                history_map = {}
+                my_relevance_map = {}
 
             return templates.TemplateResponse(
                 request,
@@ -418,6 +441,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     # Phase 1b — base.html 상단 네비 + 목록 bold/normal 분기에 필요.
                     "current_user": current_user,
                     "read_id_set": read_id_set,
+                    # Phase 3a — 관련성 배지 batch 데이터.
+                    "relevance_map": relevance_map,
+                    "history_map": history_map,
+                    "my_relevance_map": my_relevance_map,
                 },
             )
         else:
@@ -457,9 +484,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             )
             total_pages = ceil(total_count / page_size) if total_count > 0 else 1
 
-            # Phase 1b — 로그인 사용자의 페이지 공고별 read 여부를 한 쿼리로
-            # 조회. 비로그인은 빈 set 으로 두어 템플릿이 전부 unread 클래스를
-            # 달지만 body.is-anonymous CSS override 가 시각 차이를 상쇄한다.
+            # Phase 1b — 로그인 사용자의 페이지 공고별 read/relevance 여부를
+            # 한 쿼리로 조회. 비로그인은 빈 값으로 두어 시각 차이를 상쇄한다.
             if current_user is not None:
                 announcement_ids = [ann.id for ann, _size in ann_with_sizes]
                 read_id_set = get_read_announcement_id_set(
@@ -467,8 +493,23 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     user_id=current_user.id,
                     announcement_ids=announcement_ids,
                 )
+                # Phase 3a — 관련성 batch 조회 (N+1 방지: 쿼리 2개 추가).
+                canonical_ids = list({
+                    ann.canonical_group_id
+                    for ann, _ in ann_with_sizes
+                    if ann.canonical_group_id is not None
+                })
+                relevance_map = get_relevance_by_canonical_id_map(session, canonical_ids)
+                history_map = get_relevance_history_by_canonical_id_map(session, canonical_ids)
+                my_relevance_map = {
+                    cid: next((rj for rj in rjs if rj.user_id == current_user.id), None)
+                    for cid, rjs in relevance_map.items()
+                }
             else:
                 read_id_set = set()
+                relevance_map = {}
+                history_map = {}
+                my_relevance_map = {}
 
             return templates.TemplateResponse(
                 request,
@@ -490,6 +531,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     # Phase 1b — base.html 상단 네비 + 목록 bold/normal 분기에 필요.
                     "current_user": current_user,
                     "read_id_set": read_id_set,
+                    # Phase 3a — 관련성 배지 batch 데이터.
+                    "relevance_map": relevance_map,
+                    "history_map": history_map,
+                    "my_relevance_map": my_relevance_map,
                 },
             )
 
@@ -545,6 +590,21 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
         attachments = get_attachments_by_announcement(session, announcement_id)
 
+        # Phase 3a — 로그인 사용자에 한해 canonical 관련성 판정 배지 데이터를 조회.
+        # session 은 mark_announcement_read + commit 이후에도 계속 사용 가능.
+        if current_user is not None and announcement.canonical_group_id is not None:
+            _cid = announcement.canonical_group_id
+            _rel_map = get_relevance_by_canonical_id_map(session, [_cid])
+            _rj_list = _rel_map.get(_cid, [])
+            _my_rj = next((rj for rj in _rj_list if rj.user_id == current_user.id), None)
+            _hist_map = get_relevance_history_by_canonical_id_map(session, [_cid])
+            _hist_list = _hist_map.get(_cid, [])
+        else:
+            _cid = None
+            _rj_list = []
+            _my_rj = None
+            _hist_list = []
+
         return templates.TemplateResponse(
             request,
             "detail.html",
@@ -553,6 +613,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 "attachments": attachments,
                 # Phase 1b — base.html 상단 네비 분기에 필요.
                 "current_user": current_user,
+                # Phase 3a — 관련성 배지 데이터.
+                "canonical_id": _cid,
+                "rj_list": _rj_list,
+                "my_rj": _my_rj,
+                "hist_list": _hist_list,
             },
         )
 

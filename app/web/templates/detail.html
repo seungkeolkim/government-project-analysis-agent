@@ -2,11 +2,18 @@
   공고 상세 페이지.
 
   입력 컨텍스트 (main.py `detail_page` 가 주입):
-    - announcement: Announcement ORM 인스턴스
+    - announcement:  Announcement ORM 인스턴스
+    - attachments:   list[Attachment]
+    - current_user:  User | None
+    - canonical_id:  int | None    (Phase 3a — canonical_project_id. None 이면 배지 숨김)
+    - rj_list:       list[RelevanceJudgment]  (Phase 3a — 전체 사용자 현재 판정)
+    - my_rj:         RelevanceJudgment | None  (Phase 3a — 현재 사용자 판정)
+    - hist_list:     list[HistoryWithUser]      (Phase 3a — 판정 이력)
 
   소스 유형별 본문 뷰어는 viewers/<source_type>.html 로 분기된다.
   해당 파일이 없으면 viewers/default.html 로 폴백된다.
 #}
+{% from "_relevance_badge_macro.html" import relevance_badge %}
 {% extends "base.html" %}
 
 {% block page_title %}{{ announcement.title }} · 공고 상세{% endblock %}
@@ -18,7 +25,13 @@
     <a href="/">목록</a> &rsaquo; 상세
 </nav>
 
-<h2 class="detail-title">{{ announcement.title }}</h2>
+{# Phase 3a — 제목 + 관련성 배지를 나란히 배치. 비로그인/canonical 없으면 배지 생략. #}
+<div class="detail-title-wrap">
+    <h2 class="detail-title">{{ announcement.title }}</h2>
+    {% if current_user and canonical_id %}
+    {{ relevance_badge(canonical_id, rj_list, my_rj, hist_list) }}
+    {% endif %}
+</div>
 
 {# 공고 메타 정보 테이블 #}
 <table class="meta-table">

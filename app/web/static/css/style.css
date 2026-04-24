@@ -1124,3 +1124,362 @@ body.is-anonymous .announcement-title-link--read {
     opacity: 0.5;
     cursor: not-allowed;
 }
+
+/* ---------- 관련성 판정 배지 (Phase 3a / 00035-3) ---------- */
+
+/* 배지 컨테이너 — 툴팁 위치 계산 기준점 */
+.rj-wrap {
+    position: relative;
+    display: inline-block;
+}
+
+/* 배지 버튼 기본 */
+.rj-badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-weight: 600;
+    border: 1px solid transparent;
+    cursor: pointer;
+    background: none;
+    font-family: inherit;
+    line-height: 1.4;
+    white-space: nowrap;
+}
+
+/* 관련 — 초록 */
+.rj-badge--related {
+    color: #065f46;
+    background: #d1fae5;
+    border-color: #6ee7b7;
+}
+
+/* 무관 — 회색 */
+.rj-badge--unrelated {
+    color: #4b5563;
+    background: #e5e7eb;
+    border-color: #d1d5db;
+}
+
+/* 미검토 — 점선 테두리만 */
+.rj-badge--unreviewed {
+    color: #9ca3af;
+    background: #ffffff;
+    border-color: #d1d5db;
+    border-style: dashed;
+}
+
+.rj-badge:hover {
+    filter: brightness(0.92);
+}
+
+/* 관련성 컬럼 */
+.col-relevance {
+    width: 72px;
+    text-align: center;
+}
+
+/* 툴팁 */
+.rj-tooltip {
+    display: none;
+    position: absolute;
+    z-index: 200;
+    left: 50%;
+    transform: translateX(-50%);
+    bottom: calc(100% + 8px);
+    background: #1f2937;
+    color: #f9fafb;
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 12px;
+    min-width: 200px;
+    max-width: 300px;
+    white-space: normal;
+    line-height: 1.5;
+    pointer-events: none;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+    text-align: left;
+}
+
+/* 툴팁 말풍선 꼬리 */
+.rj-tooltip::after {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 6px solid transparent;
+    border-top-color: #1f2937;
+}
+
+/* 호버 시 툴팁 표시 */
+.rj-wrap:hover .rj-tooltip {
+    display: block;
+}
+
+.rj-tooltip__heading {
+    margin: 0 0 4px;
+    font-weight: 700;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #9ca3af;
+}
+
+.rj-tooltip__heading + .rj-tooltip__heading {
+    margin-top: 8px;
+}
+
+.rj-tooltip__item {
+    margin-bottom: 3px;
+    word-break: break-word;
+}
+
+.rj-tooltip__user {
+    font-weight: 600;
+}
+
+.rj-tooltip__reason {
+    color: #d1d5db;
+}
+
+.rj-tooltip__icon {
+    margin-right: 2px;
+}
+
+/* 툴팁 내 verdict 색상 */
+.rj-verdict--related {
+    color: #6ee7b7;
+    font-weight: 600;
+}
+
+.rj-verdict--unrelated {
+    color: #9ca3af;
+    font-weight: 600;
+}
+
+/* ---------- 관련성 판정 모달 (Phase 3a / 00035-3) ---------- */
+#relevance-modal {
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 0;
+    max-width: 420px;
+    width: 92vw;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+}
+
+#relevance-modal::backdrop {
+    background: rgba(0,0,0,0.4);
+}
+
+.rj-modal__inner {
+    padding: 24px;
+}
+
+.rj-modal__title {
+    margin: 0 0 18px;
+    font-size: 18px;
+    color: #111827;
+}
+
+.rj-modal__verdict-group {
+    display: flex;
+    gap: 20px;
+    margin-bottom: 16px;
+}
+
+.rj-modal__verdict-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    font-size: 15px;
+    font-weight: 600;
+    color: #1f2937;
+}
+
+.rj-modal__reason-label {
+    display: block;
+    font-size: 13px;
+    color: #374151;
+    margin-bottom: 6px;
+    font-weight: 600;
+}
+
+.rj-modal__reason-textarea {
+    width: 100%;
+    height: 72px;
+    padding: 8px 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    font-size: 14px;
+    font-family: inherit;
+    resize: vertical;
+    margin-bottom: 14px;
+    box-sizing: border-box;
+    color: #111827;
+}
+
+.rj-modal__reason-textarea:focus {
+    outline: 2px solid #93c5fd;
+    outline-offset: -1px;
+    border-color: #1d4ed8;
+}
+
+.rj-modal__error {
+    color: #b91c1c;
+    font-size: 13px;
+    min-height: 18px;
+    margin-bottom: 10px;
+}
+
+.rj-modal__actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.rj-modal__save-btn {
+    padding: 8px 20px;
+    background: #1d4ed8;
+    color: #ffffff;
+    border: 1px solid #1d4ed8;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.rj-modal__save-btn:hover {
+    background: #1e40af;
+}
+
+.rj-modal__delete-btn {
+    padding: 8px 14px;
+    background: #ffffff;
+    color: #b91c1c;
+    border: 1px solid #fecaca;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+}
+
+.rj-modal__delete-btn:hover {
+    background: #fee2e2;
+}
+
+.rj-modal__cancel-btn {
+    padding: 8px 14px;
+    background: #ffffff;
+    color: #6b7280;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    margin-left: auto;
+}
+
+.rj-modal__cancel-btn:hover {
+    background: #f3f4f6;
+}
+
+/* 상세 페이지: 제목 + 배지를 나란히 배치 */
+.detail-title-wrap {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+}
+
+.detail-title-wrap .detail-title {
+    margin: 0;
+    flex: 1 1 auto;
+}
+
+.detail-title-wrap .rj-wrap {
+    flex-shrink: 0;
+    margin-top: 6px;
+}
+
+/* ── Phase 3a bulk 체크박스 컬럼 ── */
+.col-check {
+    width: 32px;
+    text-align: center;
+    padding: 8px 4px;
+    vertical-align: middle;
+}
+
+.col-check input[type="checkbox"] {
+    cursor: pointer;
+    width: 16px;
+    height: 16px;
+    accent-color: #1d4ed8;
+}
+
+/* ── Phase 3a bulk 툴바 ── */
+.bulk-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    border-radius: 6px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+    font-size: 14px;
+}
+
+.bulk-toolbar__count {
+    font-weight: 600;
+    color: #1e40af;
+    margin-right: 4px;
+    white-space: nowrap;
+}
+
+.bulk-toolbar__btn {
+    padding: 4px 12px;
+    border-radius: 4px;
+    border: 1px solid #93c5fd;
+    background: #ffffff;
+    color: #1d4ed8;
+    cursor: pointer;
+    font-size: 13px;
+    white-space: nowrap;
+}
+
+.bulk-toolbar__btn:hover {
+    background: #dbeafe;
+}
+
+.bulk-toolbar__btn--clear {
+    color: #6b7280;
+    border-color: #d1d5db;
+}
+
+.bulk-toolbar__btn--clear:hover {
+    background: #f3f4f6;
+}
+
+.bulk-toolbar__filter-wrap {
+    font-size: 13px;
+    color: #374151;
+    white-space: nowrap;
+}
+
+.bulk-select-all-filter {
+    color: #1d4ed8;
+    text-decoration: underline;
+    cursor: pointer;
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 13px;
+}
+
+.bulk-select-all-filter:hover {
+    color: #1e40af;
+}
