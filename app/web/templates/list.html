@@ -28,6 +28,8 @@
     - relevance_map:    dict[int, list[RelevanceJudgment]]  (Phase 3a — canonical_id → 전체 사용자 판정)
     - history_map:      dict[int, list[HistoryWithUser]]    (Phase 3a — canonical_id → 판정 이력)
     - my_relevance_map: dict[int, RelevanceJudgment|None]   (Phase 3a — canonical_id → 현재 사용자 판정)
+    - siblings_map:     dict[int, list[dict]]               (Phase 3b — canonical_id → 동일 과제 목록)
+    - favorite_entry_map: dict[int, int]                    (Phase 3b — canonical_id → entry_id. 비로그인 시 빈 dict.)
 
   컬럼 수 계산 (colspan 에 사용):
     비로그인: 5  (제목 / 기관 / 소스 / 상태 / 마감일)
@@ -232,6 +234,16 @@
                 </td>
                 {% endif %}
                 <td class="col-title">
+                    {# Phase 3b — 별 아이콘: 로그인 + canonical 있을 때만 렌더. #}
+                    {% if current_user and ann.canonical_group_id %}
+                    <button type="button"
+                            class="fav-star {% if ann.canonical_group_id in favorite_entry_map %}fav-star--active{% endif %}"
+                            title="{% if ann.canonical_group_id in favorite_entry_map %}즐겨찾기 제거{% else %}즐겨찾기 추가{% endif %}"
+                            data-canonical-id="{{ ann.canonical_group_id }}"
+                            data-entry-id="{{ favorite_entry_map.get(ann.canonical_group_id, '') }}">
+                        {% if ann.canonical_group_id in favorite_entry_map %}★{% else %}☆{% endif %}
+                    </button>
+                    {% endif %}
                     {# Phase 1b — 읽음 여부 분기 (그룹 모드와 동일 규칙). #}
                     <a class="announcement-title-link
                               {% if ann.id in read_id_set %}announcement-title-link--read

@@ -1591,3 +1591,188 @@ button.canonical-count-badge.siblings-toggle--open {
     border: 1px solid #e5e7eb;
     border-radius: 4px;
 }
+
+/* ---------- Phase 3b — 별 아이콘 ---------- */
+.fav-star {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 16px;
+    color: #9ca3af;
+    padding: 0 3px;
+    line-height: 1;
+    vertical-align: middle;
+    flex-shrink: 0;
+    transition: color 0.15s;
+}
+
+.fav-star:hover {
+    color: #f59e0b;
+}
+
+.fav-star--active {
+    color: #f59e0b;
+}
+
+/* ---------- Phase 3b — 즐겨찾기 모달 ---------- */
+#fav-modal {
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 0;
+    width: 420px;
+    max-width: 92vw;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.15);
+}
+
+#fav-modal::backdrop {
+    background: rgba(0, 0, 0, 0.35);
+}
+
+.fav-modal__inner {
+    padding: 20px 24px 16px;
+}
+
+.fav-modal__title {
+    margin: 0 0 4px;
+    font-size: 16px;
+    color: #111827;
+}
+
+.fav-modal__help {
+    margin: 0 0 10px;
+    font-size: 13px;
+    color: #6b7280;
+}
+
+.fav-folder-tree {
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    max-height: 200px;
+    overflow-y: auto;
+    padding: 4px 0;
+    background: #fff;
+    margin-bottom: 10px;
+}
+
+.fav-folder-tree__loading,
+.fav-folder-tree__empty,
+.fav-folder-tree__error {
+    margin: 0;
+    padding: 12px;
+    font-size: 13px;
+    color: #6b7280;
+    text-align: center;
+}
+
+.fav-folder-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.fav-folder-list--child {
+    padding-left: 20px;
+}
+
+.fav-folder-item {
+    padding: 7px 12px;
+    font-size: 13px;
+    cursor: pointer;
+    border-radius: 3px;
+    color: #374151;
+    user-select: none;
+}
+
+.fav-folder-item:hover {
+    background: #f3f4f6;
+}
+
+.fav-folder-item--selected {
+    background: #dbeafe;
+    color: #1e3a8a;
+    font-weight: 600;
+}
+
+.fav-new-folder-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin-bottom: 6px;
+}
+
+.fav-new-folder-input {
+    flex: 1;
+    padding: 6px 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    font-size: 13px;
+    color: #111827;
+}
+
+.fav-modal__action-btn {
+    padding: 5px 10px;
+    font-size: 12px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    background: #f9fafb;
+    cursor: pointer;
+    white-space: nowrap;
+    color: #374151;
+}
+
+.fav-modal__action-btn:hover:not(:disabled) {
+    background: #f3f4f6;
+    border-color: #9ca3af;
+}
+
+.fav-modal__action-btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+.fav-modal__error {
+    margin: 2px 0 6px;
+    font-size: 12px;
+    color: #dc2626;
+    min-height: 16px;
+}
+
+.fav-modal__footer {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 4px;
+}
+
+.fav-modal__save-btn {
+    padding: 7px 16px;
+    background: #1d4ed8;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+}
+
+.fav-modal__save-btn:hover:not(:disabled) {
+    background: #1e40af;
+}
+
+.fav-modal__save-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.fav-modal__cancel-btn {
+    padding: 7px 14px;
+    background: #fff;
+    color: #374151;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+}
+
+.fav-modal__cancel-btn:hover {
+    background: #f3f4f6;
+}

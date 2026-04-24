@@ -41,6 +41,7 @@ from app.db.repository import (
     get_attachments_by_announcement,
     get_available_source_ids,
     get_group_size_map,
+    get_favorite_entry_map,
     get_read_announcement_id_set,
     get_relevance_by_canonical_id_map,
     get_relevance_history_by_canonical_id_map,
@@ -449,8 +450,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     "relevance_map": relevance_map,
                     "history_map": history_map,
                     "my_relevance_map": my_relevance_map,
-                    # Phase 3b — group_mode 에서는 expand 없음; undefined 방지.
+                    # Phase 3b — group_mode 에서는 expand/별 없음; undefined 방지.
                     "siblings_map": {},
+                    "favorite_entry_map": {},
                 },
             )
         else:
@@ -513,11 +515,16 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     cid: next((rj for rj in rjs if rj.user_id == current_user.id), None)
                     for cid, rjs in relevance_map.items()
                 }
+                # Phase 3b — 별 아이콘 초기 상태 (canonical → entry_id).
+                favorite_entry_map = get_favorite_entry_map(
+                    session, user_id=current_user.id, canonical_ids=canonical_ids
+                )
             else:
                 read_id_set = set()
                 relevance_map = {}
                 history_map = {}
                 my_relevance_map = {}
+                favorite_entry_map = {}
 
             return templates.TemplateResponse(
                 request,
@@ -545,6 +552,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     "my_relevance_map": my_relevance_map,
                     # Phase 3b — 동일과제 expand 데이터 (비로그인 포함).
                     "siblings_map": siblings_map,
+                    # Phase 3b — 별 아이콘 초기 상태 (로그인 시만).
+                    "favorite_entry_map": favorite_entry_map,
                 },
             )
 
@@ -609,11 +618,17 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             _my_rj = next((rj for rj in _rj_list if rj.user_id == current_user.id), None)
             _hist_map = get_relevance_history_by_canonical_id_map(session, [_cid])
             _hist_list = _hist_map.get(_cid, [])
+            # Phase 3b — 별 아이콘 초기 상태.
+            _fav_map = get_favorite_entry_map(
+                session, user_id=current_user.id, canonical_ids=[_cid]
+            )
+            _fav_entry_id: int | None = _fav_map.get(_cid)
         else:
             _cid = None
             _rj_list = []
             _my_rj = None
             _hist_list = []
+            _fav_entry_id = None
 
         # 동일과제 섹션 — 비로그인도 표시. 현재 공고는 목록에서 제외.
         if announcement.canonical_group_id is not None:
@@ -643,6 +658,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 "hist_list": _hist_list,
                 # Phase 3b — 동일과제 섹션 (비로그인 포함).
                 "siblings": _siblings,
+                # Phase 3b — 별 아이콘 초기 상태 (로그인 시만).
+                "fav_entry_id": _fav_entry_id,
             },
         )
 

@@ -9,6 +9,8 @@
     - rj_list:       list[RelevanceJudgment]  (Phase 3a — 전체 사용자 현재 판정)
     - my_rj:         RelevanceJudgment | None  (Phase 3a — 현재 사용자 판정)
     - hist_list:     list[HistoryWithUser]      (Phase 3a — 판정 이력)
+    - siblings:      list[dict]                (Phase 3b — 동일 과제 목록. 비로그인 포함)
+    - fav_entry_id:  int | None                (Phase 3b — 즐겨찾기 entry_id. 로그인 시만)
 
   소스 유형별 본문 뷰어는 viewers/<source_type>.html 로 분기된다.
   해당 파일이 없으면 viewers/default.html 로 폴백된다.
@@ -28,6 +30,16 @@
 {# Phase 3a — 제목 + 관련성 배지를 나란히 배치. 비로그인/canonical 없으면 배지 생략. #}
 <div class="detail-title-wrap">
     <h2 class="detail-title">{{ announcement.title }}</h2>
+    {# Phase 3b — 별 아이콘: 로그인 + canonical 있을 때만 렌더. #}
+    {% if current_user and canonical_id %}
+    <button type="button"
+            class="fav-star {% if fav_entry_id %}fav-star--active{% endif %}"
+            title="{% if fav_entry_id %}즐겨찾기 제거{% else %}즐겨찾기 추가{% endif %}"
+            data-canonical-id="{{ canonical_id }}"
+            data-entry-id="{{ fav_entry_id or '' }}">
+        {% if fav_entry_id %}★{% else %}☆{% endif %}
+    </button>
+    {% endif %}
     {% if current_user and canonical_id %}
     {{ relevance_badge(canonical_id, rj_list, my_rj, hist_list) }}
     {% endif %}

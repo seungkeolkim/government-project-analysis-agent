@@ -2391,6 +2391,45 @@ def get_favorite_canonical_id_set(
     return {row[0] for row in rows}
 
 
+def get_favorite_entry_map(
+    session: Session,
+    *,
+    user_id: int,
+    canonical_ids: Iterable[int],
+) -> dict[int, int]:
+    """canonical_project_id → entry_id 매핑 반환 (현재 사용자의 즐겨찾기).
+
+    같은 canonical 이 여러 폴더에 있을 때는 가장 오래된(id 최솟값) entry_id 를 반환한다.
+    별 아이콘의 초기 data-entry-id 설정 및 채워진 별(★) 판단에 사용한다.
+
+    Args:
+        session:       호출자 세션.
+        user_id:       현재 로그인 사용자 PK.
+        canonical_ids: 조회할 canonical_project_id 목록.
+
+    Returns:
+        ``{canonical_project_id: entry_id}``
+        즐겨찾기되지 않은 canonical_id 는 포함되지 않는다.
+    """
+    id_list = [cid for cid in canonical_ids if cid is not None]
+    if not id_list:
+        return {}
+
+    rows = session.execute(
+        select(
+            FavoriteEntry.canonical_project_id,
+            func.min(FavoriteEntry.id).label("entry_id"),
+        )
+        .join(FavoriteFolder, FavoriteEntry.folder_id == FavoriteFolder.id)
+        .where(
+            FavoriteFolder.user_id == user_id,
+            FavoriteEntry.canonical_project_id.in_(id_list),
+        )
+        .group_by(FavoriteEntry.canonical_project_id)
+    ).all()
+    return {canonical_project_id: entry_id for canonical_project_id, entry_id in rows}
+
+
 def get_siblings_by_canonical_id_map(
     session: Session,
     canonical_ids: Iterable[int],
@@ -2492,5 +2531,6 @@ __all__ = [
     "finalize_scrape_run",
     "fail_stale_running_runs",
     "get_favorite_canonical_id_set",
+    "get_favorite_entry_map",
     "get_siblings_by_canonical_id_map",
 ]

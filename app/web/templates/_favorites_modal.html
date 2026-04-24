@@ -1,0 +1,34 @@
+{#
+  즐겨찾기 폴더 선택 모달 (Phase 3b / 00036-6) — 로그인 사용자 전용.
+
+  base.html 이 </body> 직전에 {% include "_favorites_modal.html" %} 로 삽입한다.
+  비로그인(current_user 가 None/Undefined) 이면 렌더하지 않는다.
+
+  JS(favorites.js)가 .fav-star 클릭 이벤트를 가로채 이 dialog 를 제어한다.
+  폴더 트리는 모달이 열릴 때 GET /favorites/folders 를 통해 JS 가 동적으로 채운다.
+#}
+{% if current_user %}
+<dialog id="fav-modal" aria-labelledby="fav-modal-title">
+    <div class="fav-modal__inner">
+        <h3 class="fav-modal__title" id="fav-modal-title">폴더에 추가</h3>
+        <p class="fav-modal__help">저장할 폴더를 선택하세요.</p>
+        {# 폴더 트리: JS 가 GET /favorites/folders 결과로 채운다. #}
+        <div id="fav-folder-tree" class="fav-folder-tree"></div>
+        {# 새 폴더 만들기 영역 — Jinja2 태그 없는 순수 HTML. #}
+        <div class="fav-new-folder-row">
+            <input id="fav-new-folder-name"
+                   class="fav-new-folder-input"
+                   type="text"
+                   maxlength="100"
+                   placeholder="새 폴더 이름">
+            <button type="button" id="fav-add-root-btn" class="fav-modal__action-btn">그룹 추가</button>
+            <button type="button" id="fav-add-sub-btn" class="fav-modal__action-btn" disabled>서브그룹 추가</button>
+        </div>
+        <p class="fav-modal__error" id="fav-modal-error" role="alert" aria-live="polite"></p>
+        <div class="fav-modal__footer">
+            <button type="button" id="fav-modal-save-btn" class="fav-modal__save-btn" disabled>추가</button>
+            <button type="button" id="fav-modal-cancel-btn" class="fav-modal__cancel-btn">닫기</button>
+        </div>
+    </div>
+</dialog>
+{% endif %}
