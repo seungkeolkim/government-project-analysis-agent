@@ -11,7 +11,9 @@
 from __future__ import annotations
 
 from app.web.routes.admin import router as admin_router
+from app.web.routes.relevance import router as relevance_router
 
 __all__ = [
     "admin_router",
+    "relevance_router",
 ]

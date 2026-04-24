@@ -73,7 +73,7 @@ from typing import Any, Literal
 
 from loguru import logger
 from sqlalchemy import func, select, update
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.canonical import compute_canonical_key
 from app.db.models import (
@@ -88,6 +88,7 @@ from app.db.models import (
     SCRAPE_RUN_TERMINAL_STATUSES,
     SCRAPE_RUN_TRIGGERS,
     ScrapeRun,
+    User,
 )
 from app.sources.config_schema import load_sources_config
 
@@ -109,6 +110,13 @@ _ANNOUNCEMENT_PROTECTED_FIELDS: frozenset[str] = frozenset({"id", "scraped_at", 
 
 # 허용되는 정렬 기준 값.
 _ALLOWED_SORT_VALUES: frozenset[str] = frozenset({"received_desc", "deadline_asc", "title_asc"})
+
+# 관련성 판정 verdict 허용값.
+RELEVANCE_VERDICT_RELATED: str = "관련"
+RELEVANCE_VERDICT_UNRELATED: str = "무관"
+RELEVANCE_ALLOWED_VERDICTS: frozenset[str] = frozenset(
+    {RELEVANCE_VERDICT_RELATED, RELEVANCE_VERDICT_UNRELATED}
+)
 
 # 공고 payload 에 허용되는 컬럼 목록(화이트리스트).
 _ANNOUNCEMENT_ALLOWED_FIELDS: frozenset[str] = frozenset(
@@ -489,6 +497,18 @@ class AttachmentChange:
     def changed(self) -> bool:
         """첨부 기반으로 내용 변경이 감지되었는지 여부를 반환한다."""
         return bool(self.added) or bool(self.removed) or self.count_changed
+
+
+@dataclass(frozen=True)
+class HistoryWithUser:
+    """get_relevance_history* 함수의 반환 단위.
+
+    RelevanceJudgmentHistory 에 User relationship 이 없으므로 JOIN 결과를
+    이 dataclass 로 묶어 N+1 없이 반환한다.
+    """
+
+    history: RelevanceJudgmentHistory
+    username: str
 
 
 def compute_attachment_signature(announcement: Announcement) -> AttachmentSignature:
@@ -1668,6 +1688,209 @@ def mark_announcement_read(
 
 
 # ──────────────────────────────────────────────────────────────
+# 관련성 판정 (Phase 3a / 00035-2)
+# ──────────────────────────────────────────────────────────────
+
+
+def get_canonical_project_by_id(
+    session: Session,
+    canonical_project_id: int,
+) -> CanonicalProject | None:
+    """PK 로 CanonicalProject 를 조회한다. 없으면 None."""
+    return session.execute(
+        select(CanonicalProject).where(CanonicalProject.id == canonical_project_id)
+    ).scalar_one_or_none()
+
+
+def get_relevance_judgment(
+    session: Session,
+    *,
+    canonical_project_id: int,
+    user_id: int,
+) -> RelevanceJudgment | None:
+    """특정 유저의 특정 canonical 에 대한 현재 판정을 반환한다. 없으면 None."""
+    return session.execute(
+        select(RelevanceJudgment).where(
+            RelevanceJudgment.canonical_project_id == canonical_project_id,
+            RelevanceJudgment.user_id == user_id,
+        )
+    ).scalar_one_or_none()
+
+
+def get_relevance_by_canonical_id_map(
+    session: Session,
+    canonical_project_ids: Iterable[int],
+) -> dict[int, list[RelevanceJudgment]]:
+    """canonical_project_id 목록에 대한 현재 판정을 bulk 조회한다.
+
+    N+1 방지: IN 절 단일 쿼리 + selectinload(RelevanceJudgment.user).
+    반환: {canonical_project_id: [RelevanceJudgment, ...]} — 판정 없는 id 는 키 없음.
+    """
+    ids = list(canonical_project_ids)
+    if not ids:
+        return {}
+    rows = session.execute(
+        select(RelevanceJudgment)
+        .where(RelevanceJudgment.canonical_project_id.in_(ids))
+        .options(selectinload(RelevanceJudgment.user))
+    ).scalars().all()
+    result: dict[int, list[RelevanceJudgment]] = {}
+    for rj in rows:
+        result.setdefault(rj.canonical_project_id, []).append(rj)
+    return result
+
+
+def get_relevance_history_by_canonical_id_map(
+    session: Session,
+    canonical_project_ids: Iterable[int],
+) -> dict[int, list[HistoryWithUser]]:
+    """canonical_project_id 목록에 대한 판정 히스토리를 bulk 조회한다.
+
+    RelevanceJudgmentHistory 에 User relationship 이 없으므로 JOIN 사용.
+    반환: {canonical_project_id: [HistoryWithUser, ...]} — 히스토리 없는 id 는 키 없음.
+    """
+    ids = list(canonical_project_ids)
+    if not ids:
+        return {}
+    rows = session.execute(
+        select(RelevanceJudgmentHistory, User.username)
+        .join(User, User.id == RelevanceJudgmentHistory.user_id)
+        .where(RelevanceJudgmentHistory.canonical_project_id.in_(ids))
+        .order_by(RelevanceJudgmentHistory.archived_at.desc())
+    ).all()
+    result: dict[int, list[HistoryWithUser]] = {}
+    for hist, username in rows:
+        result.setdefault(hist.canonical_project_id, []).append(
+            HistoryWithUser(history=hist, username=username)
+        )
+    return result
+
+
+def get_relevance_history(
+    session: Session,
+    *,
+    canonical_project_id: int,
+) -> list[HistoryWithUser]:
+    """단일 canonical 의 판정 히스토리를 최신순으로 반환한다."""
+    rows = session.execute(
+        select(RelevanceJudgmentHistory, User.username)
+        .join(User, User.id == RelevanceJudgmentHistory.user_id)
+        .where(RelevanceJudgmentHistory.canonical_project_id == canonical_project_id)
+        .order_by(RelevanceJudgmentHistory.archived_at.desc())
+    ).all()
+    return [HistoryWithUser(history=hist, username=username) for hist, username in rows]
+
+
+def set_relevance_judgment(
+    session: Session,
+    *,
+    canonical_project_id: int,
+    user_id: int,
+    verdict: str,
+    reason: str | None = None,
+    now: datetime | None = None,
+) -> RelevanceJudgment:
+    """판정을 저장한다. 기존 판정이 있으면 History 이관 후 새 판정으로 교체한다.
+
+    트랜잭션 순서: History INSERT → flush → 기존 DELETE → flush → 신규 INSERT.
+    순서를 바꾸면 uq_relevance_project_user UNIQUE 제약 위반이 발생한다.
+
+    Args:
+        session: 호출자 세션.
+        canonical_project_id: 판정 대상 CanonicalProject PK.
+        user_id: 판정 주체 User PK.
+        verdict: RELEVANCE_ALLOWED_VERDICTS 중 하나.
+        reason: 판정 사유 (선택).
+        now: 타임스탬프 오버라이드 (테스트용). None 이면 datetime.now(UTC).
+
+    Returns:
+        새로 삽입된 RelevanceJudgment.
+
+    Raises:
+        ValueError: verdict 가 RELEVANCE_ALLOWED_VERDICTS 에 없을 때.
+    """
+    if verdict not in RELEVANCE_ALLOWED_VERDICTS:
+        raise ValueError(
+            f"알 수 없는 verdict: {verdict!r}. 허용: {sorted(RELEVANCE_ALLOWED_VERDICTS)}"
+        )
+    now_ts = now or datetime.now(UTC)
+
+    existing = get_relevance_judgment(
+        session, canonical_project_id=canonical_project_id, user_id=user_id
+    )
+
+    if existing is not None:
+        # 1) History INSERT
+        hist = RelevanceJudgmentHistory(
+            canonical_project_id=existing.canonical_project_id,
+            user_id=existing.user_id,
+            verdict=existing.verdict,
+            reason=existing.reason,
+            decided_at=existing.decided_at,
+            archived_at=now_ts,
+            archive_reason=_ARCHIVE_REASON_USER_OVERWRITE,
+        )
+        session.add(hist)
+        session.flush()
+        # 2) 기존 DELETE
+        session.delete(existing)
+        session.flush()
+
+    # 3) 신규 INSERT
+    new_judgment = RelevanceJudgment(
+        canonical_project_id=canonical_project_id,
+        user_id=user_id,
+        verdict=verdict,
+        reason=reason,
+        decided_at=now_ts,
+    )
+    session.add(new_judgment)
+    session.flush()
+    return new_judgment
+
+
+def delete_relevance_judgment(
+    session: Session,
+    *,
+    canonical_project_id: int,
+    user_id: int,
+    now: datetime | None = None,
+) -> bool:
+    """판정을 삭제한다. 삭제 전 History 이관(user_overwrite).
+
+    Args:
+        session: 호출자 세션.
+        canonical_project_id: 판정 대상 CanonicalProject PK.
+        user_id: 판정 주체 User PK.
+        now: 타임스탬프 오버라이드 (테스트용).
+
+    Returns:
+        True 이면 삭제 성공, False 이면 판정이 없어서 no-op.
+    """
+    existing = get_relevance_judgment(
+        session, canonical_project_id=canonical_project_id, user_id=user_id
+    )
+    if existing is None:
+        return False
+
+    now_ts = now or datetime.now(UTC)
+    hist = RelevanceJudgmentHistory(
+        canonical_project_id=existing.canonical_project_id,
+        user_id=existing.user_id,
+        verdict=existing.verdict,
+        reason=existing.reason,
+        decided_at=existing.decided_at,
+        archived_at=now_ts,
+        archive_reason=_ARCHIVE_REASON_USER_OVERWRITE,
+    )
+    session.add(hist)
+    session.flush()
+    session.delete(existing)
+    session.flush()
+    return True
+
+
+# ──────────────────────────────────────────────────────────────
 # ScrapeRun — Phase 2 / 00025 수집 실행 제어 (docs/scrape_control_design.md §7)
 # ──────────────────────────────────────────────────────────────
 #
@@ -1971,6 +2194,7 @@ __all__ = [
     "CanonicalGroupRow",
     "AttachmentSignature",
     "AttachmentChange",
+    "HistoryWithUser",
     "upsert_announcement",
     "upsert_announcement_detail",
     "recompute_canonical_with_ancm_no",
@@ -1991,6 +2215,16 @@ __all__ = [
     "get_attachments_by_announcement",
     "get_read_announcement_id_set",
     "mark_announcement_read",
+    "RELEVANCE_VERDICT_RELATED",
+    "RELEVANCE_VERDICT_UNRELATED",
+    "RELEVANCE_ALLOWED_VERDICTS",
+    "get_canonical_project_by_id",
+    "get_relevance_judgment",
+    "get_relevance_by_canonical_id_map",
+    "get_relevance_history_by_canonical_id_map",
+    "get_relevance_history",
+    "set_relevance_judgment",
+    "delete_relevance_judgment",
     "get_running_scrape_run",
     "list_recent_scrape_runs",
     "create_scrape_run",

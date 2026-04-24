@@ -54,7 +54,7 @@ from app.web.observability import (
     install_request_logging_middleware,
     install_unhandled_exception_handler,
 )
-from app.web.routes import admin_router
+from app.web.routes import admin_router, relevance_router
 
 # ──────────────────────────────────────────────────────────────
 # 상수
@@ -315,6 +315,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # 라우터 자체에 admin_user_required dependency 가 걸려 있어 비로그인 401,
     # 비관리자 403. 본 subtask 범위는 [수집 제어] 탭 + startup stale cleanup.
     fastapi_app.include_router(admin_router)
+
+    # Phase 3a(00035-2): 관련성 판정 라우터(/canonical/{id}/relevance*) mount.
+    fastapi_app.include_router(relevance_router)
 
     # Phase 2(00025-6): shutdown 시 APScheduler 정지.
     # docker-compose 의 `restart: unless-stopped` 와 결합해, 웹 프로세스가 정상
