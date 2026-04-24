@@ -28,6 +28,8 @@
     - relevance_map:    dict[int, list[RelevanceJudgment]]  (Phase 3a — canonical_id → 전체 사용자 판정)
     - history_map:      dict[int, list[HistoryWithUser]]    (Phase 3a — canonical_id → 판정 이력)
     - my_relevance_map: dict[int, RelevanceJudgment|None]   (Phase 3a — canonical_id → 현재 사용자 판정)
+    - siblings_map:     dict[int, list[dict]]               (Phase 3b — canonical_id → 동일 과제 목록)
+    - favorite_entry_map: dict[int, int]                    (Phase 3b — canonical_id → entry_id. 비로그인 시 빈 dict.)
 
   컬럼 수 계산 (colspan 에 사용):
     비로그인: 5  (제목 / 기관 / 소스 / 상태 / 마감일)
@@ -232,6 +234,16 @@
                 </td>
                 {% endif %}
                 <td class="col-title">
+                    {# Phase 3b — 별 아이콘: 로그인 + canonical 있을 때만 렌더. #}
+                    {% if current_user and ann.canonical_group_id %}
+                    <button type="button"
+                            class="fav-star {% if ann.canonical_group_id in favorite_entry_map %}fav-star--active{% endif %}"
+                            title="{% if ann.canonical_group_id in favorite_entry_map %}즐겨찾기 제거{% else %}즐겨찾기 추가{% endif %}"
+                            data-canonical-id="{{ ann.canonical_group_id }}"
+                            data-entry-id="{{ favorite_entry_map.get(ann.canonical_group_id, '') }}">
+                        {% if ann.canonical_group_id in favorite_entry_map %}★{% else %}☆{% endif %}
+                    </button>
+                    {% endif %}
                     {# Phase 1b — 읽음 여부 분기 (그룹 모드와 동일 규칙). #}
                     <a class="announcement-title-link
                               {% if ann.id in read_id_set %}announcement-title-link--read
@@ -241,7 +253,11 @@
                     </a>
                     {# 동일 과제 배지: 같은 canonical group 에 2건 이상 있을 때만 표시 #}
                     {% if group_size > 1 %}
-                    <span class="canonical-count-badge">동일 과제 {{ group_size }}건</span>
+                    <button type="button"
+                            class="canonical-count-badge siblings-toggle"
+                            data-target="siblings-row-{{ ann.id }}">
+                        동일 과제 {{ group_size }}건 ▾
+                    </button>
                     {% endif %}
                 </td>
                 <td class="col-agency">{{ ann.agency or "-" }}</td>
@@ -277,6 +293,38 @@
                 </td>
                 {% endif %}
             </tr>
+            {# Phase 3b — 동일과제 expand 행 (비로그인 포함). 서버 렌더, 기본 숨김. #}
+            {% if group_size > 1 and ann.canonical_group_id is not none %}
+            <tr id="siblings-row-{{ ann.id }}" class="siblings-expand-row" style="display:none">
+                <td colspan="{% if current_user %}7{% else %}5{% endif %}" class="siblings-expand-cell">
+                    <ul class="siblings-list">
+                        {% for sib in siblings_map.get(ann.canonical_group_id, []) %}
+                        {% if sib.id != ann.id %}
+                        <li class="siblings-list__item">
+                            <a class="siblings-list__link" href="/announcements/{{ sib.id }}">
+                                {{ sib.title | truncate(80, end='…') }}
+                            </a>
+                            <span class="source-badge source-{{ sib.source_type | lower }}">
+                                {{ sib.source_type }}
+                            </span>
+                            {% if sib.canonical_key_scheme == 'official' %}
+                            <span class="match-scheme-badge match-scheme-official">[공식]</span>
+                            {% elif sib.canonical_key_scheme == 'fuzzy' %}
+                            <span class="match-scheme-badge match-scheme-fuzzy">[유사]</span>
+                            {% endif %}
+                            <span class="status-badge status-{{ sib.status.name | lower }}">
+                                {{ sib.status.value }}
+                            </span>
+                            {% if sib.deadline_at %}
+                            <span class="siblings-deadline">마감 {{ sib.deadline_at.strftime("%Y-%m-%d") }}</span>
+                            {% endif %}
+                        </li>
+                        {% endif %}
+                        {% endfor %}
+                    </ul>
+                </td>
+            </tr>
+            {% endif %}
             {% else %}
             <tr>
                 <td colspan="{% if current_user %}7{% else %}5{% endif %}" class="empty-row">조건에 맞는 공고가 없습니다.</td>
@@ -286,6 +334,22 @@
         </tbody>
     </table>
 </section>
+
+{# Phase 3b — 동일과제 expand 토글. Jinja2 태그 없는 순수 JS. #}
+<script>
+(function () {
+    document.addEventListener('click', function (e) {
+        var btn = e.target.closest('.siblings-toggle');
+        if (!btn) return;
+        e.stopPropagation();
+        var row = document.getElementById(btn.dataset.target);
+        if (!row) return;
+        var hidden = row.style.display === 'none';
+        row.style.display = hidden ? '' : 'none';
+        btn.classList.toggle('siblings-toggle--open', hidden);
+    });
+}());
+</script>
 
 {% if total_pages > 1 %}
 <nav class="pagination" aria-label="페이지 이동">

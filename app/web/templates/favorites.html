@@ -1,0 +1,239 @@
+{#
+  즐겨찾기 전용 탭 페이지 (Phase 3b / 00036-7).
+
+  입력 컨텍스트 (main.py `favorites_page` 가 주입):
+    - current_user:        User  (로그인 필수 — 비로그인은 /login 리다이렉트)
+    - folder_tree:         list[dict]  (get_folder_tree_for_user 결과)
+    - selected_folder_id:  int | None  (URL ?folder_id= 값)
+    - entries:             list[dict]  (list_favorites_with_announcements 결과)
+    - total:               int
+    - page:                int
+    - page_size:           int
+    - total_pages:         int
+    - relevance_map:       dict[int, list[RelevanceJudgment]]
+    - history_map:         dict[int, list[HistoryWithUser]]
+    - my_relevance_map:    dict[int, RelevanceJudgment|None]
+
+  레이아웃:
+    - 좌 사이드바: 폴더 트리 (SSR) + 추가/이름변경/삭제 CRUD (JS)
+    - 우 메인: 선택된 폴더의 즐겨찾기 항목 테이블 (SSR) + 제거 버튼 (JS)
+#}
+{% from "_relevance_badge_macro.html" import relevance_badge %}
+{% extends "base.html" %}
+
+{% block page_title %}즐겨찾기{% endblock %}
+
+{% block content %}
+<div class="fav-page">
+
+    {# ── 좌 사이드바: 폴더 트리 ── #}
+    <aside class="fav-page__sidebar">
+        <h2 class="fav-page__sidebar-title">폴더</h2>
+
+        <ul class="fav-sidebar-list" id="fav-sidebar-folder-list">
+            {% if not folder_tree %}
+            <li class="fav-sidebar-empty">폴더가 없습니다.</li>
+            {% endif %}
+            {# depth 2 제약 — 최대 1단계 중첩. 재귀 없이 2단계 인라인 전개. #}
+            {% for folder in folder_tree %}
+            <li class="fav-sidebar-item{% if folder.id == selected_folder_id %} fav-sidebar-item--active{% endif %}"
+                data-folder-id="{{ folder.id }}"
+                data-folder-depth="{{ folder.depth }}"
+                data-folder-name="{{ folder.name | e }}">
+                <a class="fav-sidebar-item__link" href="/favorites?folder_id={{ folder.id }}">
+                    {{ folder.name }}
+                </a>
+                <span class="fav-sidebar-item__actions">
+                    <button type="button"
+                            class="fav-sidebar-item__btn fav-sidebar-item__rename-btn"
+                            data-folder-id="{{ folder.id }}"
+                            data-folder-name="{{ folder.name | e }}"
+                            title="이름 변경">✎</button>
+                    <button type="button"
+                            class="fav-sidebar-item__btn fav-sidebar-item__delete-btn"
+                            data-folder-id="{{ folder.id }}"
+                            title="폴더 삭제">✕</button>
+                </span>
+                {% if folder.children %}
+                <ul class="fav-sidebar-list fav-sidebar-list--child">
+                    {% for child in folder.children %}
+                    <li class="fav-sidebar-item fav-sidebar-item--child{% if child.id == selected_folder_id %} fav-sidebar-item--active{% endif %}"
+                        data-folder-id="{{ child.id }}"
+                        data-folder-depth="{{ child.depth }}"
+                        data-folder-name="{{ child.name | e }}">
+                        <a class="fav-sidebar-item__link" href="/favorites?folder_id={{ child.id }}">
+                            {{ child.name }}
+                        </a>
+                        <span class="fav-sidebar-item__actions">
+                            <button type="button"
+                                    class="fav-sidebar-item__btn fav-sidebar-item__rename-btn"
+                                    data-folder-id="{{ child.id }}"
+                                    data-folder-name="{{ child.name | e }}"
+                                    title="이름 변경">✎</button>
+                            <button type="button"
+                                    class="fav-sidebar-item__btn fav-sidebar-item__delete-btn"
+                                    data-folder-id="{{ child.id }}"
+                                    title="폴더 삭제">✕</button>
+                        </span>
+                    </li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+
+        {# 새 폴더/서브그룹 추가 영역 #}
+        <div class="fav-sidebar-add">
+            <input type="text"
+                   id="fav-sidebar-new-name"
+                   class="fav-new-folder-input"
+                   placeholder="새 그룹 이름"
+                   autocomplete="off">
+            <div class="fav-sidebar-add__btns">
+                <button type="button"
+                        id="fav-sidebar-add-root-btn"
+                        class="fav-modal__action-btn">그룹 추가</button>
+                <button type="button"
+                        id="fav-sidebar-add-sub-btn"
+                        class="fav-modal__action-btn"
+                        disabled>서브그룹 추가</button>
+            </div>
+            <p id="fav-sidebar-error" class="fav-modal__error"></p>
+        </div>
+    </aside>
+
+    {# ── 우 메인: 즐겨찾기 항목 목록 ── #}
+    <section class="fav-page__main">
+        {% if selected_folder_id is none %}
+        <p class="fav-page__hint">왼쪽 폴더를 선택하면 즐겨찾기 목록이 표시됩니다.</p>
+
+        {% elif not entries and total == 0 %}
+        <p class="empty-attachments">이 폴더에 즐겨찾기된 과제가 없습니다.</p>
+
+        {% else %}
+        <p class="list-summary">총 {{ total }}건 · {{ page }} / {{ total_pages }} 페이지</p>
+
+        <div class="list-table-wrap">
+            <table class="list-table">
+                <thead>
+                    <tr>
+                        <th class="col-title">제목</th>
+                        <th class="col-agency">기관</th>
+                        <th class="col-source">소스</th>
+                        <th class="col-status">상태</th>
+                        <th class="col-deadline">마감일</th>
+                        <th class="col-relevance">관련성</th>
+                        <th class="col-fav-remove">제거</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in entries %}
+                    <tr>
+                        <td class="col-title">
+                            {# 별 아이콘: 즐겨찾기 페이지에선 항상 채워진 별(시각 표시 전용). data-* 없음 → favorites.js 미동작. #}
+                            <span class="fav-star fav-star--active" title="즐겨찾기됨">★</span>
+                            {% if item.ann_id is defined and item.ann_id %}
+                            <a class="announcement-title-link"
+                               href="/announcements/{{ item.ann_id }}">
+                                {{ item.canonical_title or "(제목 없음)" }}
+                            </a>
+                            {% else %}
+                            <span>{{ item.canonical_title or "(제목 없음)" }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="col-agency">{{ item.ann_agency or "-" }}</td>
+                        <td class="col-source">
+                            {% if item.ann_source_type %}
+                            <span class="source-badge source-{{ item.ann_source_type | lower }}">
+                                {{ item.ann_source_type }}
+                            </span>
+                            {% else %}-{% endif %}
+                        </td>
+                        <td class="col-status">
+                            {% if item.ann_status %}
+                            <span class="status-badge status-{{ item.ann_status.name | lower }}">
+                                {{ item.ann_status.value }}
+                            </span>
+                            {% else %}-{% endif %}
+                        </td>
+                        <td class="col-deadline">
+                            {% if item.ann_deadline_at %}
+                                {{ item.ann_deadline_at.strftime("%Y-%m-%d %H:%M") }}
+                            {% else %}-{% endif %}
+                        </td>
+                        <td class="col-relevance">
+                            {% set cid = item.canonical_project_id %}
+                            {{ relevance_badge(
+                                cid,
+                                relevance_map.get(cid, []),
+                                my_relevance_map.get(cid),
+                                history_map.get(cid, [])
+                            ) }}
+                        </td>
+                        <td class="col-fav-remove">
+                            <button type="button"
+                                    class="fav-entry-remove-btn"
+                                    data-entry-id="{{ item.entry_id }}"
+                                    title="즐겨찾기 제거">제거</button>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        {# 페이지네이션 #}
+        {% if total_pages > 1 %}
+        <nav class="pagination" aria-label="페이지 이동">
+            {% if page > 1 %}
+            <a class="pagination-link"
+               href="/favorites?folder_id={{ selected_folder_id }}&page={{ page - 1 }}">← 이전</a>
+            {% else %}
+            <span class="pagination-link pagination-link--disabled">← 이전</span>
+            {% endif %}
+
+            <span class="pagination-current">{{ page }} / {{ total_pages }}</span>
+
+            {% if page < total_pages %}
+            <a class="pagination-link"
+               href="/favorites?folder_id={{ selected_folder_id }}&page={{ page + 1 }}">다음 →</a>
+            {% else %}
+            <span class="pagination-link pagination-link--disabled">다음 →</span>
+            {% endif %}
+        </nav>
+        {% endif %}
+        {% endif %}
+    </section>
+</div>
+
+{# ── 폴더 이름 변경 다이얼로그 ── #}
+<dialog id="fav-rename-dialog">
+    <div class="fav-modal__inner">
+        <h3 class="fav-modal__title">폴더 이름 변경</h3>
+        <input type="text" id="fav-rename-input" class="fav-new-folder-input" autocomplete="off">
+        <p id="fav-rename-error" class="fav-modal__error"></p>
+        <div class="fav-modal__footer">
+            <button type="button" id="fav-rename-save-btn" class="fav-modal__save-btn">저장</button>
+            <button type="button" id="fav-rename-cancel-btn" class="fav-modal__cancel-btn">취소</button>
+        </div>
+    </div>
+</dialog>
+
+{# ── 삭제 확인 다이얼로그 ── #}
+<dialog id="fav-confirm-dialog">
+    <div class="fav-modal__inner">
+        <h3 class="fav-modal__title" id="fav-confirm-title">확인</h3>
+        <p id="fav-confirm-message" class="fav-modal__help"></p>
+        <div class="fav-modal__footer">
+            <button type="button" id="fav-confirm-ok-btn" class="fav-modal__save-btn">확인</button>
+            <button type="button" id="fav-confirm-cancel-btn" class="fav-modal__cancel-btn">취소</button>
+        </div>
+    </div>
+</dialog>
+
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="/static/js/favorites_page.js"></script>
+{% endblock %}

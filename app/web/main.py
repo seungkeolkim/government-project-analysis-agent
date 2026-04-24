@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from loguru import logger
@@ -41,9 +41,13 @@ from app.db.repository import (
     get_attachments_by_announcement,
     get_available_source_ids,
     get_group_size_map,
+    get_favorite_entry_map,
+    get_folder_tree_for_user,
+    list_favorites_with_announcements,
     get_read_announcement_id_set,
     get_relevance_by_canonical_id_map,
     get_relevance_history_by_canonical_id_map,
+    get_siblings_by_canonical_id_map,
     list_announcements,
     list_canonical_groups,
     mark_announcement_read,
@@ -56,7 +60,7 @@ from app.web.observability import (
     install_request_logging_middleware,
     install_unhandled_exception_handler,
 )
-from app.web.routes import admin_router, bulk_router, relevance_router
+from app.web.routes import admin_router, bulk_router, favorites_router, relevance_router
 
 # ──────────────────────────────────────────────────────────────
 # 상수
@@ -324,6 +328,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # Phase 3a(00035-4): 읽음 bulk 라우터(/announcements/bulk-mark-*) mount.
     fastapi_app.include_router(bulk_router)
 
+    # Phase 3b(00036-4): 즐겨찾기 라우터(/favorites/*) mount.
+    fastapi_app.include_router(favorites_router)
+
     # Phase 2(00025-6): shutdown 시 APScheduler 정지.
     # docker-compose 의 `restart: unless-stopped` 와 결합해, 웹 프로세스가 정상
     # 종료되면 잡도 깨끗이 멈췄다가 재기동 시 scheduler_jobs 테이블에서 자동
@@ -445,6 +452,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     "relevance_map": relevance_map,
                     "history_map": history_map,
                     "my_relevance_map": my_relevance_map,
+                    # Phase 3b — group_mode 에서는 expand/별 없음; undefined 방지.
+                    "siblings_map": {},
+                    "favorite_entry_map": {},
                 },
             )
         else:
@@ -466,6 +476,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 if ann.canonical_group_id is not None
             }
             group_size_map = get_group_size_map(session, cgids)
+            # 동일과제 expand — 비로그인도 표시하므로 user 분기 밖에서 batch 조회.
+            siblings_map = get_siblings_by_canonical_id_map(session, list(cgids))
             ann_with_sizes = [
                 (
                     ann,
@@ -505,11 +517,16 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     cid: next((rj for rj in rjs if rj.user_id == current_user.id), None)
                     for cid, rjs in relevance_map.items()
                 }
+                # Phase 3b — 별 아이콘 초기 상태 (canonical → entry_id).
+                favorite_entry_map = get_favorite_entry_map(
+                    session, user_id=current_user.id, canonical_ids=canonical_ids
+                )
             else:
                 read_id_set = set()
                 relevance_map = {}
                 history_map = {}
                 my_relevance_map = {}
+                favorite_entry_map = {}
 
             return templates.TemplateResponse(
                 request,
@@ -535,6 +552,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     "relevance_map": relevance_map,
                     "history_map": history_map,
                     "my_relevance_map": my_relevance_map,
+                    # Phase 3b — 동일과제 expand 데이터 (비로그인 포함).
+                    "siblings_map": siblings_map,
+                    # Phase 3b — 별 아이콘 초기 상태 (로그인 시만).
+                    "favorite_entry_map": favorite_entry_map,
                 },
             )
 
@@ -599,11 +620,30 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             _my_rj = next((rj for rj in _rj_list if rj.user_id == current_user.id), None)
             _hist_map = get_relevance_history_by_canonical_id_map(session, [_cid])
             _hist_list = _hist_map.get(_cid, [])
+            # Phase 3b — 별 아이콘 초기 상태.
+            _fav_map = get_favorite_entry_map(
+                session, user_id=current_user.id, canonical_ids=[_cid]
+            )
+            _fav_entry_id: int | None = _fav_map.get(_cid)
         else:
             _cid = None
             _rj_list = []
             _my_rj = None
             _hist_list = []
+            _fav_entry_id = None
+
+        # 동일과제 섹션 — 비로그인도 표시. 현재 공고는 목록에서 제외.
+        if announcement.canonical_group_id is not None:
+            _sib_map = get_siblings_by_canonical_id_map(
+                session, [announcement.canonical_group_id]
+            )
+            _siblings = [
+                s
+                for s in _sib_map.get(announcement.canonical_group_id, [])
+                if s["id"] != announcement.id
+            ]
+        else:
+            _siblings = []
 
         return templates.TemplateResponse(
             request,
@@ -618,6 +658,85 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 "rj_list": _rj_list,
                 "my_rj": _my_rj,
                 "hist_list": _hist_list,
+                # Phase 3b — 동일과제 섹션 (비로그인 포함).
+                "siblings": _siblings,
+                # Phase 3b — 별 아이콘 초기 상태 (로그인 시만).
+                "fav_entry_id": _fav_entry_id,
+            },
+        )
+
+    # ──────────────────────────────────────────────────────────
+    # HTML: 즐겨찾기 전용 탭 페이지 (Phase 3b / 00036-7)
+    # ──────────────────────────────────────────────────────────
+
+    @fastapi_app.get("/favorites", response_class=HTMLResponse, response_model=None)
+    def favorites_page(
+        request: Request,
+        folder_id: Optional[int] = Query(None),
+        page: int = Query(1, ge=1),
+        session: Session = Depends(get_session),
+        current_user: User | None = Depends(current_user_optional),
+    ) -> HTMLResponse | RedirectResponse:
+        """즐겨찾기 전용 탭 페이지.
+
+        비로그인 시 /login?next=/favorites 로 리다이렉트한다.
+        좌 폴더 트리(SSR) + 우 폴더 내 공고 목록(SSR) 2-panel 레이아웃을 반환한다.
+        """
+        if current_user is None:
+            return RedirectResponse(
+                url="/login?next=/favorites",
+                status_code=status.HTTP_302_FOUND,
+            )
+
+        page_size = 20
+        folder_tree = get_folder_tree_for_user(session, user_id=current_user.id)
+
+        items: list[dict] = []
+        total = 0
+        total_pages = 1
+        selected_folder_id: int | None = folder_id
+
+        if selected_folder_id is not None:
+            items, total = list_favorites_with_announcements(
+                session,
+                folder_id=selected_folder_id,
+                page=page,
+                page_size=page_size,
+            )
+            total_pages = max(1, ceil(total / page_size))
+
+        # 관련성 배지 데이터 (즐겨찾기 항목의 canonical_project_id 목록)
+        canonical_ids = [it["canonical_project_id"] for it in items]
+        relevance_map: dict = {}
+        history_map: dict = {}
+        my_relevance_map: dict = {}
+        if canonical_ids:
+            relevance_map = get_relevance_by_canonical_id_map(session, canonical_ids)
+            history_map = get_relevance_history_by_canonical_id_map(
+                session, canonical_ids
+            )
+            my_relevance_map = {
+                cid: next(
+                    (rj for rj in rjs if rj.user_id == current_user.id), None
+                )
+                for cid, rjs in relevance_map.items()
+            }
+
+        return templates.TemplateResponse(
+            request,
+            "favorites.html",
+            {
+                "current_user": current_user,
+                "folder_tree": folder_tree,
+                "selected_folder_id": selected_folder_id,
+                "entries": items,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": total_pages,
+                "relevance_map": relevance_map,
+                "history_map": history_map,
+                "my_relevance_map": my_relevance_map,
             },
         )
 

@@ -83,6 +83,8 @@ from app.db.models import (
     AnnouncementUserState,
     Attachment,
     CanonicalProject,
+    FavoriteEntry,
+    FavoriteFolder,
     RelevanceJudgment,
     RelevanceJudgmentHistory,
     SCRAPE_RUN_STATUSES,
@@ -2344,6 +2346,144 @@ def fail_stale_running_runs(
     return cleaned
 
 
+# ──────────────────────────────────────────────────────────────
+# 즐겨찾기 (Phase 3b / 00036)
+# ──────────────────────────────────────────────────────────────
+
+
+def get_favorite_canonical_id_set(
+    session: Session,
+    *,
+    user_id: int,
+    canonical_ids: Iterable[int],
+) -> set[int]:
+    """user_id 가 즐겨찾기한 canonical_project_id 집합을 1회 쿼리로 반환한다.
+
+    목록 페이지의 별 아이콘 표시용 N+1 방지 헬퍼다. 현재 페이지에 보이는
+    canonical_id 집합만 IN 절로 질의한다.
+
+    호출 규약:
+        - 비로그인 경로에서는 이 함수를 호출하지 않는다 (라우트에서 분기).
+        - canonical_ids 가 비어 있으면 쿼리 없이 빈 set.
+
+    Args:
+        session:       호출자 세션.
+        user_id:       인증된 사용자 PK.
+        canonical_ids: 현재 페이지에 보이는 canonical_project_id 들.
+
+    Returns:
+        user_id 가 임의 폴더에 즐겨찾기한 canonical_project_id 집합.
+        즐겨찾기되지 않은 id 는 포함되지 않는다.
+    """
+    id_list = [cid for cid in canonical_ids if cid is not None]
+    if not id_list:
+        return set()
+
+    rows = session.execute(
+        select(FavoriteEntry.canonical_project_id)
+        .join(FavoriteFolder, FavoriteEntry.folder_id == FavoriteFolder.id)
+        .where(
+            FavoriteFolder.user_id == user_id,
+            FavoriteEntry.canonical_project_id.in_(id_list),
+        )
+        .distinct()
+    ).all()
+    return {row[0] for row in rows}
+
+
+def get_favorite_entry_map(
+    session: Session,
+    *,
+    user_id: int,
+    canonical_ids: Iterable[int],
+) -> dict[int, int]:
+    """canonical_project_id → entry_id 매핑 반환 (현재 사용자의 즐겨찾기).
+
+    같은 canonical 이 여러 폴더에 있을 때는 가장 오래된(id 최솟값) entry_id 를 반환한다.
+    별 아이콘의 초기 data-entry-id 설정 및 채워진 별(★) 판단에 사용한다.
+
+    Args:
+        session:       호출자 세션.
+        user_id:       현재 로그인 사용자 PK.
+        canonical_ids: 조회할 canonical_project_id 목록.
+
+    Returns:
+        ``{canonical_project_id: entry_id}``
+        즐겨찾기되지 않은 canonical_id 는 포함되지 않는다.
+    """
+    id_list = [cid for cid in canonical_ids if cid is not None]
+    if not id_list:
+        return {}
+
+    rows = session.execute(
+        select(
+            FavoriteEntry.canonical_project_id,
+            func.min(FavoriteEntry.id).label("entry_id"),
+        )
+        .join(FavoriteFolder, FavoriteEntry.folder_id == FavoriteFolder.id)
+        .where(
+            FavoriteFolder.user_id == user_id,
+            FavoriteEntry.canonical_project_id.in_(id_list),
+        )
+        .group_by(FavoriteEntry.canonical_project_id)
+    ).all()
+    return {canonical_project_id: entry_id for canonical_project_id, entry_id in rows}
+
+
+def get_siblings_by_canonical_id_map(
+    session: Session,
+    canonical_ids: Iterable[int],
+) -> dict[int, list[dict]]:
+    """canonical_project_id 목록에 대한 is_current 공고 목록을 batch 조회한다.
+
+    동일과제 expand UI(00036-5) 와 detail 페이지 "동일 과제" 섹션을 위한
+    N+1 방지 헬퍼다. IN 절 단일 쿼리로 여러 canonical 의 공고를 한 번에 가져온다.
+
+    대표 공고 제외는 호출자 책임 — 이 함수는 모든 is_current 공고를 반환한다.
+
+    Args:
+        session:       호출자 세션.
+        canonical_ids: 조회할 canonical_project_id 목록.
+
+    Returns:
+        ``{canonical_project_id: [{"id": ..., "title": ..., "source_type": ...,
+        "deadline_at": ..., "status": ...}, ...]}``
+        공고가 없는 canonical_id 는 키가 존재하지 않는다.
+    """
+    ids = [cid for cid in canonical_ids if cid is not None]
+    if not ids:
+        return {}
+
+    rows = session.execute(
+        select(
+            Announcement.id,
+            Announcement.canonical_group_id,
+            Announcement.title,
+            Announcement.source_type,
+            Announcement.deadline_at,
+            Announcement.status,
+            Announcement.canonical_key_scheme,
+        ).where(
+            Announcement.canonical_group_id.in_(ids),
+            Announcement.is_current.is_(True),
+        )
+    ).all()
+
+    result: dict[int, list[dict]] = {}
+    for ann_id, cid, title, source_type, deadline_at, status, key_scheme in rows:
+        result.setdefault(cid, []).append(
+            {
+                "id": ann_id,
+                "title": title,
+                "source_type": source_type,
+                "deadline_at": deadline_at,
+                "status": status,
+                "canonical_key_scheme": key_scheme,
+            }
+        )
+    return result
+
+
 __all__ = [
     "UpsertResult",
     "CanonicalGroupRow",
@@ -2390,4 +2530,150 @@ __all__ = [
     "set_scrape_run_pid",
     "finalize_scrape_run",
     "fail_stale_running_runs",
+    "get_favorite_canonical_id_set",
+    "get_favorite_entry_map",
+    "get_folder_tree_for_user",
+    "list_favorites_with_announcements",
+    "get_siblings_by_canonical_id_map",
 ]
+
+
+def get_folder_tree_for_user(
+    session: Session,
+    *,
+    user_id: int,
+) -> list[dict]:
+    """사용자의 즐겨찾기 폴더 전체를 트리 구조로 반환한다.
+
+    루트(depth=0) → 자식(depth=1) 순으로 정렬된다.
+    favorites.html 좌 사이드바 SSR 에 사용한다.
+
+    Args:
+        session: 호출자 세션.
+        user_id: 폴더 소유자 사용자 PK.
+
+    Returns:
+        [{"id": int, "name": str, "depth": int, "children": [...]}, ...]
+    """
+    rows = session.execute(
+        select(FavoriteFolder)
+        .where(FavoriteFolder.user_id == user_id)
+        .order_by(FavoriteFolder.depth, FavoriteFolder.created_at)
+    ).scalars().all()
+
+    nodes: dict[int, dict] = {
+        f.id: {"id": f.id, "name": f.name, "depth": f.depth, "children": []}
+        for f in rows
+    }
+    roots: list[dict] = []
+    for f in rows:
+        node = nodes[f.id]
+        if f.parent_id is None:
+            roots.append(node)
+        elif f.parent_id in nodes:
+            nodes[f.parent_id]["children"].append(node)
+    return roots
+
+
+def list_favorites_with_announcements(
+    session: Session,
+    *,
+    folder_id: int,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[list[dict], int]:
+    """폴더 내 즐겨찾기 항목 목록 (대표 공고 정보 포함).
+
+    FavoriteEntry → CanonicalProject + Announcement(대표: is_current=True, MIN id)
+    를 IN 절 배치 조회로 가져온다 (N+1 방지).
+
+    Args:
+        session:   호출자 세션.
+        folder_id: 조회할 폴더 PK.
+        page:      1-based 페이지 번호.
+        page_size: 페이지당 항목 수.
+
+    Returns:
+        (items, total_count)
+
+        items 각 원소:
+            entry_id, canonical_project_id, canonical_title,
+            ann_id, ann_agency, ann_source_type, ann_status,
+            ann_deadline_at, added_at
+    """
+    total: int = session.execute(
+        select(func.count()).select_from(FavoriteEntry).where(
+            FavoriteEntry.folder_id == folder_id
+        )
+    ).scalar_one()
+
+    if total == 0:
+        return [], 0
+
+    entries = session.execute(
+        select(FavoriteEntry)
+        .where(FavoriteEntry.folder_id == folder_id)
+        .order_by(FavoriteEntry.added_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).scalars().all()
+
+    canonical_ids = [e.canonical_project_id for e in entries]
+
+    cp_map: dict[int, CanonicalProject] = {}
+    if canonical_ids:
+        cp_rows = session.execute(
+            select(CanonicalProject).where(CanonicalProject.id.in_(canonical_ids))
+        ).scalars().all()
+        cp_map = {cp.id: cp for cp in cp_rows}
+
+    ann_map: dict[int, dict] = {}
+    if canonical_ids:
+        # canonical 당 가장 오래된 is_current 공고 1건을 대표로 사용.
+        min_subq = (
+            select(
+                Announcement.canonical_group_id,
+                func.min(Announcement.id).label("min_id"),
+            )
+            .where(
+                Announcement.canonical_group_id.in_(canonical_ids),
+                Announcement.is_current.is_(True),
+            )
+            .group_by(Announcement.canonical_group_id)
+            .subquery()
+        )
+        ann_rows = session.execute(
+            select(
+                Announcement.id,
+                Announcement.canonical_group_id,
+                Announcement.agency,
+                Announcement.source_type,
+                Announcement.status,
+                Announcement.deadline_at,
+            ).join(min_subq, Announcement.id == min_subq.c.min_id)
+        ).all()
+        for ann_id, cid, agency, source_type, status, deadline_at in ann_rows:
+            ann_map[cid] = {
+                "ann_id": ann_id,
+                "ann_agency": agency,
+                "ann_source_type": source_type,
+                "ann_status": status,
+                "ann_deadline_at": deadline_at,
+            }
+
+    items: list[dict] = []
+    for e in entries:
+        cid = e.canonical_project_id
+        cp = cp_map.get(cid)
+        ann_info = ann_map.get(cid, {})
+        items.append(
+            {
+                "entry_id": e.id,
+                "canonical_project_id": cid,
+                "canonical_title": cp.representative_title if cp else None,
+                "added_at": e.added_at,
+                **ann_info,
+            }
+        )
+
+    return items, total

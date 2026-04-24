@@ -39,6 +39,8 @@
                            비관리자는 URL 을 직접 쳐도 403 이 떨어진다 (admin_user_required). #}
                         <a class="site-nav__link site-nav__link--admin" href="/admin/scrape">관리자</a>
                     {% endif %}
+                    {# Phase 3b — 즐겨찾기 탭: 로그인 시에만 표시. #}
+                    <a class="site-nav__link" href="/favorites">즐겨찾기</a>
                     <span class="site-nav__user">{{ current_user.username }}</span>
                     <form class="site-nav__logout-form" method="post" action="/auth/logout">
                         <button type="submit" class="site-nav__logout-button">로그아웃</button>
@@ -69,5 +71,10 @@
     <script src="/static/js/relevance.js"></script>
     {# Phase 3a — bulk 읽음 처리. 목록 페이지 외에는 #bulk-toolbar 없어 early-return. #}
     <script src="/static/js/bulk.js"></script>
+    {# Phase 3b — 즐겨찾기 모달. 로그인 시에만 렌더된다. #}
+    {% include "_favorites_modal.html" %}
+    <script src="/static/js/favorites.js"></script>
+    {# 페이지별 추가 스크립트 삽입 지점. #}
+    {% block extra_scripts %}{% endblock %}
 </body>
 </html>

@@ -502,3 +502,48 @@ NTIS canonical_key : official:과학기술정보통신부공고제2026-0484호  
 - □ 실데이터 기반 NTIS 목록 수집 + 상세 canonical 승급 E2E 확인 (NTIS 활성화 후 수행)
 - □ NTIS 개별공고(공고형태=개별공고) fuzzy canonical 품질 점검 (통합공고는 ancmNo 파싱 가능하지만 개별공고는 패턴이 다를 수 있음)
 - □ 재공고(공고유형=재공고) 시 ancmNo 재사용 여부 실데이터 확인
+
+---
+
+## 11. 알려진 false-positive (00036-2 감사 결과)
+
+> 감사 일시: 2026-04-24. 상세: [docs/canonical_grouping_audit_00036.md](canonical_grouping_audit_00036.md)
+
+### 11-1. official scheme N:1 구조와 false-positive 경계
+
+official scheme(`ancmNo` 기반)은 **N:1 구조**를 허용한다 — 하나의 공고번호 아래 여러 세부과제가
+동일 `canonical_project_id` 에 묶이는 것은 설계 의도다 (§2-3 참조).
+
+그러나 세부과제의 마감일·내용이 크게 다를 경우 사용자에게는 "별개 과제"로 보일 수 있다.
+이 경계는 알고리즘이 판단할 수 없어 **Phase 5 `canonical_overrides` split** 으로 해결한다.
+
+### 11-2. 알려진 false-positive 사례 (2026-04-24 기준)
+
+| canonical_group_id | ann ids | canonical_key | 이유 |
+|--------------------|---------|---------------|------|
+| 32 | 33, 34 | `official:과학기술정보통신부공고제2026-0408호` | NTIS 세부과제 2건(중앙거점/AI4ST) 동일 ancmNo로 묶임. 마감일 다름(05-12 vs 05-22). |
+
+### 11-3. 확인된 정상 묶음 사례
+
+| canonical_group_id | ann ids | 분류 |
+|--------------------|---------|------|
+| 16 | 17(IRIS), 39(NTIS) | 정상 cross-source — 산업통상부공고제2026-300호 동일 과제 |
+| 14 | 15(IRIS), 37(NTIS) | 정상 cross-source |
+| 15 | 16(IRIS), 38(NTIS) | 정상 cross-source |
+| 17 | 18(IRIS), 40(NTIS) | 정상 cross-source — 한-스페인 공동연구사업 |
+| 1 | 1, 2 (IRIS) | 정상 N:1 — 딥테크/창업 세부과제 |
+| 25 | 26, 27 (IRIS) | 정상 N:1 — 강원 전략기술 세부과제 |
+
+### 11-4. Phase 5 TODO
+
+```
+TODO split: canonical_group_id=32 (ann 33+34)
+  action: canonical_overrides {action: "split"} (Phase 5 구현 후 실행)
+  주의: split 전 동일 ancmNo 하위 sub-task 식별 로직 설계 필요
+        재수집 시 알고리즘이 다시 묶을 수 있으므로 알고리즘 수준 수정이 선행되어야 안전
+```
+
+### 11-5. fuzzy false-positive 상황
+
+감사 시점 현재 fuzzy scheme 다중 그룹은 0건. fuzzy false-positive 미관찰.
+데이터 증가 후 재감사 시 `scripts/audit_canonical_false_positives.py` 재실행.
