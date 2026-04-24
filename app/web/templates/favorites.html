@@ -34,46 +34,69 @@
             {% if not folder_tree %}
             <li class="fav-sidebar-empty">폴더가 없습니다.</li>
             {% endif %}
-            {# depth 2 제약 — 최대 1단계 중첩. 재귀 없이 2단계 인라인 전개. #}
+            {# task 00037 #1·#2: depth 2 제약 — 최대 1단계 중첩. 재귀 없이 2단계
+               인라인 전개. 루트/자식 모두 .fav-sidebar-item__row (flex) 로 래핑하고,
+               자식 <ul> 은 row 와 별개의 block 형제로 붙여 \"우측에 나란히 표시\"
+               되는 구 버그를 제거한다. caret 버튼은 자식을 가진 루트에만 붙이고
+               자식 행에는 .fav-sidebar-item__caret-spacer 로 폭을 맞춘다(정렬 유지). #}
             {% for folder in folder_tree %}
-            <li class="fav-sidebar-item{% if folder.id == selected_folder_id %} fav-sidebar-item--active{% endif %}"
+            {% set has_children = folder.children | length > 0 %}
+            {% set child_list_id = "fav-sidebar-children-" ~ folder.id %}
+            <li class="fav-sidebar-item fav-sidebar-item--root{% if folder.id == selected_folder_id %} fav-sidebar-item--active{% endif %}"
                 data-folder-id="{{ folder.id }}"
                 data-folder-depth="{{ folder.depth }}"
                 data-folder-name="{{ folder.name | e }}">
-                <a class="fav-sidebar-item__link" href="/favorites?folder_id={{ folder.id }}">
-                    {{ folder.name }}
-                </a>
-                <span class="fav-sidebar-item__actions">
+                <span class="fav-sidebar-item__row">
+                    {% if has_children %}
                     <button type="button"
-                            class="fav-sidebar-item__btn fav-sidebar-item__rename-btn"
-                            data-folder-id="{{ folder.id }}"
-                            data-folder-name="{{ folder.name | e }}"
-                            title="이름 변경">✎</button>
-                    <button type="button"
-                            class="fav-sidebar-item__btn fav-sidebar-item__delete-btn"
-                            data-folder-id="{{ folder.id }}"
-                            title="폴더 삭제">✕</button>
+                            class="fav-sidebar-item__caret"
+                            aria-expanded="true"
+                            aria-controls="{{ child_list_id }}"
+                            data-target-id="{{ child_list_id }}"
+                            title="서브그룹 접기/펼치기">▾</button>
+                    {% else %}
+                    <span class="fav-sidebar-item__caret-spacer" aria-hidden="true"></span>
+                    {% endif %}
+                    <a class="fav-sidebar-item__link" href="/favorites?folder_id={{ folder.id }}">
+                        {{ folder.name }}
+                    </a>
+                    <span class="fav-sidebar-item__actions">
+                        <button type="button"
+                                class="fav-sidebar-item__btn fav-sidebar-item__rename-btn"
+                                data-folder-id="{{ folder.id }}"
+                                data-folder-name="{{ folder.name | e }}"
+                                title="이름 변경">✎</button>
+                        <button type="button"
+                                class="fav-sidebar-item__btn fav-sidebar-item__delete-btn"
+                                data-folder-id="{{ folder.id }}"
+                                data-folder-name="{{ folder.name | e }}"
+                                title="폴더 삭제">✕</button>
+                    </span>
                 </span>
-                {% if folder.children %}
-                <ul class="fav-sidebar-list fav-sidebar-list--child">
+                {% if has_children %}
+                <ul class="fav-sidebar-list fav-sidebar-list--child" id="{{ child_list_id }}">
                     {% for child in folder.children %}
                     <li class="fav-sidebar-item fav-sidebar-item--child{% if child.id == selected_folder_id %} fav-sidebar-item--active{% endif %}"
                         data-folder-id="{{ child.id }}"
                         data-folder-depth="{{ child.depth }}"
                         data-folder-name="{{ child.name | e }}">
-                        <a class="fav-sidebar-item__link" href="/favorites?folder_id={{ child.id }}">
-                            {{ child.name }}
-                        </a>
-                        <span class="fav-sidebar-item__actions">
-                            <button type="button"
-                                    class="fav-sidebar-item__btn fav-sidebar-item__rename-btn"
-                                    data-folder-id="{{ child.id }}"
-                                    data-folder-name="{{ child.name | e }}"
-                                    title="이름 변경">✎</button>
-                            <button type="button"
-                                    class="fav-sidebar-item__btn fav-sidebar-item__delete-btn"
-                                    data-folder-id="{{ child.id }}"
-                                    title="폴더 삭제">✕</button>
+                        <span class="fav-sidebar-item__row">
+                            <span class="fav-sidebar-item__caret-spacer" aria-hidden="true"></span>
+                            <a class="fav-sidebar-item__link" href="/favorites?folder_id={{ child.id }}">
+                                {{ child.name }}
+                            </a>
+                            <span class="fav-sidebar-item__actions">
+                                <button type="button"
+                                        class="fav-sidebar-item__btn fav-sidebar-item__rename-btn"
+                                        data-folder-id="{{ child.id }}"
+                                        data-folder-name="{{ child.name | e }}"
+                                        title="이름 변경">✎</button>
+                                <button type="button"
+                                        class="fav-sidebar-item__btn fav-sidebar-item__delete-btn"
+                                        data-folder-id="{{ child.id }}"
+                                        data-folder-name="{{ child.name | e }}"
+                                        title="폴더 삭제">✕</button>
+                            </span>
                         </span>
                     </li>
                     {% endfor %}

@@ -64,6 +64,13 @@
     }
 
     function renderFolderTree(folders) {
+        /**
+         * 서버에서 받은 폴더 트리(루트 + depth 1) 를 indent 트리로 렌더한다.
+         * task 00037 #1: 사이드바와 동일한 시각 체계 — caret 토글은 자식을 가진
+         * 루트에만 붙이고, 자식 <ul> 은 루트 li 의 block 형제로 붙여 indent 를
+         * 준다. 폴더 선택(클릭) 은 .fav-folder-item__row 에서만 받고, caret 클릭은
+         * stopPropagation 으로 선택과 분리한다. 기본 펼침 상태.
+         */
         folderTreeEl.innerHTML = '';
         if (!folders.length) {
             folderTreeEl.innerHTML = '<p class="fav-folder-tree__empty">폴더가 없습니다. 새 그룹을 만들어 추가하세요.</p>';
@@ -72,13 +79,15 @@
         var ul = document.createElement('ul');
         ul.className = 'fav-folder-list';
         folders.forEach(function (folder) {
-            var li = makeFolderItem(folder);
+            var hasChildren = !!(folder.children && folder.children.length);
+            var li = makeFolderItem(folder, hasChildren);
             ul.appendChild(li);
-            if (folder.children && folder.children.length) {
+            if (hasChildren) {
                 var childUl = document.createElement('ul');
                 childUl.className = 'fav-folder-list fav-folder-list--child';
+                childUl.dataset.childListForRoot = String(folder.id);
                 folder.children.forEach(function (child) {
-                    childUl.appendChild(makeFolderItem(child));
+                    childUl.appendChild(makeFolderItem(child, false));
                 });
                 li.appendChild(childUl);
             }
@@ -86,13 +95,47 @@
         folderTreeEl.appendChild(ul);
     }
 
-    function makeFolderItem(folder) {
+    function makeFolderItem(folder, isRootWithChildren) {
+        /**
+         * 개별 폴더 항목 li 를 생성한다.
+         * - row(flex): [caret|spacer] + 레이블
+         * - row 클릭 → 폴더 선택 (저장 대상 지정)
+         * - caret 클릭 → 하위 ul 접기/펼치기 (stopPropagation 으로 선택과 분리)
+         * depth=0 이고 자식이 있으면 caret, 그 외에는 spacer 로 폭만 맞춘다.
+         */
         var li = document.createElement('li');
         li.className = 'fav-folder-item';
         li.dataset.folderId = folder.id;
         li.dataset.folderDepth = folder.depth;
-        li.textContent = folder.name;
-        li.addEventListener('click', function (e) {
+
+        var row = document.createElement('div');
+        row.className = 'fav-folder-item__row';
+
+        if (isRootWithChildren) {
+            var caret = document.createElement('button');
+            caret.type = 'button';
+            caret.className = 'fav-folder-item__caret';
+            caret.setAttribute('aria-expanded', 'true');
+            caret.title = '서브그룹 접기/펼치기';
+            caret.textContent = '▾';
+            caret.addEventListener('click', function (e) {
+                e.stopPropagation();
+                toggleModalChildList(li, caret);
+            });
+            row.appendChild(caret);
+        } else {
+            var spacer = document.createElement('span');
+            spacer.className = 'fav-folder-item__caret-spacer';
+            spacer.setAttribute('aria-hidden', 'true');
+            row.appendChild(spacer);
+        }
+
+        var label = document.createElement('span');
+        label.className = 'fav-folder-item__label';
+        label.textContent = folder.name;
+        row.appendChild(label);
+
+        row.addEventListener('click', function (e) {
             e.stopPropagation();
             folderTreeEl.querySelectorAll('.fav-folder-item--selected').forEach(function (el) {
                 el.classList.remove('fav-folder-item--selected');
@@ -103,7 +146,29 @@
             // depth 0(root) 선택 시에만 서브그룹 추가 활성
             addSubBtn.disabled = (folder.depth !== 0);
         });
+
+        li.appendChild(row);
         return li;
+    }
+
+    function toggleModalChildList(rootLi, caret) {
+        /**
+         * 모달 트리에서 루트 폴더의 자식 리스트를 접기/펼치기 한다.
+         * rootLi 의 직속 자식 중 .fav-folder-list--child 가 있으면 is-collapsed
+         * 클래스를 토글하고 caret 의 aria-expanded 값과 화살표 텍스트를 맞춘다.
+         */
+        var childUl = rootLi.querySelector(':scope > .fav-folder-list--child');
+        if (!childUl) { return; }
+        var expanded = caret.getAttribute('aria-expanded') === 'true';
+        if (expanded) {
+            childUl.classList.add('is-collapsed');
+            caret.setAttribute('aria-expanded', 'false');
+            caret.textContent = '▸';
+        } else {
+            childUl.classList.remove('is-collapsed');
+            caret.setAttribute('aria-expanded', 'true');
+            caret.textContent = '▾';
+        }
     }
 
     // ── 그룹 추가 버튼 (루트 레벨) ──────────────────────────────
