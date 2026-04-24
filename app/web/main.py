@@ -517,9 +517,15 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     cid: next((rj for rj in rjs if rj.user_id == current_user.id), None)
                     for cid, rjs in relevance_map.items()
                 }
-                # Phase 3b — 별 아이콘 초기 상태 (canonical → entry_id).
+                # Phase 3b (task 00037 갱신) — 별 아이콘 초기 상태 (announcement → entry_id).
+                # FavoriteEntry 가 announcement 단위로 바뀌었으므로 현재 페이지의
+                # announcement.id 목록으로 맵을 조회한다. data-entry-id 는 공고 row 에
+                # 붙고, 같은 announcement 가 여러 폴더에 담겨 있을 경우 MIN(entry_id)
+                # 가 대표로 선택된다.
                 favorite_entry_map = get_favorite_entry_map(
-                    session, user_id=current_user.id, canonical_ids=canonical_ids
+                    session,
+                    user_id=current_user.id,
+                    announcement_ids=announcement_ids,
                 )
             else:
                 read_id_set = set()
@@ -620,11 +626,14 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             _my_rj = next((rj for rj in _rj_list if rj.user_id == current_user.id), None)
             _hist_map = get_relevance_history_by_canonical_id_map(session, [_cid])
             _hist_list = _hist_map.get(_cid, [])
-            # Phase 3b — 별 아이콘 초기 상태.
+            # Phase 3b (task 00037 갱신) — 별 아이콘 초기 상태.
+            # announcement 단위 저장 전환으로 현재 상세 공고 id 하나만으로 조회한다.
             _fav_map = get_favorite_entry_map(
-                session, user_id=current_user.id, canonical_ids=[_cid]
+                session,
+                user_id=current_user.id,
+                announcement_ids=[announcement.id],
             )
-            _fav_entry_id: int | None = _fav_map.get(_cid)
+            _fav_entry_id: int | None = _fav_map.get(announcement.id)
         else:
             _cid = None
             _rj_list = []
@@ -706,7 +715,13 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             total_pages = max(1, ceil(total / page_size))
 
         # 관련성 배지 데이터 (즐겨찾기 항목의 canonical_project_id 목록)
-        canonical_ids = [it["canonical_project_id"] for it in items]
+        # task 00037 — announcement 단위 저장으로 항목별 canonical_project_id 는
+        # None 일 수 있다(canonical 미매칭 공고). 배지 조회 대상에서 None 은 제외.
+        canonical_ids = [
+            it["canonical_project_id"]
+            for it in items
+            if it.get("canonical_project_id") is not None
+        ]
         relevance_map: dict = {}
         history_map: dict = {}
         my_relevance_map: dict = {}
@@ -721,6 +736,23 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 )
                 for cid, rjs in relevance_map.items()
             }
+
+        # task 00037 plan_review 추가요청 — 즐겨찾기 테이블도 목록 페이지와 동일하게
+        # 읽음/안읽음에 따라 제목 일반/bold 로 분기하기 위해 read_id_set 을 주입한다.
+        # items 의 announcement_id(=ann_id) 목록을 IN 절 단일 쿼리로 조회.
+        announcement_ids = [
+            it["announcement_id"]
+            for it in items
+            if it.get("announcement_id") is not None
+        ]
+        if announcement_ids:
+            read_id_set = get_read_announcement_id_set(
+                session,
+                user_id=current_user.id,
+                announcement_ids=announcement_ids,
+            )
+        else:
+            read_id_set = set()
 
         return templates.TemplateResponse(
             request,
@@ -737,6 +769,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 "relevance_map": relevance_map,
                 "history_map": history_map,
                 "my_relevance_map": my_relevance_map,
+                # task 00037 plan_review 추가요청 — read/unread bold 분기용.
+                "read_id_set": read_id_set,
             },
         )
 
