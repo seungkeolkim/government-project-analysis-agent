@@ -66,6 +66,7 @@ payload 규약:
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -117,6 +118,9 @@ RELEVANCE_VERDICT_UNRELATED: str = "무관"
 RELEVANCE_ALLOWED_VERDICTS: frozenset[str] = frozenset(
     {RELEVANCE_VERDICT_RELATED, RELEVANCE_VERDICT_UNRELATED}
 )
+
+# bulk 읽음 처리 상한 (환경변수 오버라이드 가능).
+MAX_BULK_MARK: int = int(os.getenv("MAX_BULK_MARK", "5000"))
 
 # 공고 payload 에 허용되는 컬럼 목록(화이트리스트).
 _ANNOUNCEMENT_ALLOWED_FIELDS: frozenset[str] = frozenset(
@@ -1687,6 +1691,157 @@ def mark_announcement_read(
     return existing
 
 
+def resolve_announcement_ids_by_filter(
+    session: Session,
+    *,
+    status: str | None = None,
+    source: str | None = None,
+    search: str | None = None,
+) -> list[int]:
+    """필터 조건에 맞는 is_current=True 공고 id 목록을 반환한다.
+
+    list_announcements 와 동일한 필터를 적용하되, 페이지네이션과 정렬 없이
+    전체 id 를 반환한다. bulk 읽음 처리의 "filter" 모드에서 사용한다.
+
+    Args:
+        session: 호출자 세션.
+        status:  상태 값 문자열. None 이면 전체.
+        source:  source_type 문자열. None 이면 전체.
+        search:  제목 부분일치 검색어. None 이면 검색 없음.
+
+    Returns:
+        조건에 맞는 announcement id 리스트 (순서 미보장).
+    """
+    status_enum = _coerce_status(status) if status is not None else None
+    statement = select(Announcement.id).where(Announcement.is_current.is_(True))
+    statement = _apply_common_filters(statement, status_enum, source, search)
+    return list(session.execute(statement).scalars().all())
+
+
+def bulk_mark_announcements_read(
+    session: Session,
+    *,
+    user_id: int,
+    announcement_ids: list[int],
+    now: datetime | None = None,
+) -> int:
+    """announcement_ids 에 대해 AnnouncementUserState 를 일괄 read=True 로 UPSERT 한다.
+
+    기존 row 가 있으면 is_read=True + read_at 갱신. 없으면 INSERT.
+    변경(INSERT 또는 UPDATE)된 row 수를 반환한다.
+
+    Args:
+        session:          호출자 세션.
+        user_id:          인증된 사용자 PK.
+        announcement_ids: 읽음 처리할 공고 PK 목록.
+        now:              read_at 에 찍을 시각. None 이면 UTC 현재 시각.
+
+    Returns:
+        실제로 INSERT 또는 업데이트된 row 수.
+    """
+    if not announcement_ids:
+        return 0
+
+    now_ts = now if now is not None else datetime.now(tz=UTC)
+
+    existing_rows = session.execute(
+        select(AnnouncementUserState).where(
+            AnnouncementUserState.user_id == user_id,
+            AnnouncementUserState.announcement_id.in_(announcement_ids),
+        )
+    ).scalars().all()
+
+    existing_map = {row.announcement_id: row for row in existing_rows}
+    updated = 0
+
+    new_rows: list[AnnouncementUserState] = []
+    for aid in announcement_ids:
+        if aid in existing_map:
+            row = existing_map[aid]
+            if not row.is_read or row.read_at != now_ts:
+                row.is_read = True
+                row.read_at = now_ts
+                updated += 1
+        else:
+            new_rows.append(
+                AnnouncementUserState(
+                    announcement_id=aid,
+                    user_id=user_id,
+                    is_read=True,
+                    read_at=now_ts,
+                )
+            )
+
+    if new_rows:
+        session.add_all(new_rows)
+        updated += len(new_rows)
+
+    if updated:
+        session.flush()
+    return updated
+
+
+def bulk_mark_announcements_unread(
+    session: Session,
+    *,
+    user_id: int,
+    announcement_ids: list[int],
+    now: datetime | None = None,
+) -> int:
+    """announcement_ids 에 대해 AnnouncementUserState 를 일괄 read=False 로 UPSERT 한다.
+
+    기존 row 가 있으면 is_read=False + read_at=None 갱신. 없으면 INSERT.
+    변경(INSERT 또는 업데이트)된 row 수를 반환한다.
+
+    Args:
+        session:          호출자 세션.
+        user_id:          인증된 사용자 PK.
+        announcement_ids: 읽지 않음 처리할 공고 PK 목록.
+        now:              타임스탬프 오버라이드 (사용 안 함 — 인터페이스 일관성 유지).
+
+    Returns:
+        실제로 INSERT 또는 업데이트된 row 수.
+    """
+    if not announcement_ids:
+        return 0
+
+    existing_rows = session.execute(
+        select(AnnouncementUserState).where(
+            AnnouncementUserState.user_id == user_id,
+            AnnouncementUserState.announcement_id.in_(announcement_ids),
+        )
+    ).scalars().all()
+
+    existing_map = {row.announcement_id: row for row in existing_rows}
+    updated = 0
+
+    new_rows: list[AnnouncementUserState] = []
+    for aid in announcement_ids:
+        if aid in existing_map:
+            row = existing_map[aid]
+            if row.is_read:
+                row.is_read = False
+                row.read_at = None
+                updated += 1
+        else:
+            new_rows.append(
+                AnnouncementUserState(
+                    announcement_id=aid,
+                    user_id=user_id,
+                    is_read=False,
+                    read_at=None,
+                )
+            )
+
+    if new_rows:
+        session.add_all(new_rows)
+        updated += len(new_rows)
+
+    if updated:
+        session.flush()
+    return updated
+
+
 # ──────────────────────────────────────────────────────────────
 # 관련성 판정 (Phase 3a / 00035-2)
 # ──────────────────────────────────────────────────────────────
@@ -2215,6 +2370,10 @@ __all__ = [
     "get_attachments_by_announcement",
     "get_read_announcement_id_set",
     "mark_announcement_read",
+    "MAX_BULK_MARK",
+    "resolve_announcement_ids_by_filter",
+    "bulk_mark_announcements_read",
+    "bulk_mark_announcements_unread",
     "RELEVANCE_VERDICT_RELATED",
     "RELEVANCE_VERDICT_UNRELATED",
     "RELEVANCE_ALLOWED_VERDICTS",

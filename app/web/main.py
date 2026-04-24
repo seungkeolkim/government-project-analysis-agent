@@ -56,7 +56,7 @@ from app.web.observability import (
     install_request_logging_middleware,
     install_unhandled_exception_handler,
 )
-from app.web.routes import admin_router, relevance_router
+from app.web.routes import admin_router, bulk_router, relevance_router
 
 # ──────────────────────────────────────────────────────────────
 # 상수
@@ -320,6 +320,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     # Phase 3a(00035-2): 관련성 판정 라우터(/canonical/{id}/relevance*) mount.
     fastapi_app.include_router(relevance_router)
+
+    # Phase 3a(00035-4): 읽음 bulk 라우터(/announcements/bulk-mark-*) mount.
+    fastapi_app.include_router(bulk_router)
 
     # Phase 2(00025-6): shutdown 시 APScheduler 정지.
     # docker-compose 의 `restart: unless-stopped` 와 결합해, 웹 프로세스가 정상
