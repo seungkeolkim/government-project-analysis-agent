@@ -47,6 +47,7 @@ from app.scrape_control.constants import (
     ExternalTrigger,
     HOST_PROJECT_DIR_ENV_VAR,
     SCRAPE_ACTIVE_SOURCES_ENV_VAR,
+    SCRAPE_RUN_ID_ENV_VAR,
     scrape_run_log_path,
     scrape_run_log_root,
 )
@@ -178,7 +179,11 @@ def _resolve_docker_binary() -> str:
     )
 
 
-def build_compose_command(active_sources: list[str]) -> list[str]:
+def build_compose_command(
+    active_sources: list[str],
+    *,
+    scrape_run_id: int | None = None,
+) -> list[str]:
     """docker compose 호출에 사용할 argv 를 만든다.
 
     최종 argv 예시:
@@ -190,6 +195,7 @@ def build_compose_command(active_sources: list[str]) -> list[str]:
             --profile scrape \\
             run --rm \\
             -e SCRAPE_ACTIVE_SOURCES=IRIS,NTIS \\
+            -e SCRAPE_RUN_ID=42 \\
             scraper
 
     ``argv[0]`` 은 ``_resolve_docker_binary()`` 가 반환하는 **절대경로** 다.
@@ -207,8 +213,16 @@ def build_compose_command(active_sources: list[str]) -> list[str]:
 
     Args:
         active_sources: 이번 run 에 실행할 소스 id 목록.
-                        비어 있으면 ``-e`` 플래그를 추가하지 않고 sources.yaml
-                        의 기본 active_sources 를 그대로 사용한다.
+                        비어 있으면 ``-e SCRAPE_ACTIVE_SOURCES`` 플래그를 추가하지
+                        않고 sources.yaml 의 기본 active_sources 를 그대로 사용한다.
+        scrape_run_id:  웹/스케줄러가 이미 INSERT 한 ScrapeRun.id.
+                        None 이 아니면 ``-e SCRAPE_RUN_ID={id}`` 를 argv 에 덧붙여
+                        subprocess 쪽 CLI 가 **새 ScrapeRun 을 만들지 않고** 기존
+                        row 를 이어받도록 한다. None 이면 덧붙이지 않으며 CLI 는
+                        기존 경로(trigger='cli' 로 자체 create_scrape_run) 로 동작
+                        한다. 본 파라미터는 task 00034 의 자기참조 중복 체크 문제
+                        (웹이 만든 running row 를 subprocess 가 자신이 만들 row
+                        와 구분하지 못해 exit 2 하는 버그) 를 해결하기 위한 것.
 
     Returns:
         ``subprocess.Popen`` 에 그대로 전달 가능한 argv 리스트.
@@ -256,6 +270,12 @@ def build_compose_command(active_sources: list[str]) -> list[str]:
         # 쉼표로 join — cli.py 가 split(',') 로 해석한다.
         joined = ",".join(active_sources)
         argv.extend(["-e", f"{SCRAPE_ACTIVE_SOURCES_ENV_VAR}={joined}"])
+
+    # ScrapeRun 소유권 이전: subprocess 쪽 CLI 가 새 row 를 만드는 대신 이
+    # id 를 이어받아 finalize 까지 수행한다. None 이면 덧붙이지 않아 기존
+    # 호출자(cli 직접 실행) 동작에 영향이 없다.
+    if scrape_run_id is not None:
+        argv.extend(["-e", f"{SCRAPE_RUN_ID_ENV_VAR}={scrape_run_id}"])
 
     argv.append(COMPOSE_SCRAPER_SERVICE_NAME)
     return argv
@@ -327,8 +347,9 @@ def start_scrape_run(
 
     # 2. compose argv 구성 (HOST_PROJECT_DIR 누락이면 여기서 ComposeEnvironmentError).
     #    이 시점에 예외가 나면 방금 만든 ScrapeRun 을 failed 로 마감해야 한다.
+    #    scrape_run_id 를 subprocess 에 넘겨 새 row 중복 생성 버그(task 00034) 를 예방.
     try:
-        argv = build_compose_command(normalized_sources)
+        argv = build_compose_command(normalized_sources, scrape_run_id=scrape_run_id)
     except ComposeEnvironmentError as exc:
         _safe_finalize(scrape_run_id, status="failed", error_message=str(exc))
         raise

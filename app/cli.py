@@ -90,9 +90,13 @@ from app.db.repository import (
     upsert_announcement_detail,
     upsert_attachment,
 )
+from app.db.models import ScrapeRun
 from app.db.session import session_scope
 from app.logging_setup import configure_logging
-from app.scrape_control.constants import SCRAPE_ACTIVE_SOURCES_ENV_VAR
+from app.scrape_control.constants import (
+    SCRAPE_ACTIVE_SOURCES_ENV_VAR,
+    SCRAPE_RUN_ID_ENV_VAR,
+)
 from app.scraper.attachment_downloader import scrape_attachments_for_announcement
 from app.scraper.base import BaseSourceAdapter
 from app.scraper.registry import get_adapter
@@ -1026,15 +1030,19 @@ async def _async_main() -> int:
     Phase 2(00025) 이후 동작:
         - SIGTERM handler 를 등록해 중단 요청 시 현재 공고 마무리 후 정상 종료.
         - SCRAPE_ACTIVE_SOURCES 환경변수가 있으면 active_sources 를 덮어쓴다.
-        - 실행 전 running row 가 있으면 거부하고 exit(2).
-        - ScrapeRun row 를 trigger='cli' 로 INSERT 하고 자기 pid 를 기록한다.
+        - SCRAPE_RUN_ID 환경변수가 주어지면(웹/스케줄러가 이미 INSERT 한 running
+          row 를 이어받는 경로) 자체 create_scrape_run 을 건너뛰고 해당 id 를
+          재사용한다. 주입된 id 가 무효(없음/terminal)면 exit(2).
+        - SCRAPE_RUN_ID 가 없으면(순수 CLI 직접 실행) 기존과 동일하게 running
+          row 가 있으면 거부하고 exit(2), 없으면 trigger='cli' 로 row INSERT +
+          자기 pid 기록.
         - 정상/실패/부분/중단 판정 후 finalize_scrape_run 으로 마감.
 
     Returns:
         프로세스 종료 코드.
         - 0: completed/partial/cancelled (수집 자체는 정상 흐름으로 마무리된 경우)
         - 1: 부트스트랩 실패 또는 전역 예외
-        - 2: lock 충돌 (이미 다른 수집이 실행 중)
+        - 2: lock 충돌 (이미 다른 수집이 실행 중) 또는 SCRAPE_RUN_ID 무효 주입
     """
     sources_cfg = load_sources_config()
     scrape_config = _apply_active_sources_override(sources_cfg.scrape)
@@ -1083,33 +1091,93 @@ async def _async_main() -> int:
         return 1
 
     scrape_run_id: Optional[int] = None
-    try:
-        with session_scope() as session:
-            existing_running = get_running_scrape_run(session)
-            if existing_running is not None:
-                logger.error(
-                    "이미 다른 수집이 진행 중입니다 (ScrapeRun id={} trigger={!r} "
-                    "pid={}). 이번 CLI 실행은 거부됩니다.",
-                    existing_running.id,
-                    existing_running.trigger,
-                    existing_running.pid,
-                )
-                return 2
-            scrape_run_row = create_scrape_run(
-                session,
-                trigger="cli",
-                source_counts={"active_sources": list(scrape_config.active_sources)},
+
+    # ── 웹/스케줄러가 주입한 SCRAPE_RUN_ID 이어받기 (task 00034) ────────────────
+    # 웹/스케줄러 경로는 start_scrape_run 이 이미 create_scrape_run 으로 running
+    # row 를 INSERT 한 뒤 subprocess 를 기동한다. 이 env 가 주입됐는데 CLI 가
+    # 기존 로직대로 get_running_scrape_run → create_scrape_run 을 수행하면
+    #  (1) 방금 웹이 만든 row 를 '기존 실행' 으로 오판해 exit 2 하거나
+    #  (2) running row 가 2 개가 되어 lock 의 의미가 깨진다.
+    # 따라서 env 로 소유권을 이어받는 경우 새 row 를 만들지 않고 해당 row 를
+    # 그대로 finalize 단계까지 사용한다.
+    raw_run_id_env = os.environ.get(SCRAPE_RUN_ID_ENV_VAR, "").strip()
+    candidate_run_id: Optional[int] = None
+    if raw_run_id_env:
+        try:
+            candidate_run_id = int(raw_run_id_env)
+        except ValueError:
+            # guidance: 비어있거나 int() 실패면 기존 CLI 경로로 fallthrough.
+            # 경고만 남기고 아래 기존 경로로 진입한다.
+            logger.warning(
+                "{} 환경변수가 정수가 아니므로 이어받기를 포기하고 기존 CLI 경로로 진행: "
+                "value={!r}",
+                SCRAPE_RUN_ID_ENV_VAR, raw_run_id_env,
             )
-            scrape_run_id = scrape_run_row.id
-            # CLI 는 자신의 pid 를 기록한다. stale cleanup 이 pid 존재 여부를
-            # 확인하므로, 비정상 종료 후 재기동 시 정확히 정리된다.
-            set_scrape_run_pid(session, scrape_run_id, os.getpid())
-    except Exception as exc:
-        logger.exception(
-            "ScrapeRun 생성 실패 — DB 문제를 먼저 해결하세요. ({}: {})",
-            type(exc).__name__, exc,
-        )
-        return 1
+            candidate_run_id = None
+    if candidate_run_id is not None:
+        try:
+            with session_scope() as session:
+                owned_row = session.get(ScrapeRun, candidate_run_id)
+                if owned_row is None or owned_row.status != "running":
+                    status_repr = (
+                        owned_row.status if owned_row is not None else "(missing)"
+                    )
+                    logger.error(
+                        "{}={} 로 지정된 ScrapeRun 을 이어받을 수 없습니다 "
+                        "(status={}). 이번 실행을 거부합니다.",
+                        SCRAPE_RUN_ID_ENV_VAR, candidate_run_id, status_repr,
+                    )
+                    return 2
+                # runner.py 가 기록한 pid 는 호스트 docker CLI 프로세스 pid 다.
+                # 여기서 self pid 로 덮어쓰면 app 컨테이너 내부 PID 이므로
+                # 호스트 관점의 kill -0 검사는 무의미해진다. 다만
+                # cleanup_stale_running_runs 은 subprocess 가 살아있는 동안
+                # 개입하지 않고 watcher 스레드가 종료 후 finalize 하는 설계
+                # 이므로 실용상 문제 없다. CLI 직접 실행 경로와의 일관성
+                # (자기 pid 기록) 을 맞추기 위해 덮어쓴다.
+                set_scrape_run_pid(session, candidate_run_id, os.getpid())
+                scrape_run_id = candidate_run_id
+                logger.info(
+                    "웹 기반 실행에 의해 ScrapeRun id={} 을(를) 이어받음 "
+                    "(trigger={!r}). CLI 자체 create_scrape_run 은 건너뜁니다.",
+                    candidate_run_id, owned_row.trigger,
+                )
+        except Exception as exc:
+            logger.exception(
+                "ScrapeRun 이어받기 실패 — ScrapeRun id={} ({}: {})",
+                candidate_run_id, type(exc).__name__, exc,
+            )
+            return 1
+
+    # env 로 이어받지 못한 경우에만 기존 CLI 경로(자체 create_scrape_run) 수행.
+    if scrape_run_id is None:
+        try:
+            with session_scope() as session:
+                existing_running = get_running_scrape_run(session)
+                if existing_running is not None:
+                    logger.error(
+                        "이미 다른 수집이 진행 중입니다 (ScrapeRun id={} trigger={!r} "
+                        "pid={}). 이번 CLI 실행은 거부됩니다.",
+                        existing_running.id,
+                        existing_running.trigger,
+                        existing_running.pid,
+                    )
+                    return 2
+                scrape_run_row = create_scrape_run(
+                    session,
+                    trigger="cli",
+                    source_counts={"active_sources": list(scrape_config.active_sources)},
+                )
+                scrape_run_id = scrape_run_row.id
+                # CLI 는 자신의 pid 를 기록한다. stale cleanup 이 pid 존재 여부를
+                # 확인하므로, 비정상 종료 후 재기동 시 정확히 정리된다.
+                set_scrape_run_pid(session, scrape_run_id, os.getpid())
+        except Exception as exc:
+            logger.exception(
+                "ScrapeRun 생성 실패 — DB 문제를 먼저 해결하세요. ({}: {})",
+                type(exc).__name__, exc,
+            )
+            return 1
 
     # ── 실행 + finalize 보장 ────────────────────────────────────────────────
     summary: Optional[dict[str, Any]] = None
