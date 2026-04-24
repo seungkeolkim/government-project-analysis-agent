@@ -955,11 +955,15 @@ class FavoriteFolder(Base):
         ForeignKey(
             "favorite_folders.id",
             name="fk_favorite_folders_parent_id",
-            ondelete="SET NULL",
+            ondelete="CASCADE",
         ),
         nullable=True,
         index=True,
-        doc="부모 폴더 PK. NULL 이면 루트(depth=0).",
+        doc=(
+            "부모 폴더 PK. NULL 이면 루트(depth=0). task 00037 부터 ondelete=CASCADE — "
+            "부모 폴더가 삭제되면 자식 폴더(그리고 그 하위 FavoriteEntry) 도 DB "
+            "레벨에서 연쇄 삭제된다 (이전의 SET NULL \"격상\" 동작 폐기)."
+        ),
     )
 
     name: Mapped[str] = mapped_column(
@@ -1004,10 +1008,16 @@ class FavoriteFolder(Base):
         back_populates="children",
         foreign_keys=lambda: [FavoriteFolder.parent_id],
     )
+    # task 00037 — 부모 폴더 삭제 시 자식 폴더도 ORM 레벨로 cascade 삭제한다.
+    # FK ondelete=CASCADE 와 의미를 맞추되 SQLite 의 PRAGMA foreign_keys 설정
+    # 여부와 무관하게 ORM 경로(session.delete) 로도 재귀 삭제가 보장되게 한다.
+    # delete-orphan 은 쓰지 않는다 — 자식을 루트로 '이동'(parent_id=None) 하는
+    # 정당한 UX 가 존재하므로 detach 만으로 삭제하면 안 되기 때문이다.
     children: Mapped[list[FavoriteFolder]] = relationship(
         "FavoriteFolder",
         back_populates="parent",
         foreign_keys=lambda: [FavoriteFolder.parent_id],
+        cascade="all, delete",
     )
     entries: Mapped[list[FavoriteEntry]] = relationship(
         "FavoriteEntry",
@@ -1102,13 +1112,19 @@ def _favorite_folder_before_update(
 
 
 class FavoriteEntry(Base):
-    """즐겨찾기 항목. canonical 단위로 저장하므로 IRIS/NTIS cross-source 중복이 없다.
+    """즐겨찾기 항목. task 00037 부터 announcement 단위로 저장한다.
 
-    Phase 1a migration (§7) 에서 DDL 이 이미 생성되어 있다. 이 클래스는 그 테이블에
-    ORM 을 얹는다.
+    00036 에서 확정되었던 canonical 단위 저장 설계는 task 00037 에서 공식 폐기되었다.
+    사용자 원문 요구 — "별표를 누른 그 공고가 반드시 등록됨 / 동일 과제 여러 공고가
+    즐겨찾기에 모두 보여야 함" — 를 충족하기 위해 FK 를 ``announcement_id`` 로 전환
+    하고, "동일 과제 모두 저장" 은 라디오 버튼으로 canonical_group 의 모든
+    is_current announcement 을 일괄 등록하여 구현한다.
 
-    UNIQUE(folder_id, canonical_project_id) 로 동일 폴더에 같은 canonical 중복 금지.
-    폴더 삭제(folder_id FK CASCADE) 또는 canonical 삭제(canonical_project_id FK CASCADE)
+    스키마 변경은 ``20260424_0900_c4a8d1e7b2f3_favorites_announcement_unit_cascade.py``
+    migration 에서 수행되었다. 이 클래스는 그 신규 스키마에 ORM 을 얹는다.
+
+    UNIQUE(folder_id, announcement_id) 로 동일 폴더에 같은 공고 중복 등록 금지.
+    폴더 삭제(folder_id FK CASCADE) 또는 announcement 삭제(announcement_id FK CASCADE)
     시 항목도 연쇄 삭제된다.
     """
 
@@ -1127,16 +1143,16 @@ class FavoriteEntry(Base):
         doc="소속 폴더 PK.",
     )
 
-    canonical_project_id: Mapped[int] = mapped_column(
+    announcement_id: Mapped[int] = mapped_column(
         Integer,
         ForeignKey(
-            "canonical_projects.id",
-            name="fk_favorite_entries_canonical_project_id",
+            "announcements.id",
+            name="fk_favorite_entries_announcement_id",
             ondelete="CASCADE",
         ),
         nullable=False,
         index=True,
-        doc="즐겨찾기한 canonical 과제 PK.",
+        doc="즐겨찾기한 공고 PK. announcements.id 를 직접 가리킨다.",
     )
 
     added_at: Mapped[datetime] = mapped_column(
@@ -1150,13 +1166,13 @@ class FavoriteEntry(Base):
         "FavoriteFolder",
         back_populates="entries",
     )
-    canonical_project: Mapped[CanonicalProject] = relationship("CanonicalProject")
+    announcement: Mapped[Announcement] = relationship("Announcement")
 
     __table_args__ = (
         UniqueConstraint(
             "folder_id",
-            "canonical_project_id",
-            name="uq_favorite_entries_folder_canonical",
+            "announcement_id",
+            name="uq_favorite_entries_folder_announcement",
         ),
     )
 
@@ -1164,7 +1180,7 @@ class FavoriteEntry(Base):
         """디버깅 편의용 문자열 표현을 반환한다."""
         return (
             f"<FavoriteEntry id={self.id} folder_id={self.folder_id} "
-            f"canonical_project_id={self.canonical_project_id}>"
+            f"announcement_id={self.announcement_id}>"
         )
 
 
