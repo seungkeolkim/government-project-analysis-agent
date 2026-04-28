@@ -995,10 +995,24 @@ apply 또는 snapshot 단계에서 의도적으로 예외를 raise 했을 때:
   트랜잭션으로 비우는** 후처리(`finalize_scrape_run` 의 후속 또는 startup
   cleanup) 를 추가한다. 이로써 검증 2 의 "delta 비워짐" 이 보장된다.
 - 본 권장은 §12.3 의 재시도 친화성과 충돌한다 (cancel 의 delta 를 비우면
-  재시도 불가). 따라서 **명확한 분기**:
-  - `status='cancelled'` → delta 비움 (사용자가 의도적으로 중단).
-  - `status='failed'` (apply 트랜잭션 자체 실패) → delta 보존 (재시도 가능).
-- 이 분기는 00041-3 의 구현 시점에 확정한다 (본 문서는 권장안만 제시).
+  재시도 불가). 따라서 **명확한 분기 (00041-3 에서 확정)**:
+  - **`cancelled` (SIGTERM)**: apply 단계 자체를 건너뛰고, 별도 트랜잭션으로
+    delta 만 비운다. 본 테이블 / snapshot 변화 없음. 검증 2 만족.
+  - **`completed` / `partial`**: 단일 트랜잭션 안에서 apply (4-branch + 2차
+    감지 + reset) → snapshot UPSERT (00041-4) → delta DELETE 를 모두 수행.
+    트랜잭션 commit 시 모두 영구화된다. 검증 1·3·4·5·6·7·9 만족.
+  - **`failed` (apply 트랜잭션 자체 실패 — verification 11)**: SQLAlchemy
+    auto-rollback 으로 본 테이블 / snapshot / delta 모두 원상복구. delta 가
+    보존되므로 다음 ScrapeRun 또는 운영자 수동 재시도가 가능. **이 분기에
+    서는 추가 clear 를 호출하지 않는다.**
+  - **`failed` (orchestrator/수집-단계 예외 — apply 도달 전)**: 별도 트랜잭션
+    으로 delta 만 비운다 (수집 자체가 깨졌으므로 delta 가 incomplete →
+    apply 안전성 없음 → clear 가 깨끗). 운영자는 다음 ScrapeRun 으로 재
+    수집한다.
+- 즉 "delta 보존" 은 verification 11 의 좁은 시나리오 (apply 트랜잭션 안에서
+  의도적/실수로 raise) 에만 해당하고, cancelled / orchestrator-failed 에서는
+  delta 가 비워진다. 이 두 분기는 finalize 단계에서 별도 트랜잭션으로
+  처리되므로 SQLAlchemy auto-rollback 의 영향권 밖이다.
 
 ---
 
