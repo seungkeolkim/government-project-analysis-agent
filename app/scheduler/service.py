@@ -35,6 +35,10 @@ from app.scheduler.constants import (
     SCHEDULER_JOBS_TABLENAME,
 )
 from app.scheduler.job_runner import scheduled_scrape
+# task 00040-4 — APScheduler 의 글로벌/트리거 timezone 을 Asia/Seoul 로 통일.
+# ``app.timezone`` 이 KST 의 단일 진실 소스이므로 직접 ``ZoneInfo("Asia/Seoul")``
+# 을 만들지 않고 그곳의 상수를 가져온다.
+from app.timezone import KST
 
 # ──────────────────────────────────────────────────────────────
 # 예외
@@ -112,7 +116,10 @@ def _build_scheduler() -> Any:
             "max_instances": 1,
             "misfire_grace_time": DEFAULT_MISFIRE_GRACE_TIME_SEC,
         },
-        timezone=timezone.utc,
+        # task 00040-4 — 사용자 원문 결정 'APScheduler cron: Asia/Seoul.
+        # cron 30 9 * * * = KST 09:30'. 호스트 컨테이너의 TZ env 와 무관하게
+        # 명시적 KST 로 평가되도록 ``app.timezone.KST`` 를 그대로 넣는다.
+        timezone=KST,
     )
     return scheduler
 
@@ -134,20 +141,151 @@ def is_scheduler_running() -> bool:
         return bool(getattr(_scheduler, "running", False))
 
 
+def _reinterpret_existing_jobs_to_kst(scheduler: Any) -> int:
+    """jobstore 에 남아 있는 기존 잡의 trigger timezone 을 KST 로 재해석한다.
+
+    배경 (사용자 원문 task 00040 + 00040-4 guidance):
+        APScheduler 의 ``BackgroundScheduler.timezone`` 을 본 task 에서 UTC →
+        KST 로 변경했다. ``SQLAlchemyJobStore`` 에 직렬화돼 있던 기존 잡들은
+        예전 timezone(UTC) 정보를 담은 trigger 를 그대로 들고 있어, 그대로 두면
+        \"저장 당시 UTC 09:30 = 현재 의도 KST 18:30\" 처럼 9시간 어긋난 시각에
+        실행된다. 본 헬퍼는 trigger.timezone 이 KST 가 아닌 잡을 찾아 같은
+        cron 표현식 / interval 시간으로 KST 기반 trigger 를 재구성하고
+        ``modify_job(trigger=...)`` 로 교체한다. 새 ``next_run_time`` 은
+        APScheduler 가 자동 재계산한다.
+
+    구현 결정 (guidance 의 옵션 (a) 자동 detect + reschedule 채택):
+        - cron 잡: ``Job.name`` 에 ``JOB_NAME_CRON_PREFIX`` + cron 표현식이 그대로
+          저장돼 있다 (``_job_name_for``). 그 표현식을 다시
+          ``CronTrigger.from_crontab(..., timezone=KST)`` 로 파싱해 새 trigger
+          를 만든다.
+        - interval 잡: ``trigger.interval`` (timedelta) 에서 시간을 복원하고
+          ``IntervalTrigger(hours=..., timezone=KST)`` 로 재생성한다. 시간
+          단위로 떨어지지 않는 비표준 interval 은 ``seconds=`` 로 저장한다.
+        - Job.name 에 spec 이 없거나 파싱이 실패한 잡, cron/interval 외 trigger
+          는 건너뛰고 경고 로그만 남긴다 — 운영자가 수동 재등록해야 함을 알린다.
+        - 자동 detect 를 권장한 이유: 운영자가 재기동 직후에 admin/schedule 탭
+          을 열기 전까지 \"잘못된 시각에 잡이 실행될\" 위험을 코드 자체로 차단.
+          코드 복잡도는 spec 파싱 한 번으로 제한적이다.
+
+    ``modify_job(trigger=...)`` 가 아니라 ``reschedule_job(trigger=...)`` 를 쓰는
+    이유: 전자는 trigger 객체만 교체하고 ``next_run_time`` 은 옛 값을 유지한다.
+    후자는 새 trigger 의 ``get_next_fire_time`` 으로 ``next_run_time`` 까지 재
+    계산하므로 본 헬퍼의 의도(\"KST 기준으로 다음 실행 시각을 다시 계산\") 에
+    부합한다.
+
+    Args:
+        scheduler: 이미 ``start()`` 된 BackgroundScheduler. ``modify_job`` 호출이
+            가능해야 한다.
+
+    Returns:
+        실제로 재해석되어 trigger 가 교체된 잡의 개수. 등록 잡이 0건이거나
+        모두 이미 KST 면 0.
+    """
+    # apscheduler 모듈은 lazy import (호환성 문제를 런타임에만 노출).
+    from apscheduler.triggers.cron import CronTrigger
+    from apscheduler.triggers.interval import IntervalTrigger
+
+    reinterpreted_count = 0
+    for job in scheduler.get_jobs():
+        old_trigger = job.trigger
+        old_timezone = getattr(old_trigger, "timezone", None)
+        # ZoneInfo 비교 — 같은 키('Asia/Seoul')라면 ``==`` 가 True.
+        if old_timezone == KST:
+            continue
+
+        if isinstance(old_trigger, CronTrigger):
+            # Job.name 의 'cron-spec:0 3 * * *' prefix 를 벗겨 원본 cron 표현식 복원.
+            if isinstance(job.name, str) and job.name.startswith(JOB_NAME_CRON_PREFIX):
+                cron_expression = job.name[len(JOB_NAME_CRON_PREFIX):]
+            else:
+                logger.warning(
+                    "tz 재해석 스킵 — cron job.name 파싱 실패: job_id={} name={!r}",
+                    job.id, job.name,
+                )
+                continue
+            try:
+                new_trigger = CronTrigger.from_crontab(cron_expression, timezone=KST)
+            except Exception as exc:
+                logger.warning(
+                    "tz 재해석 스킵 — cron 표현식 재파싱 실패: job_id={} expr={!r} err={}",
+                    job.id, cron_expression, exc,
+                )
+                continue
+        elif isinstance(old_trigger, IntervalTrigger):
+            interval = old_trigger.interval
+            total_seconds = int(interval.total_seconds())
+            # 시간 단위로 떨어지면 hours=, 아니면 seconds= 로 저장한다.
+            if total_seconds > 0 and total_seconds % 3600 == 0:
+                new_trigger = IntervalTrigger(
+                    hours=total_seconds // 3600, timezone=KST
+                )
+            else:
+                new_trigger = IntervalTrigger(seconds=total_seconds, timezone=KST)
+        else:
+            logger.warning(
+                "tz 재해석 스킵 — 지원하지 않는 trigger 종류: job_id={} trigger={!r}",
+                job.id, type(old_trigger).__name__,
+            )
+            continue
+
+        try:
+            # reschedule_job 은 trigger 교체 + next_run_time 재계산을 함께 수행.
+            # modify_job 은 trigger 만 갈고 next_run_time 은 옛 값 유지라 부적합.
+            scheduler.reschedule_job(job.id, trigger=new_trigger)
+        except Exception as exc:
+            logger.warning(
+                "tz 재해석 실패(reschedule_job 예외): job_id={} err={}",
+                job.id, exc,
+            )
+            continue
+
+        reinterpreted_count += 1
+        # 재계산된 next_run_time 도 함께 노출해 운영자가 의도된 KST 시각인지
+        # docker logs 에서 즉시 확인할 수 있도록 한다.
+        updated = scheduler.get_job(job.id)
+        logger.info(
+            "tz 재해석 완료: job_id={} old_tz={} new_tz=KST next_run_time={}",
+            job.id, old_timezone, getattr(updated, "next_run_time", None),
+        )
+
+    return reinterpreted_count
+
+
 def start() -> None:
     """스케줄러를 기동한다. 이미 running 이면 no-op (멱등).
 
     웹 startup 시점에 ``create_app`` 이 호출한다. 스케줄러가 혼자 떠서 잡을
     감시·실행하고, 실제 스크래퍼 기동은 job_runner.scheduled_scrape 를 통한다.
+
+    task 00040-4 — start 직후 jobstore 의 기존 잡을 KST 기준으로 재해석한다
+    (``_reinterpret_existing_jobs_to_kst`` 참조). 등록 잡이 0건이면 no-op.
     """
     scheduler = _get_or_build_scheduler()
     if scheduler.running:
         return
     scheduler.start()
     logger.info(
-        "APScheduler 기동: tablename={} misfire_grace_time={}s max_instances=1 coalesce=True",
+        "APScheduler 기동: tablename={} misfire_grace_time={}s max_instances=1 coalesce=True timezone=KST",
         SCHEDULER_JOBS_TABLENAME, DEFAULT_MISFIRE_GRACE_TIME_SEC,
     )
+
+    # jobstore 의 기존 잡 trigger 를 KST 기준으로 자동 재해석.
+    try:
+        reinterpreted = _reinterpret_existing_jobs_to_kst(scheduler)
+    except Exception as exc:
+        # 재해석 실패가 스케줄러 기동 자체를 망가뜨리지 않도록 방어. 운영자는
+        # admin/schedule 탭의 next_run_time 을 보고 수동 재등록할 수 있다.
+        logger.exception(
+            "APScheduler tz 재해석 실패(스킵): {}: {}",
+            type(exc).__name__, exc,
+        )
+        reinterpreted = 0
+    if reinterpreted:
+        logger.info(
+            "APScheduler tz 재해석: {}건의 기존 잡을 KST 기준으로 재계산",
+            reinterpreted,
+        )
 
 
 def stop(*, wait: bool = False) -> None:
@@ -300,7 +438,10 @@ def add_cron_schedule(
     from apscheduler.triggers.cron import CronTrigger
 
     try:
-        trigger = CronTrigger.from_crontab(cron_expression, timezone=timezone.utc)
+        # task 00040-4 — cron 표현식은 KST 기준으로 파싱한다. APScheduler 는
+        # 새 잡의 다음 실행 시각을 trigger.timezone 과 scheduler.timezone 양쪽을
+        # 종합해 계산하므로 trigger 자체에 KST 를 명시해 둔다.
+        trigger = CronTrigger.from_crontab(cron_expression, timezone=KST)
     except Exception as exc:
         # from_crontab 은 잘못된 표현식에 대해 ValueError 또는 다른 예외를 던진다.
         raise ScheduleValidationError(
@@ -359,7 +500,8 @@ def add_interval_schedule(
 
     from apscheduler.triggers.interval import IntervalTrigger
 
-    trigger = IntervalTrigger(hours=hours, timezone=timezone.utc)
+    # task 00040-4 — interval trigger 도 시작 기준 시각을 KST 로 정렬한다.
+    trigger = IntervalTrigger(hours=hours, timezone=KST)
     scheduler = _require_running_scheduler()
     job_id = _make_job_id(JOB_ID_PREFIX_INTERVAL)
     spec = f"매 {hours}시간"
