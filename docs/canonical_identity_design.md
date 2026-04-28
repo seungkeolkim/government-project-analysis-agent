@@ -158,34 +158,58 @@ IRIS (원본) ←── NTIS 통합공고 ("IRIS 바로가기 ▶")
 
 ### 4-1. 공식 키 (official scheme)
 
-공고번호(`ancmNo`)가 있으면 정규화 후 `official:` prefix를 붙여 canonical_key로 사용한다.
+공고번호(`ancmNo`)가 있으면 (정규화된 공고번호) + `::` + (정규화된 공고명) 의 **합성 키**에
+`official:` prefix를 붙여 canonical_key로 사용한다.
 
 ```
-canonical_key = f"official:{normalized_ancm_no}"
-예) "official:과학기술정보통신부공고제2026-0455호"
+canonical_key = f"official:{normalized_ancm_no}::{normalized_title}"
+예) "official:산업통상부공고제2026-300호::2026년도제조암묵지기반AI모델개발사업신규지원대상과제공고"
 ```
 
-**source_prefix 정책 결정 (NTIS 탐사 반영)**
+> **이력**: 00013 에서 도입한 초기 포맷은 `f"official:{normalized_ancm_no}"` 단독 키였으나,
+> 동일 공고번호 아래 별개 세부 공고가 게시되는 false-positive 가 관찰되어 (분석:
+> `docs/duplicate_detection_analysis.md`) task 00039 에서 합성 키로 변경되었다 (2026-04-28).
+> §11-6 후속 감사 결과 참조.
+
+**source_prefix 정책 (NTIS 탐사 반영)**
 
 IRIS와 NTIS가 동일한 공고번호를 공유함이 확인되었다 (§3-3). 따라서:
 - 공고번호에 이미 부처명이 포함되어 있어 `IRIS:` / `NTIS:` 소스 prefix는 불필요.
 - 대신 `official:` prefix로 소스 무관하게 통일한다.
 - IRIS에서 `ancmNo` 필드로 직접 추출하거나, NTIS 상세 본문 파싱으로 추출한 번호를 동일 정규화 후 같은 키로 매핑.
 
-**`ancmNo` 정규화 규칙**
-1. 모든 공백 제거
-2. 전각 문자 → 반각 변환
-3. 구분자 통일: ` - `, `－`, `–` → `-`
-4. 소문자 통일 (한글은 해당 없음)
-5. 접두어 패턴 제거 불필요 (부처명이 canonical 판별에 유효 정보이므로 유지)
+**`ancmNo` 정규화 규칙** (`app/canonical.py: _normalize_official_key`)
+1. NFKC 유니코드 정규화 (전각/반각, `\xa0`, en-dash 등 흡수)
+2. 모든 공백 문자 제거
+3. 접두어 패턴 제거 불필요 (부처명이 canonical 판별에 유효 정보이므로 유지)
+
+**`title` 정규화 규칙** (`app/canonical.py: _normalize_official_title`, 신규)
+1. NFKC 유니코드 정규화
+2. **NTIS suffix 절단**: `\s*_\([0-9]{4}\).*$` — NTIS 통합공고가 제목 말미에 부착하는
+   `_(YYYY)<사업명>` 패턴 제거. leading `\s*` 매칭이 필요하므로 NFKC 직후·공백 제거 이전
+   단계에 적용한다.
+3. 모든 공백 문자 제거 (leading/trailing whitespace + 단어 사이 공백 변이 흡수)
+4. 길이 제한 미적용 — 정확일치 비교가 전제이므로 truncation 불필요
+
+**구분자 `::` 사용 근거**
+
+ancmNo 정규화 결과는 단일 콜론 `:` 을 포함하지 않으므로(부처명-`공고`-`제`-숫자-`호` 패턴),
+`::` 가 ancmNo 본문과 충돌 없이 안전한 구분자로 동작한다. 분석 §8-2 명시.
 
 **예시 정규화**
 
-| 원문 | 정규화 결과 |
-|------|------------|
+| 원문 ancm_no | 정규화 ancm_no |
+|--------------|----------------|
 | `'과학기술정보통신부 공고 제 2026-0455 호'` | `'과학기술정보통신부공고제2026-0455호'` |
 | `'과학기술정보통신부 공고 제 2026 - 0411호'` | `'과학기술정보통신부공고제2026-0411호'` |
 | `'산업통상부 공고 제2026-298호'` | `'산업통상부공고제2026-298호'` |
+| `'과학기술정보통신부 공고 제2026\xa0–\xa00484호'` | `'과학기술정보통신부공고제2026-0484호'` |
+
+| 원문 title (NTIS suffix 케이스) | 정규화 title |
+|---------------------------------|--------------|
+| `'2026년도 대형가속기 … 신규과제 재공모 _(2026)2026년도 대형가속기정책센터 신규과제 재공모'` | `'2026년도대형가속기…신규과제재공모'` (suffix 절단 + 공백 제거) |
+| `'2026년도 대형가속기 … 신규과제 재공모 '` (IRIS, trailing space) | `'2026년도대형가속기…신규과제재공모'` (suffix 미해당, 공백 제거) |
+| `' 2026년도 AI반도체…'` (IRIS, leading space) | `'2026년도AI반도체…'` |
 
 ### 4-2. fuzzy 키 (fuzzy scheme, fallback)
 
@@ -205,7 +229,11 @@ canonical_key = f"fuzzy:{normalized_title}:{normalized_agency}:{deadline_year}"
 ```python
 if ancm_no and ancm_no.strip():
     scheme = "official"
-    canonical_key = f"official:{normalize_ancm_no(ancm_no)}"
+    # 00039 (2026-04-28) 부터 합성 키 사용. 동일 ancmNo 아래 별개 세부 공고가
+    # 게시되는 false-positive 를 분리하기 위함.
+    canonical_key = (
+        f"official:{normalize_ancm_no(ancm_no)}::{normalize_official_title(title)}"
+    )
 else:
     scheme = "fuzzy"
     canonical_key = f"fuzzy:{normalize_title(title)}:{normalize_agency(agency)}:{deadline_year}"
@@ -316,7 +344,9 @@ ALTER TABLE announcements
 
 ### 00013 에서 확정된 사항
 
-- ✅ 같은 `ancmNo` → 같은 canonical group. `ancmId`별 row는 `announcements`에 유지. (`official:` scheme)
+- ⚠ **(2026-04-28 갱신)** ~~같은 `ancmNo` → 같은 canonical group~~ — task 00039 에서 동일
+  ancmNo + 동일 정규화 title 조합으로 변경됨 (§4-1 / §11-6 참조). `ancmId` 별 row 는
+  `announcements` 에 유지하는 원칙 자체는 그대로.
 - ✅ `ancmNo` 정규화: NFKC + 공백 전체 제거 (`app/canonical.py: _normalize_official_key`)
 - ✅ fuzzy fallback: 제목 정규화 50자 + 기관 정규화 + 마감연도 조합 (`fuzzy:` scheme)
 - ✅ NTIS `source_announcement_id` = `roRndUid` (URL PK로 명확)
@@ -370,12 +400,15 @@ ALTER TABLE announcements
 ### canonical_key 포맷
 
 ```
-official:{NFKC + 공백제거(ancmNo)}
-예) "official:과학기술정보통신부공고제2026-0455호"
+official:{NFKC + 공백제거(ancmNo)}::{NFKC + NTIS suffix 절단 + 공백제거(title)}
+예) "official:산업통상부공고제2026-300호::2026년도제조암묵지기반AI모델개발사업신규지원대상과제공고"
 
 fuzzy:{제목정규화50자}:{기관정규화}:{마감연도}
 예) "fuzzy:2026년바이오과제공고:생명공학연구원:2026"
 ```
+
+> **00039 (2026-04-28) 변경**: official scheme 가 ancmNo 단독에서 (ancmNo + title) 합성으로
+> 전환. fuzzy 분기는 변경 없음. §4-1 / §11-6 참조.
 
 ### IRIS 단독 검증 시나리오 (scripts/verify_canonical_iris.py)
 
@@ -543,7 +576,62 @@ TODO split: canonical_group_id=32 (ann 33+34)
         재수집 시 알고리즘이 다시 묶을 수 있으므로 알고리즘 수준 수정이 선행되어야 안전
 ```
 
+> **2026-04-28 갱신**: 본 §11-4 TODO 가 요구한 "알고리즘 수준 수정" 이 task 00039 에서
+> 합성 키 도입으로 자동 해소되었다. canonical_overrides split 수동 적용 불요.
+> 상세: §11-6.
+
 ### 11-5. fuzzy false-positive 상황
 
 감사 시점 현재 fuzzy scheme 다중 그룹은 0건. fuzzy false-positive 미관찰.
 데이터 증가 후 재감사 시 `scripts/audit_canonical_false_positives.py` 재실행.
+
+### 11-6. 00039 후속 감사 — 합성 키 도입 후 (2026-04-28 시점)
+
+> 감사 일시: 2026-04-28. 검증 캡처: [`docs/00039-3-verification.md`](00039-3-verification.md).
+> 분석 근거: [`docs/duplicate_detection_analysis.md`](duplicate_detection_analysis.md).
+
+DB 초기화 후 신규 합성 키(`official:{ancmNo}::{title}`) 로 IRIS+NTIS 1 페이지씩
+재수집(52건) 한 결과:
+
+| 항목 | 00036-2 시점 (구 키) | 00038 분석 시점 | 00039-3 시점 (신 키) | 00038 §8-4 예측 |
+|------|----------------------|------------------|------------------------|------------------|
+| canonical_projects rows | 62 | 52 | **56** | 52 → 56 (+4) ✓ |
+| 다중(2건+) 그룹 | 7 | 7 | **5** | 7 - 2 (split) = 5 ✓ |
+| 최대 그룹 크기 | 2 | 4 | **2** | 4 → 2 ✓ |
+| official 그룹 내 false-positive | 1 (group 32) | 2 (group 5, 25) | **0** | 0 ✓ |
+
+**11-2 의 알려진 false-positive (group 32, ann 33+34) 처리**: 본 시점 데이터셋(00039-3
+재수집) 에는 동일 ancmNo `과학기술정보통신부공고제2026-0408호` 가 다시 등장하지
+않았으므로 직접 재현은 불가. 다만 동일 패턴(같은 ancmNo + 다른 세부과제 title) 이
+다시 들어와도 합성 키가 자동 분리한다. **알고리즘 수준 해소 완료.**
+
+**00038 분석 시점 false-positive 2건 (group 5, group 25) 처리**: 합성 키 하에서 모두
+분리됨.
+
+| 분석 시 group | ancmNo | 분석 시 size | 신 키 적용 후 |
+|---------------|--------|--------------|----------------|
+| group 5 (5극3특 딥테크 sub-task 2건) | 과학기술정보통신부공고제2026-0498호 | 2 | **2 그룹 (각 1건)** |
+| group 25 (강원 sub-task 4건) | 과학기술정보통신부공고제2026-0362호 | 4 | **4 그룹 (각 1건)** |
+
+**Cross-source 정상 묶음**: 5건 모두 그대로 유지됨.
+
+| 신 canonical_key | 매칭 유형 |
+|------------------|-----------|
+| `official:과학기술정보통신부공고제2026-0485호::2026년도대형가속기…` | NTIS suffix `_(2026)2026년도 대형가속기정책센…` 절단으로 매칭 |
+| `official:과학기술정보통신부공고제2026-0484호::2026년도가속기핵심기술개발사업신규과제재공모` | 정확일치 (IRIS+NTIS) |
+| `official:산업통상부공고제2026-300호::2026년도제조암묵지기반AI모델개발사업신규지원대상과제공고` | 정확일치 (사용자 제시 정상 사례 — 분석 §1-1) |
+| `official:과학기술정보통신부공고제2026-0455호::2026년도한-스페인공동연구사업신규과제공모` | 정확일치 |
+| `official:과학기술정보통신부공고제2026-0444호::2026년도AI반도체를활용한K-클라우드기술개발사업신규지원대상과제공고` | IRIS leading whitespace 정규화로 매칭 |
+
+**fuzzy scheme**: 다중 그룹 0건 유지. fuzzy false-positive 미관찰.
+
+**알려진 trade-off (분석 §8-5)**: 같은 ancmNo 의 재공고에서 공고명이 부분 변경되면
+새 그룹이 생성된다. 이는 의도된 동작이며, 운영 중 "재공고 시 제목 사소 변경" 이 다수
+관찰되면 별도 보정(canonical_overrides merge 또는 정규화 추가)으로 처리.
+
+**verify 스크립트 회귀**:
+- `scripts/verify_canonical_cross_source.py`: PASS=15 / FAIL=0 (E/F/G/H 전 시나리오 통과).
+- `scripts/verify_canonical_iris.py`: PASS=16 / FAIL=2 — scenario B 의 fixture 가 구
+  contract(같은 ancmNo + 다른 title 도 같은 그룹) 를 인코딩하고 있어 발생한 회귀.
+  분석 §8-5 의 의도된 동작 변경에 해당. 후속 작업으로 fixture 의 두 title 을 동일하게
+  맞추거나 별도 시나리오 추가가 필요 (본 task 범위 밖).

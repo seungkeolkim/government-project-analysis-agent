@@ -139,6 +139,14 @@ TODO split: canonical_group_id=32
   주의: split 전 알고리즘 수준에서 sub-task 키 구분 방법 설계 필요
 ```
 
+> **2026-04-28 갱신 (task 00039)**: 위 TODO 가 요구한 "알고리즘 수준에서 sub-task 키
+> 구분 방법" 이 [task 00039 분석](duplicate_detection_analysis.md) 에서
+> `official:{normalized_ancmNo}::{normalized_title}` 합성 키로 도입되어 자동 해소되었다.
+> 동일 ancmNo + 다른 세부 공고명은 이제 알고리즘이 별개 그룹으로 분리하므로
+> `canonical_overrides split` 수동 적용 불요. 신 키 동작 검증 결과는
+> [`00039-3-verification.md`](00039-3-verification.md) 와
+> [`canonical_identity_design.md §11-6`](canonical_identity_design.md) 참조.
+
 ### 감사 반복 실행 방법
 
 데이터가 추가된 후 재감사:
