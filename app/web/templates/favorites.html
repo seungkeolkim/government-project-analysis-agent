@@ -13,10 +13,11 @@
     - relevance_map:       dict[int, list[RelevanceJudgment]]
     - history_map:         dict[int, list[HistoryWithUser]]
     - my_relevance_map:    dict[int, RelevanceJudgment|None]
+    - read_id_set:         set[int]  (task 00037 — read/unread bold 분기용)
 
   레이아웃:
     - 좌 사이드바: 폴더 트리 (SSR) + 추가/이름변경/삭제 CRUD (JS)
-    - 우 메인: 선택된 폴더의 즐겨찾기 항목 테이블 (SSR) + 제거 버튼 (JS)
+    - 우 메인: 선택된 폴더의 즐겨찾기 항목 테이블 (SSR) + 폴더 이동/제거 버튼 (JS)
 #}
 {% from "_relevance_badge_macro.html" import relevance_badge %}
 {% extends "base.html" %}
@@ -34,46 +35,69 @@
             {% if not folder_tree %}
             <li class="fav-sidebar-empty">폴더가 없습니다.</li>
             {% endif %}
-            {# depth 2 제약 — 최대 1단계 중첩. 재귀 없이 2단계 인라인 전개. #}
+            {# task 00037 #1·#2: depth 2 제약 — 최대 1단계 중첩. 재귀 없이 2단계
+               인라인 전개. 루트/자식 모두 .fav-sidebar-item__row (flex) 로 래핑하고,
+               자식 <ul> 은 row 와 별개의 block 형제로 붙여 \"우측에 나란히 표시\"
+               되는 구 버그를 제거한다. caret 버튼은 자식을 가진 루트에만 붙이고
+               자식 행에는 .fav-sidebar-item__caret-spacer 로 폭을 맞춘다(정렬 유지). #}
             {% for folder in folder_tree %}
-            <li class="fav-sidebar-item{% if folder.id == selected_folder_id %} fav-sidebar-item--active{% endif %}"
+            {% set has_children = folder.children | length > 0 %}
+            {% set child_list_id = "fav-sidebar-children-" ~ folder.id %}
+            <li class="fav-sidebar-item fav-sidebar-item--root{% if folder.id == selected_folder_id %} fav-sidebar-item--active{% endif %}"
                 data-folder-id="{{ folder.id }}"
                 data-folder-depth="{{ folder.depth }}"
                 data-folder-name="{{ folder.name | e }}">
-                <a class="fav-sidebar-item__link" href="/favorites?folder_id={{ folder.id }}">
-                    {{ folder.name }}
-                </a>
-                <span class="fav-sidebar-item__actions">
+                <span class="fav-sidebar-item__row">
+                    {% if has_children %}
                     <button type="button"
-                            class="fav-sidebar-item__btn fav-sidebar-item__rename-btn"
-                            data-folder-id="{{ folder.id }}"
-                            data-folder-name="{{ folder.name | e }}"
-                            title="이름 변경">✎</button>
-                    <button type="button"
-                            class="fav-sidebar-item__btn fav-sidebar-item__delete-btn"
-                            data-folder-id="{{ folder.id }}"
-                            title="폴더 삭제">✕</button>
+                            class="fav-sidebar-item__caret"
+                            aria-expanded="true"
+                            aria-controls="{{ child_list_id }}"
+                            data-target-id="{{ child_list_id }}"
+                            title="서브그룹 접기/펼치기">▾</button>
+                    {% else %}
+                    <span class="fav-sidebar-item__caret-spacer" aria-hidden="true"></span>
+                    {% endif %}
+                    <a class="fav-sidebar-item__link" href="/favorites?folder_id={{ folder.id }}">
+                        {{ folder.name }}
+                    </a>
+                    <span class="fav-sidebar-item__actions">
+                        <button type="button"
+                                class="fav-sidebar-item__btn fav-sidebar-item__rename-btn"
+                                data-folder-id="{{ folder.id }}"
+                                data-folder-name="{{ folder.name | e }}"
+                                title="이름 변경">✎</button>
+                        <button type="button"
+                                class="fav-sidebar-item__btn fav-sidebar-item__delete-btn"
+                                data-folder-id="{{ folder.id }}"
+                                data-folder-name="{{ folder.name | e }}"
+                                title="폴더 삭제">✕</button>
+                    </span>
                 </span>
-                {% if folder.children %}
-                <ul class="fav-sidebar-list fav-sidebar-list--child">
+                {% if has_children %}
+                <ul class="fav-sidebar-list fav-sidebar-list--child" id="{{ child_list_id }}">
                     {% for child in folder.children %}
                     <li class="fav-sidebar-item fav-sidebar-item--child{% if child.id == selected_folder_id %} fav-sidebar-item--active{% endif %}"
                         data-folder-id="{{ child.id }}"
                         data-folder-depth="{{ child.depth }}"
                         data-folder-name="{{ child.name | e }}">
-                        <a class="fav-sidebar-item__link" href="/favorites?folder_id={{ child.id }}">
-                            {{ child.name }}
-                        </a>
-                        <span class="fav-sidebar-item__actions">
-                            <button type="button"
-                                    class="fav-sidebar-item__btn fav-sidebar-item__rename-btn"
-                                    data-folder-id="{{ child.id }}"
-                                    data-folder-name="{{ child.name | e }}"
-                                    title="이름 변경">✎</button>
-                            <button type="button"
-                                    class="fav-sidebar-item__btn fav-sidebar-item__delete-btn"
-                                    data-folder-id="{{ child.id }}"
-                                    title="폴더 삭제">✕</button>
+                        <span class="fav-sidebar-item__row">
+                            <span class="fav-sidebar-item__caret-spacer" aria-hidden="true"></span>
+                            <a class="fav-sidebar-item__link" href="/favorites?folder_id={{ child.id }}">
+                                {{ child.name }}
+                            </a>
+                            <span class="fav-sidebar-item__actions">
+                                <button type="button"
+                                        class="fav-sidebar-item__btn fav-sidebar-item__rename-btn"
+                                        data-folder-id="{{ child.id }}"
+                                        data-folder-name="{{ child.name | e }}"
+                                        title="이름 변경">✎</button>
+                                <button type="button"
+                                        class="fav-sidebar-item__btn fav-sidebar-item__delete-btn"
+                                        data-folder-id="{{ child.id }}"
+                                        data-folder-name="{{ child.name | e }}"
+                                        title="폴더 삭제">✕</button>
+                            </span>
                         </span>
                     </li>
                     {% endfor %}
@@ -124,7 +148,8 @@
                         <th class="col-status">상태</th>
                         <th class="col-deadline">마감일</th>
                         <th class="col-relevance">관련성</th>
-                        <th class="col-fav-remove">제거</th>
+                        {# task 00037 #3: 폴더 이동 / 제거 두 버튼 #}
+                        <th class="col-fav-actions">동작</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -133,13 +158,21 @@
                         <td class="col-title">
                             {# 별 아이콘: 즐겨찾기 페이지에선 항상 채워진 별(시각 표시 전용). data-* 없음 → favorites.js 미동작. #}
                             <span class="fav-star fav-star--active" title="즐겨찾기됨">★</span>
+                            {# task 00037 plan_review 추가요청 — 목록 페이지와 동일 규칙으로
+                               읽음/안읽음에 따라 제목을 일반/bold 로 분기. 읽은 공고는 --read
+                               (일반), 안 읽은 공고는 --unread (bold). list.html 이 이미 쓰는
+                               CSS(.announcement-title-link--read/--unread) 를 그대로 재사용. #}
                             {% if item.ann_id is defined and item.ann_id %}
-                            <a class="announcement-title-link"
+                            <a class="announcement-title-link
+                                      {% if item.ann_id in read_id_set %}announcement-title-link--read
+                                      {% else %}announcement-title-link--unread{% endif %}"
                                href="/announcements/{{ item.ann_id }}">
                                 {{ item.canonical_title or "(제목 없음)" }}
                             </a>
                             {% else %}
-                            <span>{{ item.canonical_title or "(제목 없음)" }}</span>
+                            <span class="announcement-title-link--unread">
+                                {{ item.canonical_title or "(제목 없음)" }}
+                            </span>
                             {% endif %}
                         </td>
                         <td class="col-agency">{{ item.ann_agency or "-" }}</td>
@@ -171,7 +204,16 @@
                                 history_map.get(cid, [])
                             ) }}
                         </td>
-                        <td class="col-fav-remove">
+                        <td class="col-fav-actions">
+                            {# task 00037 #3 — 각 row 에 \"폴더 이동\" 버튼 추가.
+                               기존 폴더 선택 모달을 재사용한다(favorites.js 의 move 모드).
+                               data-from-folder-id 는 현재 보고 있는 폴더 id — 동일 폴더로의
+                               이동은 클라이언트 단에서 no-op 처리된다. #}
+                            <button type="button"
+                                    class="fav-entry-move-btn"
+                                    data-entry-id="{{ item.entry_id }}"
+                                    data-from-folder-id="{{ selected_folder_id }}"
+                                    title="다른 폴더로 이동">이동</button>
                             <button type="button"
                                     class="fav-entry-remove-btn"
                                     data-entry-id="{{ item.entry_id }}"

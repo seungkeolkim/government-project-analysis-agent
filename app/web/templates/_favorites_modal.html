@@ -1,21 +1,47 @@
 {#
-  즐겨찾기 폴더 선택 모달 (Phase 3b / 00036-6) — 로그인 사용자 전용.
+  즐겨찾기 폴더 선택 모달 (task 00037 재설계) — 로그인 사용자 전용.
 
-  base.html 이 </body> 직전에 {% include "_favorites_modal.html" %} 로 삽입한다.
+  base.html 이 </body> 직전에 {% include \"_favorites_modal.html\" %} 로 삽입한다.
   비로그인(current_user 가 None/Undefined) 이면 렌더하지 않는다.
 
-  JS(favorites.js)가 .fav-star 클릭 이벤트를 가로채 이 dialog 를 제어한다.
-  폴더 트리는 모달이 열릴 때 GET /favorites/folders 를 통해 JS 가 동적으로 채운다.
+  JS(favorites.js / favorites_page.js)가 모달을 두 가지 모드로 제어한다:
+    - 추가 모드(data-mode=\"add\"): 별 아이콘 클릭 시 열린다. 상단 라디오로
+      \"이 공고만 저장\" / \"동일 과제 공고 모두 저장\" 을 고르고 폴더 트리에서
+      대상 폴더를 선택, 저장(=추가) 버튼으로 POST /favorites/entries 호출.
+    - 이동 모드(data-mode=\"move\"): /favorites 의 \"폴더 이동\" 버튼에서 열린다.
+      라디오/새 폴더 생성 영역을 CSS 로 숨기고 트리 + 저장(=이동) 버튼만 보인다.
+      저장 시 PATCH /favorites/entries/{entry_id} 로 target_folder_id 를 전송.
 #}
 {% if current_user %}
-<dialog id="fav-modal" aria-labelledby="fav-modal-title">
+<dialog id="fav-modal" aria-labelledby="fav-modal-title" data-mode="add">
     <div class="fav-modal__inner">
         <h3 class="fav-modal__title" id="fav-modal-title">폴더에 추가</h3>
-        <p class="fav-modal__help">저장할 폴더를 선택하세요.</p>
+        <p class="fav-modal__help" id="fav-modal-help">저장할 폴더를 선택하세요.</p>
+
+        {# task 00037 #4: 저장 범위 라디오 — 모달이 \"추가\" 모드일 때만 표시.
+           기본값은 \"이 공고만 저장\" (name=fav-scope, value=single). 모달이 열릴
+           때마다 single 로 초기화된다. event.stopPropagation 패턴을 적용. #}
+        <fieldset class="fav-scope-group" id="fav-scope-group">
+            <legend class="fav-scope-group__legend">저장 범위</legend>
+            <label class="fav-scope-option">
+                <input type="radio"
+                       name="fav-scope"
+                       value="single"
+                       checked>
+                <span>이 공고만 저장</span>
+            </label>
+            <label class="fav-scope-option">
+                <input type="radio"
+                       name="fav-scope"
+                       value="all_siblings">
+                <span>동일 과제 공고 모두 저장</span>
+            </label>
+        </fieldset>
+
         {# 폴더 트리: JS 가 GET /favorites/folders 결과로 채운다. #}
         <div id="fav-folder-tree" class="fav-folder-tree"></div>
-        {# 새 폴더 만들기 영역 — Jinja2 태그 없는 순수 HTML. #}
-        <div class="fav-new-folder-row">
+        {# 새 폴더 만들기 영역 — 추가 모드에서만 표시(이동 모드에서는 CSS 로 hide). #}
+        <div class="fav-new-folder-row" id="fav-new-folder-row">
             <input id="fav-new-folder-name"
                    class="fav-new-folder-input"
                    type="text"

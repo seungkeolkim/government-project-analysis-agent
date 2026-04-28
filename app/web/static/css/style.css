@@ -1642,6 +1642,10 @@ button.canonical-count-badge.siblings-toggle--open {
     margin: 0 0 10px;
     font-size: 13px;
     color: #6b7280;
+    /* task 00037 #2: 삭제 확인 모달의 cascade 경고 문구가 여러 줄로 표시될 수
+       있도록 line break(\\n) 를 시각적으로 렌더한다. JS 는 textContent 로 안전
+       주입하고, 줄바꿈은 CSS 가 처리한다(XSS 회피). */
+    white-space: pre-line;
 }
 
 .fav-folder-tree {
@@ -1652,6 +1656,45 @@ button.canonical-count-badge.siblings-toggle--open {
     padding: 4px 0;
     background: #fff;
     margin-bottom: 10px;
+}
+
+/* task 00037 #4 — 저장 범위 라디오(\"이 공고만 / 동일 과제 모두\") 영역.
+   모달 상단의 눈에 띄는 위치에 배치하되 폴더 트리보다 위쪽. 이동 모드에서는
+   dialog[data-mode=\"move\"] 하위 선택자로 숨긴다. */
+.fav-scope-group {
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    padding: 6px 10px 8px;
+    margin: 0 0 10px;
+    background: #f9fafb;
+}
+
+.fav-scope-group__legend {
+    font-size: 12px;
+    font-weight: 600;
+    color: #374151;
+    padding: 0 4px;
+}
+
+.fav-scope-option {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 0;
+    font-size: 13px;
+    color: #1f2937;
+    cursor: pointer;
+}
+
+.fav-scope-option input[type="radio"] {
+    cursor: pointer;
+}
+
+/* 이동 모드에서는 라디오 + 새 폴더 만들기 영역을 숨기고 트리 선택만 가능하게
+   한다. JS 가 #fav-modal 의 data-mode 를 토글해 분기를 만든다. */
+#fav-modal[data-mode="move"] .fav-scope-group,
+#fav-modal[data-mode="move"] .fav-new-folder-row {
+    display: none;
 }
 
 .fav-folder-tree__loading,
@@ -1674,23 +1717,75 @@ button.canonical-count-badge.siblings-toggle--open {
     padding-left: 20px;
 }
 
+/* task 00037 #1: 모달 트리도 사이드바와 동일한 접기/펼치기 정책. */
+.fav-folder-list--child.is-collapsed {
+    display: none;
+}
+
+/* task 00037 #1: .fav-folder-item 은 block 으로 두고 실제 행 레이아웃은 row 가
+   담당. 이전엔 li 자체에 padding 이 있었지만 caret/label 정렬을 위해 row 로
+   옮긴다. 선택 상태(--selected) 는 row 가 아니라 li 에 걸어 중첩 ul 영역과 구분. */
 .fav-folder-item {
-    padding: 7px 12px;
+    padding: 0;
     font-size: 13px;
-    cursor: pointer;
+    cursor: default;
     border-radius: 3px;
     color: #374151;
     user-select: none;
 }
 
-.fav-folder-item:hover {
+.fav-folder-item__row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 7px 12px;
+    border-radius: 3px;
+    cursor: pointer;
+}
+
+.fav-folder-item__row:hover {
     background: #f3f4f6;
 }
 
-.fav-folder-item--selected {
+.fav-folder-item--selected > .fav-folder-item__row {
     background: #dbeafe;
     color: #1e3a8a;
     font-weight: 600;
+}
+
+.fav-folder-item__caret,
+.fav-folder-item__caret-spacer {
+    width: 14px;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.fav-folder-item__caret {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 10px;
+    color: #6b7280;
+    padding: 0;
+    line-height: 1;
+}
+
+.fav-folder-item__caret:hover {
+    color: #111827;
+}
+
+.fav-folder-item__caret[aria-expanded="false"] {
+    color: #9ca3af;
+}
+
+.fav-folder-item__label {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
 }
 
 .fav-new-folder-row {
@@ -1813,8 +1908,17 @@ button.canonical-count-badge.siblings-toggle--open {
     padding: 0;
 }
 
+/* task 00037 #1: 서브그룹을 indent 들여쓰기 트리로 표시.
+   기존 margin-left:14px 대신 padding-left 로 트리 들여쓰기를 주고, 루트의
+   caret 과 자식 caret-spacer 폭(14px)과 합쳐 시각적으로 명확한 계층을 만든다.
+   is-collapsed 는 JS 가 토글하는 접기 상태(기본은 펼침 — 클래스 없음). */
 .fav-sidebar-list--child {
-    margin: 2px 0 2px 14px;
+    margin: 2px 0;
+    padding-left: 20px;
+}
+
+.fav-sidebar-list--child.is-collapsed {
+    display: none;
 }
 
 .fav-sidebar-empty {
@@ -1823,33 +1927,43 @@ button.canonical-count-badge.siblings-toggle--open {
     padding: 4px 0;
 }
 
-/* ── 폴더 항목 ── */
+/* ── 폴더 항목 ──
+   task 00037 #1: li 는 block 으로 두고 자식 <ul> 이 block 형제로 붙도록 한다.
+   기존은 li 가 display:flex 여서 자식 ul 이 flex item 취급돼 \"우측에 나란히\"
+   렌더됐다. 실제 행 레이아웃은 .fav-sidebar-item__row 에서 담당한다. */
 .fav-sidebar-item {
+    display: block;
+    border-radius: 4px;
+    margin-bottom: 2px;
+}
+
+.fav-sidebar-item__row {
     display: flex;
     align-items: center;
     gap: 4px;
-    border-radius: 4px;
     padding: 4px 6px;
+    border-radius: 4px;
     transition: background 0.1s;
 }
 
-.fav-sidebar-item:hover {
+.fav-sidebar-item__row:hover {
     background: #f3f4f6;
 }
 
-.fav-sidebar-item--active {
+.fav-sidebar-item--active > .fav-sidebar-item__row {
     background: #eff6ff;
     border-left: 3px solid #3b82f6;
-    padding-left: 4px;
+    padding-left: 3px;
 }
 
-.fav-sidebar-item--child {
+.fav-sidebar-item--child > .fav-sidebar-item__row {
     font-size: 13px;
     padding: 3px 6px;
 }
 
 .fav-sidebar-item__link {
-    flex: 1;
+    flex: 1 1 auto;
+    min-width: 0;
     font-size: 13px;
     color: #1d4ed8;
     text-decoration: none;
@@ -1862,18 +1976,20 @@ button.canonical-count-badge.siblings-toggle--open {
     text-decoration: underline;
 }
 
-.fav-sidebar-item--active .fav-sidebar-item__link {
+.fav-sidebar-item--active > .fav-sidebar-item__row > .fav-sidebar-item__link {
     font-weight: 600;
     color: #1e40af;
 }
 
+/* task 00037 #1 핵심 — 액션(이름변경/삭제)을 항상 표시 + flex-shrink:0 으로 폭
+   확보. 기존은 display:none → hover 시 display:flex 로 바뀌어 위치/폭이 확보되지
+   않은 채 튀어나와 이름과 겹쳤다(guidance 지적 증상). margin-left:auto 로
+   오른쪽 정렬하여 긴 폴더 이름이 있어도 버튼 자리가 유지된다. */
 .fav-sidebar-item__actions {
-    display: none;
-    gap: 2px;
-}
-
-.fav-sidebar-item:hover .fav-sidebar-item__actions {
     display: flex;
+    gap: 2px;
+    flex-shrink: 0;
+    margin-left: auto;
 }
 
 .fav-sidebar-item__btn {
@@ -1895,6 +2011,38 @@ button.canonical-count-badge.siblings-toggle--open {
 .fav-sidebar-item__delete-btn:hover {
     background: #fee2e2;
     color: #dc2626;
+}
+
+/* task 00037 #1: caret 버튼 (자식을 가진 루트 폴더에만 표시).
+   aria-expanded 로 접힘 상태를 표현하고, CSS 의 ::before 로 방향 화살표를 그린다.
+   (HTML 의 ▾ 텍스트는 fallback; 브라우저/스크린리더에 무관하게 aria-expanded 가
+   실질 상태 진실) */
+.fav-sidebar-item__caret,
+.fav-sidebar-item__caret-spacer {
+    width: 14px;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.fav-sidebar-item__caret {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 10px;
+    color: #6b7280;
+    padding: 0;
+    line-height: 1;
+}
+
+.fav-sidebar-item__caret:hover {
+    color: #111827;
+}
+
+/* 접힘 상태 — 아이콘을 ▸ 로 회전 대신 텍스트 교체는 JS 가 담당. CSS 는 색만. */
+.fav-sidebar-item__caret[aria-expanded="false"] {
+    color: #9ca3af;
 }
 
 /* ── 폴더 추가 영역 ── */
@@ -1922,11 +2070,21 @@ button.canonical-count-badge.siblings-toggle--open {
     text-align: center;
 }
 
-/* 제거 버튼 컬럼 */
-.col-fav-remove {
-    width: 56px;
+/* task 00037 #3: 동작(이동/제거) 컬럼 — 두 버튼을 수평 배치한다. */
+.col-fav-actions {
+    width: 112px;
     text-align: center;
     white-space: nowrap;
+}
+
+.col-fav-actions .fav-entry-move-btn,
+.col-fav-actions .fav-entry-remove-btn {
+    display: inline-block;
+    margin-right: 4px;
+}
+
+.col-fav-actions .fav-entry-remove-btn:last-child {
+    margin-right: 0;
 }
 
 .fav-entry-remove-btn {
@@ -1943,4 +2101,22 @@ button.canonical-count-badge.siblings-toggle--open {
     background: #fee2e2;
     border-color: #fca5a5;
     color: #dc2626;
+}
+
+/* task 00037 #3: 폴더 이동 버튼 — 제거 버튼과 동일 기본 스타일,
+   hover 색은 파랑 계열(삭제/이동 의미 구분). */
+.fav-entry-move-btn {
+    font-size: 12px;
+    padding: 3px 8px;
+    background: #fff;
+    border: 1px solid #d1d5db;
+    border-radius: 3px;
+    cursor: pointer;
+    color: #374151;
+}
+
+.fav-entry-move-btn:hover {
+    background: #eff6ff;
+    border-color: #93c5fd;
+    color: #1d4ed8;
 }
