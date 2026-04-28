@@ -69,7 +69,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Literal
 
 from loguru import logger
@@ -93,7 +93,13 @@ from app.db.models import (
     SCRAPE_RUN_TERMINAL_STATUSES,
     SCRAPE_RUN_TRIGGERS,
     ScrapeRun,
+    ScrapeSnapshot,
     User,
+)
+from app.db.snapshot import (
+    build_snapshot_payload,
+    merge_snapshot_payload,
+    normalize_payload,
 )
 from app.sources.config_schema import load_sources_config
 
@@ -3513,3 +3519,116 @@ def apply_delta_to_main(
         result.attachment_content_change_count,
     )
     return result
+
+
+# ──────────────────────────────────────────────────────────────
+# ScrapeSnapshot UPSERT — 같은 KST 날짜 1 row + payload 머지
+# ──────────────────────────────────────────────────────────────
+#
+# 설계 근거: docs/snapshot_pipeline_design.md §9.6·§10.
+#
+# 호출 위치:
+#   - app/cli.py 의 _async_main 안 apply_session 트랜잭션에서 apply_delta_to_main
+#     반환 직후 호출된다. 같은 session 으로 호출하므로 본 테이블·delta·snapshot
+#     모두 단일 atomic 단위에 묶인다.
+#
+# 동시성 고려:
+#   - ScrapeRun lock (Phase 2 — running row 1개) 으로 동시 ScrapeRun 이 차단되어
+#     같은 snapshot_date 에 대한 race 는 사실상 발생하지 않는다.
+#   - 그래도 SELECT-then-INSERT/UPDATE 패턴으로 단일 트랜잭션 안에서 원자성을
+#     확보한다. UNIQUE(snapshot_date) (00041-2 migration) 가 최후 방어선.
+#
+# 머지는 본 모듈이 아니라 app/db/snapshot.py 의 순수 함수 merge_snapshot_payload
+# 가 담당한다 — DB session 의존을 떼어내 유닛 테스트가 1줄 import 로 가능하도록.
+
+
+def upsert_scrape_snapshot(
+    session: Session,
+    *,
+    snapshot_date: date,
+    new_payload: dict[str, Any],
+) -> ScrapeSnapshot:
+    """같은 KST 날짜의 ScrapeSnapshot 이 있으면 머지, 없으면 신규 INSERT 한다.
+
+    동작 (호출자 session 사용 — flush 까지만 수행, commit 은 호출자 책임):
+        1. SELECT scrape_snapshots WHERE snapshot_date = :snapshot_date
+        2. 매칭 row 가 없으면 → INSERT (payload=normalize_payload(new_payload)).
+           normalize_payload 가 5종 카테고리를 빈 배열로 채워 5b 의 view 가
+           KeyError 없이 0 건도 표시할 수 있게 한다 (설계 §10.3).
+        3. 매칭 row 가 있으면 → merge_snapshot_payload(existing, new) 결과로
+           UPDATE. updated_at 은 모델의 onupdate 가 자동 갱신.
+
+    트랜잭션 경계:
+        본 함수는 flush 까지만 수행한다. 호출자(_async_main 의 apply_session)
+        가 commit 시점을 통제하므로, apply_delta_to_main 과 같은 트랜잭션에
+        묶여 일관성이 보장된다 — apply 가 raise 하면 SQLAlchemy auto-rollback
+        으로 snapshot 도 함께 원상복구되어 검증 11 시나리오를 만족한다.
+
+    빈 ScrapeRun (5종 카테고리 모두 빈 배열) 처리:
+        설계 §10.3 권장안에 따라 신규 INSERT 시에도 row 를 만든다 — 같은 날의
+        후속 ScrapeRun 이 머지할 대상이 되며, 5b 의 캘린더가 \"이 날 수집 시도가
+        있었음\" 을 표시할 수 있다.
+
+    Args:
+        session:        호출자 세션.
+        snapshot_date:  KST 기준 날짜 (date 객체). 호출자가
+                        ``app.timezone.now_kst().date()`` 로 계산해 전달한다.
+        new_payload:    이번 ScrapeRun 의 ``build_snapshot_payload(apply_result)``
+                        결과. 카테고리가 누락되어 있으면 normalize_payload 가
+                        빈 컨테이너로 채운다.
+
+    Returns:
+        flush 후 id 가 부여된 ``ScrapeSnapshot`` 인스턴스 (신규 INSERT 또는
+        머지 UPDATE 결과).
+    """
+    existing_row = session.execute(
+        select(ScrapeSnapshot).where(ScrapeSnapshot.snapshot_date == snapshot_date)
+    ).scalar_one_or_none()
+
+    if existing_row is None:
+        # 신규 INSERT — 빈 카테고리도 명시적으로 정규형으로 채운다.
+        normalized = normalize_payload(new_payload)
+        snapshot = ScrapeSnapshot(
+            snapshot_date=snapshot_date,
+            payload=normalized,
+        )
+        session.add(snapshot)
+        session.flush()
+        logger.info(
+            "ScrapeSnapshot 신규 INSERT: snapshot_date={} counts={}",
+            snapshot_date.isoformat(),
+            normalized.get("counts", {}),
+        )
+        return snapshot
+
+    # 기존 row → merge_snapshot_payload 결과로 UPDATE.
+    merged = merge_snapshot_payload(existing_row.payload, new_payload)
+    existing_row.payload = merged
+    session.flush()
+    logger.info(
+        "ScrapeSnapshot 머지 UPDATE: snapshot_date={} counts={}",
+        snapshot_date.isoformat(),
+        merged.get("counts", {}),
+    )
+    return existing_row
+
+
+def get_scrape_snapshot_by_date(
+    session: Session,
+    snapshot_date: date,
+) -> ScrapeSnapshot | None:
+    """``snapshot_date`` 의 ScrapeSnapshot row 를 조회한다 (없으면 None).
+
+    UNIQUE(snapshot_date) 제약상 0 또는 1 건만 존재한다. 5b 의 dashboard view
+    에서 \"오늘의 변화 요약\" 을 빠르게 가져올 때 사용한다.
+
+    Args:
+        session:       호출자 세션.
+        snapshot_date: 조회할 KST 날짜.
+
+    Returns:
+        ``ScrapeSnapshot`` 또는 None.
+    """
+    return session.execute(
+        select(ScrapeSnapshot).where(ScrapeSnapshot.snapshot_date == snapshot_date)
+    ).scalar_one_or_none()

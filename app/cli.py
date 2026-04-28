@@ -87,9 +87,11 @@ from app.db.repository import (
     peek_main_can_skip_detail,
     set_scrape_run_pid,
     update_delta_announcement_detail,
+    upsert_scrape_snapshot,
 )
 from app.db.models import DeltaAnnouncement, ScrapeRun
 from app.db.session import session_scope
+from app.db.snapshot import build_snapshot_payload
 from app.logging_setup import configure_logging
 from app.scrape_control.constants import (
     SCRAPE_ACTIVE_SOURCES_ENV_VAR,
@@ -98,7 +100,7 @@ from app.scrape_control.constants import (
 from app.scraper.attachment_downloader import scrape_attachments_for_announcement
 from app.scraper.base import BaseSourceAdapter
 from app.scraper.registry import get_adapter
-from app.timezone import KST
+from app.timezone import KST, now_kst
 from app.sources.config_schema import (
     ScrapeRunConfig,
     SourceConfig,
@@ -1234,15 +1236,20 @@ async def _async_main() -> int:
                         apply_session,
                         scrape_run_id=scrape_run_id,
                     )
-                    # 00041-4 의 snapshot UPSERT 호출이 들어올 자리:
-                    #   from app.db.repository import upsert_scrape_snapshot
-                    #   from app.timezone import now_kst
-                    #   new_payload = build_snapshot_payload_from_apply_result(apply_result)
-                    #   upsert_scrape_snapshot(
-                    #       apply_session,
-                    #       snapshot_date=now_kst().date(),
-                    #       new_payload=new_payload,
-                    #   )
+                    # ── snapshot 생성/머지 (00041-4) ──────────────────────────
+                    # apply 와 같은 트랜잭션에서 ScrapeSnapshot UPSERT 를 수행해
+                    # \"본 테이블 적용 + delta 비움 + snapshot 생성\" 의 atomic
+                    # 단위를 완성한다 (사용자 원문 \"수집 종료 시: 단일 트랜잭션\").
+                    # apply 단계가 raise 하면 SQLAlchemy auto-rollback 으로
+                    # snapshot UPSERT 도 함께 원상복구되어 검증 11 시나리오를
+                    # 만족한다 (apply / snapshot 어느 단계가 raise 하든 동일).
+                    # snapshot_date 는 종료 시점의 KST 날짜 — Phase 4 컨벤션.
+                    snapshot_payload = build_snapshot_payload(apply_result)
+                    upsert_scrape_snapshot(
+                        apply_session,
+                        snapshot_date=now_kst().date(),
+                        new_payload=snapshot_payload,
+                    )
                 final_status = candidate_status
                 logger.info(
                     "apply_delta_to_main 트랜잭션 commit 완료: status={}",
