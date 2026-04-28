@@ -33,7 +33,7 @@ RelevanceJudgment / RelevanceJudgmentHistory / FavoriteFolder)을 함께 정의�
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -42,6 +42,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Enum,
     ForeignKey,
@@ -1311,6 +1312,382 @@ class ScrapeRun(Base):
         )
 
 
+# ── Phase 5a (task 00041) — delta + snapshot 인프라 ─────────────────────────
+# 수집 파이프라인을 delta 단계 적재 → 종료 시 단일 트랜잭션 apply 로 재배선하기
+# 위한 3 개 테이블 ORM. migration 파일:
+#   alembic/versions/20260428_1700_d3f9a2b6c814_delta_snapshot_tables.py
+# 설계 근거: docs/snapshot_pipeline_design.md §4·§5·§6.
+
+
+class DeltaAnnouncement(Base):
+    """수집 단계에서 적재되는 공고 메타 staging.
+
+    매 ScrapeRun 동안 어댑터가 공고 1 건을 수집할 때마다 이 테이블에 INSERT
+    된다. 본 테이블 ``announcements`` 는 수집 중에 건드리지 않고, ScrapeRun
+    종료 시점에 단일 트랜잭션(``apply_delta_to_main`` — 00041-3) 안에서
+
+        1. delta_announcements 전수 조회
+        2. announcements 본 테이블과 4-branch 비교 + INSERT/UPDATE
+        3. 5 종 카테고리 매핑 + scrape_snapshots UPSERT
+        4. 같은 scrape_run_id 의 delta 전수 DELETE
+
+    를 수행한다 — 사용자 원문 "수집 종료 시: 단일 트랜잭션으로 (delta → 본
+    테이블 4-branch UPSERT) + (snapshot 생성/UPSERT) + (delta 비우기)" 그대로.
+
+    설계 메모 (docs/snapshot_pipeline_design.md §4.1):
+        - 본 테이블 announcements 와 비교 가능한 핵심 필드(title / status /
+          agency / deadline_at)를 그대로 갖는다.
+        - status 는 plain String(32) 으로 둔다 — 본 테이블의 AnnouncementStatus
+          Enum 으로 정규화하는 것은 apply 단계의 책임이다. 어댑터(IRIS / NTIS) 가
+          내려주는 raw 값을 일단 받아내고, apply 단계의 ``_coerce_status`` 가
+          한글 3 종 enum 으로 정규화한다. 정규화 실패 시 해당 공고만 apply 가
+          격리해 다음 공고로 진행한다.
+        - 매 ScrapeRun 종료 후 row 가 0 으로 리셋되므로 인덱스는 (scrape_run_id) +
+          source lookup (source_type, source_announcement_id) 두 개만.
+        - ON DELETE CASCADE 가 scrape_runs 에 걸려 있어 ScrapeRun row 삭제 시
+          delta 도 자동 정리되지만, 운영 흐름상 ScrapeRun 은 삭제하지 않으므로
+          실제 비움은 apply 단계의 명시적 DELETE 가 담당한다.
+    """
+
+    __tablename__ = "delta_announcements"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    scrape_run_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "scrape_runs.id",
+            name="fk_delta_announcements_scrape_run_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        doc="이 staging row 가 속한 ScrapeRun 의 PK. 매 ScrapeRun 종료 시"
+            " apply 후 비워지는 단위 키.",
+    )
+
+    source_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        doc="공고 수집 소스 유형. 예: 'IRIS', 'NTIS'. 본 테이블과 동일 의미.",
+    )
+
+    source_announcement_id: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        doc="수집 소스가 부여한 공고 고유 ID. apply 단계의 4-branch 매칭 키.",
+    )
+
+    title: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="공고 제목. 1차 변경 감지 비교 필드.",
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        doc="어댑터가 내려준 raw 상태 문자열. 본 테이블의 AnnouncementStatus"
+            " enum 으로 정규화하는 것은 apply 단계의 책임 — delta 는 raw 값"
+            " 입구로 동작해 source 별 잡음을 본 테이블에 들이지 않는다.",
+    )
+
+    agency: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        doc="주관/공고 기관명. 1차 변경 감지 비교 필드. 없으면 NULL.",
+    )
+
+    received_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        doc="접수 시작 시각(UTC). 비교 제외 — announcements 와 동일 컨벤션.",
+    )
+
+    deadline_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        doc="접수 마감 시각(UTC). 1차 변경 감지 비교 필드.",
+    )
+
+    detail_url: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="공고 상세 페이지 URL.",
+    )
+
+    detail_html: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="상세 페이지 본문 HTML. 상세 수집 성공 시 채워진다.",
+    )
+
+    detail_text: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="detail_html 에서 추출한 가독성 텍스트.",
+    )
+
+    detail_fetched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        doc="상세 수집 완료 시각(UTC).",
+    )
+
+    detail_fetch_status: Mapped[str | None] = mapped_column(
+        String(16),
+        nullable=True,
+        doc="상세 수집 결과 상태. 'ok' / 'empty' / 'error'.",
+    )
+
+    ancm_no: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        doc="IRIS / NTIS 공식 공고번호. apply 단계에서 _apply_canonical 의"
+            " official scheme key 계산에 사용한다 (NTIS 는 상세 수집 후에만"
+            " 확정되므로 None 도 흔히 들어온다).",
+    )
+
+    raw_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        doc="어댑터가 내려준 원본 메타 (raw row 등). apply 단계가 본 테이블의"
+            " announcements.raw_metadata 로 그대로 흘려 보낸다.",
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        doc="이 staging row 가 INSERT 된 시각(UTC).",
+    )
+
+    # apply 단계가 첨부 메타까지 한 번에 비교하기 위한 1:N 관계.
+    # 본 테이블의 Announcement.attachments 와 동일 패턴 (selectin) 으로 로드한다.
+    attachments: Mapped[list[DeltaAttachment]] = relationship(
+        "DeltaAttachment",
+        back_populates="delta_announcement",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+    __table_args__ = (
+        # apply 단계: scrape_run_id 로 전수 조회한다.
+        Index(
+            "ix_delta_announcements_scrape_run_id",
+            "scrape_run_id",
+        ),
+        # apply 단계: 본 테이블 announcements 와 (source_type, source_announcement_id)
+        # 복합 키로 매칭. UNIQUE 가 아닌 일반 인덱스 — 같은 ScrapeRun 안에서
+        # 동일 (source_type, source_announcement_id) 가 두 번 들어오는 경우는
+        # 정상이 아니지만 어댑터 버그를 막아내려면 고정 도메인 제약은 부담스럽다.
+        Index(
+            "ix_delta_announcements_source_lookup",
+            "source_type",
+            "source_announcement_id",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현."""
+        return (
+            f"<DeltaAnnouncement id={self.id} run={self.scrape_run_id} "
+            f"source={self.source_type}/{self.source_announcement_id!r} "
+            f"status={self.status!r}>"
+        )
+
+
+class DeltaAttachment(Base):
+    """수집 단계에서 적재되는 첨부 메타 staging.
+
+    어댑터가 첨부 1 건을 다운로드해 ``data/downloads/`` 에 떨어뜨린 직후 이
+    테이블에 메타 row 를 INSERT 한다. 파일 자체는 트랜잭션 보호 밖이며, apply
+    단계가 rollback 되면 디스크에는 파일이 남는다 — 후속 GC (00041-5) 가
+    정리한다.
+
+    설계 메모 (docs/snapshot_pipeline_design.md §4.2):
+        - 본 테이블 ``attachments`` 와 컬럼 의미가 1:1 대응되도록 맞춘다 (apply
+          단계가 dict 흐름으로 그대로 옮길 수 있도록).
+        - sha256 은 NULL 허용 — 다운로드 실패 / 부분 저장 시. apply 단계의
+          첨부 변경 감지(2차 감지) 가 sha256 NULL 인 row 는 sha256s 집합에서
+          제외한다.
+        - delta_announcement FK 는 CASCADE — apply 단계가 delta_announcements
+          를 비우면 자동 cascade 로 함께 사라진다.
+    """
+
+    __tablename__ = "delta_attachments"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    delta_announcement_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "delta_announcements.id",
+            name="fk_delta_attachments_delta_announcement_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        doc="이 staging 첨부가 속한 DeltaAnnouncement 의 PK.",
+    )
+
+    original_filename: Mapped[str] = mapped_column(
+        String(512),
+        nullable=False,
+        doc="소스에 표기된 원본 파일명. 본 테이블 attachments 와 동일.",
+    )
+
+    stored_path: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="다운로드 후 저장된 로컬 파일 경로 (data/downloads/...).",
+    )
+
+    file_ext: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        doc="파일 확장자 (소문자, 점 없이). 예: 'pdf', 'hwp'.",
+    )
+
+    file_size: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+        doc="바이트 단위 파일 크기. 다운로드 실패 시 NULL.",
+    )
+
+    download_url: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="원본 다운로드 URL. POST 다운로드만 제공하는 소스는 NULL.",
+    )
+
+    sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        doc="파일 전체의 SHA-256 해시(hex). apply 단계 2차 변경 감지의 핵심"
+            " 비교 키. 다운로드 실패 시 NULL — 비교 대상에서 제외된다.",
+    )
+
+    downloaded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        doc="첨부 다운로드 완료 시각(UTC).",
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        doc="이 staging row 가 INSERT 된 시각(UTC). downloaded_at 과는 별개로,"
+            " 다운로드 후 DB 메타 적재까지의 지연을 분리해 추적할 수 있게 한다.",
+    )
+
+    delta_announcement: Mapped[DeltaAnnouncement] = relationship(
+        "DeltaAnnouncement",
+        back_populates="attachments",
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_delta_attachments_delta_announcement_id",
+            "delta_announcement_id",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현."""
+        return (
+            f"<DeltaAttachment id={self.id} "
+            f"delta_announcement_id={self.delta_announcement_id} "
+            f"name={self.original_filename!r} ext={self.file_ext!r}>"
+        )
+
+
+class ScrapeSnapshot(Base):
+    """KST 날짜 단위 변화 요약. 일자별 1 row.
+
+    같은 KST 날짜에 여러 ScrapeRun(수동 / 자동 / CLI) 이 종료되면 본 row 의
+    payload 가 ``merge_snapshot_payload(existing, new)`` 로 머지된다 — 사용자
+    원문 "snapshot UPSERT (같은 KST 날짜 1 row). 같은 날 여러 ScrapeRun 의 변화는
+    머지" 그대로.
+
+    설계 메모 (docs/snapshot_pipeline_design.md §4.3·§9·§10):
+        - ``snapshot_date`` 는 ``Date`` 타입. SQLite 의 Date 컬럼은 timezone
+          정보를 갖지 않으므로 호출자(00041-4 의 upsert) 가
+          ``app.timezone.now_kst().date()`` 로 KST 변환 후 저장한다 — Phase 4
+          컨벤션 준수.
+        - ``created_at`` / ``updated_at`` 는 모두 ``DateTime(timezone=True)``,
+          UTC 저장.
+        - ``payload`` 는 5 종 카테고리(new / content_changed / transitioned_to_접수예정/
+          접수중/마감) + counts 를 담는 자유 스키마 JSON. 구조는 §10, 머지 규칙은
+          §9 에 있고, 머지 헬퍼는 ``app/db/snapshot.py`` 의 ``merge_snapshot_payload``
+          단독 함수다 (00041-4 가 구현).
+        - UNIQUE(snapshot_date) 가 implicit index 로 일자 lookup 을 커버한다 —
+          별도 인덱스 없음.
+    """
+
+    __tablename__ = "scrape_snapshots"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    snapshot_date: Mapped[date] = mapped_column(
+        Date,
+        nullable=False,
+        doc="이 row 가 가리키는 KST 날짜. 호출자가 now_kst().date() 로 변환 후"
+            " 저장한다 (Date 타입은 timezone 정보를 갖지 않음).",
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        doc="이 snapshot row 가 최초 INSERT 된 시각(UTC).",
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+        doc="payload 가 마지막으로 머지된 시각(UTC). UPSERT 머지 시 자동 갱신.",
+    )
+
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        doc="5 종 카테고리(new / content_changed / transitioned_to_접수예정/"
+            "접수중/마감) + counts 를 담는 자유 스키마 JSON."
+            " 구조는 docs/snapshot_pipeline_design.md §10, 머지 규칙은 §9 참조.",
+    )
+
+    __table_args__ = (
+        # 같은 KST 날짜 1 row 보장. 머지의 기준 키가 된다.
+        UniqueConstraint(
+            "snapshot_date",
+            name="uq_scrape_snapshots_snapshot_date",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현."""
+        return (
+            f"<ScrapeSnapshot id={self.id} date={self.snapshot_date!s}>"
+        )
+
+
 __all__ = [
     "Base",
     "Announcement",
@@ -1318,11 +1695,14 @@ __all__ = [
     "AnnouncementUserState",
     "Attachment",
     "CanonicalProject",
+    "DeltaAnnouncement",
+    "DeltaAttachment",
     "FavoriteEntry",
     "FavoriteFolder",
     "RelevanceJudgment",
     "RelevanceJudgmentHistory",
     "ScrapeRun",
+    "ScrapeSnapshot",
     "SCRAPE_RUN_STATUSES",
     "SCRAPE_RUN_TERMINAL_STATUSES",
     "SCRAPE_RUN_TRIGGERS",

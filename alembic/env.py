@@ -23,9 +23,13 @@ from app.db.models import (  # noqa: F401
     AnnouncementUserState,
     Attachment,
     CanonicalProject,
+    DeltaAnnouncement,
+    DeltaAttachment,
     FavoriteFolder,
     RelevanceJudgment,
     RelevanceJudgmentHistory,
+    ScrapeRun,
+    ScrapeSnapshot,
     User,
 )
 
