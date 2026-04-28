@@ -69,7 +69,9 @@
                         <span class="admin-badge admin-badge--idle">비활성</span>
                     {% endif %}
                 </td>
-                <td>{{ schedule.next_run_time or '—' }}</td>
+                {# next_run_time 은 ScheduleSummary.next_run_time (datetime|None).
+                   format_kst 가 None→\"\" 이므로 'or' 분기로 dash 폴백을 둔다. #}
+                <td>{{ (schedule.next_run_time | kst_format) or '—' }}</td>
                 <td class="admin-schedule__actions">
                     <form method="post"
                           action="/admin/schedule/{{ schedule.job_id }}/toggle"

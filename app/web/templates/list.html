@@ -197,7 +197,7 @@
                 </td>
                 <td class="col-deadline">
                     {% if gr.representative.deadline_at %}
-                        {{ gr.representative.deadline_at.strftime("%Y-%m-%d %H:%M") }}
+                        {{ gr.representative.deadline_at | kst_format }}
                     {% else %}
                         -
                     {% endif %}
@@ -279,7 +279,7 @@
                 </td>
                 <td class="col-deadline">
                     {% if ann.deadline_at %}
-                        {{ ann.deadline_at.strftime("%Y-%m-%d %H:%M") }}
+                        {{ ann.deadline_at | kst_format }}
                     {% else %}
                         -
                     {% endif %}
@@ -322,7 +322,7 @@
                                 {{ sib.status.value }}
                             </span>
                             {% if sib.deadline_at %}
-                            <span class="siblings-deadline">마감 {{ sib.deadline_at.strftime("%Y-%m-%d") }}</span>
+                            <span class="siblings-deadline">마감 {{ sib.deadline_at | kst_date }}</span>
                             {% endif %}
                         </li>
                         {% endif %}

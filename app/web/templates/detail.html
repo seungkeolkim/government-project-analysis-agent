@@ -76,7 +76,7 @@
             <th>접수 시작</th>
             <td>
                 {% if announcement.received_at %}
-                    {{ announcement.received_at.strftime("%Y-%m-%d") }}
+                    {{ announcement.received_at | kst_date }}
                 {% else %}
                     -
                 {% endif %}
@@ -86,7 +86,7 @@
             <th>접수 마감</th>
             <td>
                 {% if announcement.deadline_at %}
-                    {{ announcement.deadline_at.strftime("%Y-%m-%d %H:%M") }}
+                    {{ announcement.deadline_at | kst_format }}
                 {% else %}
                     -
                 {% endif %}
@@ -108,7 +108,9 @@
             <th>상세 수집 시각</th>
             <td>
                 {% if announcement.detail_fetched_at %}
-                    {{ announcement.detail_fetched_at.strftime("%Y-%m-%d %H:%M:%S") }} UTC
+                    {# 상세 수집 시각도 사용자 표시 경계이므로 KST 로 변환한다.
+                       suffix 도 'KST' 로 맞춰 표기 일관성을 유지한다. #}
+                    {{ announcement.detail_fetched_at | kst_format("%Y-%m-%d %H:%M:%S") }} KST
                 {% else %}
                     미수집
                 {% endif %}
@@ -199,7 +201,7 @@
             {{ sib.status.value }}
         </span>
         {% if sib.deadline_at %}
-        <span class="siblings-deadline">마감 {{ sib.deadline_at.strftime("%Y-%m-%d") }}</span>
+        <span class="siblings-deadline">마감 {{ sib.deadline_at | kst_date }}</span>
         {% endif %}
     </li>
     {% endfor %}

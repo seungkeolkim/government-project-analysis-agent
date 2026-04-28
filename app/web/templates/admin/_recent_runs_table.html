@@ -31,8 +31,12 @@
                 {% endif %}
             </td>
             <td>{{ run.trigger }}</td>
-            <td>{{ run.started_at or '' }}</td>
-            <td>{{ run.ended_at or '' }}</td>
+            {# task 00040-3 — ScrapeRun 시각은 사용자 표시용 KST 문자열로
+               렌더한다. _serialize_scrape_run 이 'started_at_display' /
+               'ended_at_display' 필드를 KST 로 미리 포맷해 둔다. JS 폴링 후
+               교체 렌더에서도 동일 필드를 사용한다. #}
+            <td>{{ run.started_at_display or '' }}</td>
+            <td>{{ run.ended_at_display or '' }}</td>
             <td>
                 {% set totals = run.source_counts.totals if run.source_counts else None %}
                 {% if totals %}

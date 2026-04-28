@@ -60,6 +60,14 @@ from app.db.models import User
 # base.html 레이아웃 상속을 재사용한다.
 _WEB_TEMPLATES_DIR: Path = Path(__file__).resolve().parent.parent / "web" / "templates"
 _templates: Jinja2Templates = Jinja2Templates(directory=str(_WEB_TEMPLATES_DIR))
+# task 00040-3 — 본 라우터의 템플릿(login.html / register.html) 은 현재 시점에
+# datetime 표시가 없지만, base.html 등 공용 레이아웃을 다른 라우트와 공유하므로
+# KST 필터 등록을 일관되게 둔다 (일부 인스턴스만 누락되어 일관성이 깨지는 것을
+# 방지). ``Jinja2Templates`` 인스턴스 단위로 환경이 분리되어 있어 별도 등록이
+# 필요하다 (template_filters.register_kst_filters docstring 참조).
+from app.web.template_filters import register_kst_filters
+
+register_kst_filters(_templates)
 
 
 router = APIRouter(tags=["auth"])
