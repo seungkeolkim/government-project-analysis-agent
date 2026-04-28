@@ -109,31 +109,66 @@ ls -la ./data/
 > **복구 범위.** `./data/` 전체를 재귀 변경하므로 `data/backups/` · `data/downloads/` ·
 > `data/logs/` 가 모두 포함된다. 특정 항목만 변경하려면 경로를 좁혀 실행한다.
 
-### 타임존 (기본 Asia/Seoul)
+### 서버 시간대 KST 설정 (Asia/Seoul)
 
-`docker-compose.yml` 은 `app`·`scraper` 두 서비스에 **TZ=Asia/Seoul** 환경변수와
-호스트 **`/etc/localtime`** 의 읽기 전용 바인드 마운트를 함께 주입한다.
-결과적으로 컨테이너 안의 `date` 명령과 loguru 로그 타임스탬프가 KST(+0900)로
-표시된다. 별도 설정 없이 clone 후 `docker compose up` 만 하면 적용된다.
+본 프로젝트는 **KST 단일 운영** 을 전제한다 — 화면·로그·cron 의 모든 사용자
+표시 / 평가 시각이 Asia/Seoul 기준이다. DB 저장은 **UTC tz-aware 유지** 컨벤션
+이며, 표시·계산·입력·cron 의 사용 경계에서만 KST 변환이 적용된다 (task 00040).
 
-> **DB 는 여전히 UTC 로 저장된다.** `scrape_runs.started_at` 등 모든 시각
-> 컬럼은 `datetime.now(tz=UTC)` 로 기록되며 이 변경은 화면/로그의 시각
-> 표시에만 영향을 준다. APScheduler 의 cron 표현식도 여전히 UTC 기준으로
-> 해석되므로(`BackgroundScheduler(timezone=timezone.utc)` 고정) 기존 스케줄
-> 해석 시각은 바뀌지 않는다. 예) `0 3 * * *` = 매일 UTC 03:00 = KST 12:00.
+#### 코드 레벨 KST 적용 (호스트 TZ 비의존)
 
-다른 지역 타임존으로 운영하려면 `.env` 에 `HOST_TZ` 를 설정한다:
+다음 위치는 `app.timezone.KST` (= `ZoneInfo(\"Asia/Seoul\")`) 를 명시적으로
+사용하므로, 컨테이너 `TZ` env 나 호스트 `/etc/localtime` 이 빠져 있어도 동작한다:
+
+- **Jinja2 표시**: `kst_format` / `kst_date` 필터가 모든 timestamp 출력을 KST 로
+  변환 (`app/web/template_filters.py`).
+- **APScheduler cron**: `BackgroundScheduler(timezone=KST)` + `CronTrigger`
+  / `IntervalTrigger` 모두 KST. 예) `0 3 * * *` = **매일 KST 03:00** (= UTC
+  18:00 의 전날). `30 9 * * *` = **매일 KST 09:30**.
+- **loguru 로그**: sink format 의 timestamp 가 KST suffix 와 함께 명시 출력 —
+  `2026-04-28 09:30:45.123 KST | INFO | ...`.
+- **외부 응답 파싱**: IRIS / NTIS 의 마감일·접수시작 텍스트는 KST 가정으로
+  파싱 → UTC 로 변환 저장 (`app/cli.py::_parse_datetime_text`).
+
+#### 호스트 환경 권장 설정 (선택)
+
+코드 레벨 KST 가 이미 일관되므로 호스트 / 컨테이너 tz 설정은 **운영자 편의**
+용도다. 권장 이유는 docker logs 외부의 OS 로그(`journalctl`, `syslog`) 와
+시각이 일치해 트러블슈팅이 쉬워진다는 점.
+
+- **컨테이너 `TZ` env**: `docker-compose.yml` 이 `app`·`scraper` 두 서비스에
+  `TZ=${HOST_TZ:-Asia/Seoul}` 와 `/etc/localtime:/etc/localtime:ro` 바인드
+  마운트를 주입한다 (clone 후 `docker compose up` 즉시 적용).
+- **호스트 시계**: Linux 의 경우 `sudo timedatectl set-timezone Asia/Seoul`,
+  macOS 는 시스템 환경설정 → 날짜 및 시간. `/etc/localtime` 바인드 마운트가
+  호스트 tz 를 그대로 컨테이너로 전달하므로, 호스트가 KST 면 컨테이너도 KST.
+
+#### jobstore 자동 재해석 (00040-4)
+
+기존 스케줄러가 UTC 로 저장한 잡이 jobstore 에 남아 있어도, 웹 재기동 시
+`app.scheduler.service.start()` 가 trigger.timezone 을 KST 로 자동 재해석하고
+`reschedule_job` 으로 `next_run_time` 을 다시 계산한다. 운영자가 admin/schedule
+탭에서 수동 재등록할 필요 없다 — 단, 자동 재해석 실패가 docker logs 의
+`tz 재해석` 경고로 보이면 cron 표현식을 수동 재등록한다.
+
+#### 다른 지역 타임존으로 운영 (예외)
+
+코드 레벨 KST 는 고정이며 사용자별 / .env 설정으로 변경되지 않는다. 호스트
+컨테이너 표시만 다른 tz 로 보고 싶다면 (운영 권장 X):
 
 ```bash
-echo "HOST_TZ=UTC" >> .env               # 컨테이너만 UTC 로 회귀
-echo "HOST_TZ=Europe/Berlin" >> .env     # 다른 IANA 존으로 오버라이드
+echo \"HOST_TZ=UTC\" >> .env               # 컨테이너 OS 시각만 UTC 로 회귀
+echo \"HOST_TZ=Europe/Berlin\" >> .env     # 다른 IANA 존으로 오버라이드
 docker compose up -d --force-recreate app
 ```
 
-**revert 절차** (KST 동기화를 완전히 끄고 슬림 이미지 기본값인 UTC 로 돌아가는 경우):
-`docker-compose.yml` 의 두 서비스에서 ① `- TZ=${HOST_TZ:-Asia/Seoul}` 환경변수
-라인과 ② `- /etc/localtime:/etc/localtime:ro` 볼륨 라인을 제거한 뒤
-`docker compose up -d --force-recreate` 로 재생성한다.
+이 경우에도 화면·로그·cron 평가는 여전히 KST 다 (코드 레벨 고정). `date` 명령
+출력만 호스트 OS tz 가 된다.
+
+**revert 절차** (TZ env / `/etc/localtime` 마운트 모두 제거):
+`docker-compose.yml` 의 두 서비스에서 `- TZ=${HOST_TZ:-Asia/Seoul}` 환경변수
+라인과 `- /etc/localtime:/etc/localtime:ro` 볼륨 라인을 제거한 뒤
+`docker compose up -d --force-recreate`. 화면·로그·cron 은 여전히 KST.
 
 > **호스트 요구**: `/etc/localtime` 바인드 마운트는 Linux/macOS 의 기본 구성에
 > 존재한다. 해당 경로가 없는 최소 설치 환경이라면 compose 가 기동 시 오류를
@@ -141,6 +176,24 @@ docker compose up -d --force-recreate app
 > (다만 python:3.12-slim 에는 tzdata 전체가 내장되어 있지 않아 이름 조회가
 > 실패할 수 있어, 이때는 `docker/Dockerfile` 의 apt 설치 목록에 `tzdata` 를
 > 추가하고 이미지를 재빌드한다).
+
+#### 외부 응답 KST 가정 backfill (00040-5)
+
+기존 IRIS / NTIS 응답이 KST 가정 적용 이전에 잘못 저장된 row 를 보정하는
+일회성 스크립트가 있다. 운영 SQLite 점검 후 실행한다:
+
+```bash
+# 1) DB 백업 (운영자 책임)
+docker compose run --rm app python scripts/backup_db.py
+
+# 2) dry-run 으로 영향 범위 확인 (변경 없음)
+docker compose run --rm app python scripts/backfill_kst_assumption.py
+
+# 3) 결과를 검토한 뒤 실제 적용
+docker compose run --rm app python scripts/backfill_kst_assumption.py --apply
+```
+
+스크립트는 idempotent — 두 번 실행해도 이미 KST 가정 변환된 row 는 skip 된다.
 
 ---
 

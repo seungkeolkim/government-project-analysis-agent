@@ -72,6 +72,8 @@ from app.sources.yaml_editor import (
     load_sources_yaml_text,
     save_sources_yaml_text,
 )
+from app.timezone import format_kst
+from app.web.template_filters import register_kst_filters
 
 # ──────────────────────────────────────────────────────────────
 # 상수
@@ -87,6 +89,10 @@ LOG_FILE_MAX_BYTES: int = 1_000_000  # 1MB
 # 관리자 템플릿 루트. Phase 1b 인증 템플릿과 같은 디렉터리를 공유한다.
 _ADMIN_TEMPLATES_DIR: Path = Path(__file__).resolve().parent.parent / "templates"
 _templates: Jinja2Templates = Jinja2Templates(directory=str(_ADMIN_TEMPLATES_DIR))
+# task 00040-3 — 관리자 탭(수집 제어/sources.yaml/스케줄) 템플릿도 KST 필터를
+# 사용하도록 모듈 import 시점에 한 번 등록한다. ``app.web.main.create_app`` 의
+# 다른 Jinja2Templates 인스턴스와 별개라 따로 등록해야 한다.
+register_kst_filters(_templates)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -114,13 +120,24 @@ def _serialize_scrape_run(run: ScrapeRun) -> dict[str, Any]:
     템플릿 렌더링(HTML) 과 폴링 응답(JSON) 양쪽에서 공통 사용한다.
     민감 정보(예: pid) 는 관리자 전용 화면이므로 포함한다.
 
-    - datetime 은 ISO-8601 문자열.
-    - source_counts 는 dict 원본을 그대로 노출 (UI 는 subset 만 사용).
+    - ``started_at`` / ``ended_at`` 은 ISO-8601 UTC 문자열로 유지한다 (외부 JSON
+      컨슈머 호환).
+    - ``started_at_display`` / ``ended_at_display`` 는 task 00040-3 에서 추가된
+      KST 표시용 문자열(``\"%Y-%m-%d %H:%M:%S\"``) 이다. 관리자 [수집 제어] 탭
+      템플릿(``admin/_recent_runs_table.html`` / ``admin/control.html`` 의 폴링 JS)
+      이 사용자 화면 표기에 사용한다 — 사용자 원문 검증 ③ 의 \"ScrapeRun
+      started_at/ended_at 표시 KST\" 요건을 만족시키되 원본 ISO 필드는
+      깨뜨리지 않기 위함이다. None 입력은 빈 문자열로 통일.
+    - ``source_counts`` 는 dict 원본을 그대로 노출 (UI 는 subset 만 사용).
     """
     return {
         "id": run.id,
         "started_at": run.started_at.isoformat() if run.started_at else None,
         "ended_at": run.ended_at.isoformat() if run.ended_at else None,
+        # KST 표시용 — 화면 출력 직전에만 사용한다. 정렬·비교 로직은 절대 이
+        # 필드를 쓰지 말 것 (단순 표시 문자열).
+        "started_at_display": format_kst(run.started_at, "%Y-%m-%d %H:%M:%S"),
+        "ended_at_display": format_kst(run.ended_at, "%Y-%m-%d %H:%M:%S"),
         "status": run.status,
         "trigger": run.trigger,
         "source_counts": dict(run.source_counts or {}),

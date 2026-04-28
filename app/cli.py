@@ -100,6 +100,7 @@ from app.scrape_control.constants import (
 from app.scraper.attachment_downloader import scrape_attachments_for_announcement
 from app.scraper.base import BaseSourceAdapter
 from app.scraper.registry import get_adapter
+from app.timezone import KST
 from app.sources.config_schema import (
     ScrapeRunConfig,
     SourceConfig,
@@ -179,10 +180,23 @@ def _reset_cancel_flag_for_tests() -> None:
 
 
 def _parse_datetime_text(value: Optional[str]) -> Optional[datetime]:
-    """날짜 텍스트를 timezone-aware UTC datetime 으로 변환한다.
+    """날짜 텍스트를 KST 가정으로 파싱한 뒤 timezone-aware UTC datetime 으로 변환한다.
 
-    구분자 '/', '.' 는 '-' 로 정규화한 뒤 포맷을 순차 시도한다.
-    매칭되지 않으면 경고 로그를 남기고 None 을 반환한다.
+    배경 (task 00040-5):
+        IRIS / NTIS 응답의 마감일·접수시작·등록일 텍스트는 모두 한국 현지 시각
+        (Asia/Seoul) 의미다. 예를 들어 ``\"2026.05.01\"`` 은 \"KST 2026-05-01 자정\"
+        을 의미하므로, UTC 컨벤션으로 저장하려면 ``2026-04-30T15:00:00+00:00`` 으로
+        바꿔 넣어야 한다. 이전 구현은 naive 파싱 결과에 그대로 ``tzinfo=UTC`` 를
+        부착해 9시간 오차로 저장하던 결함이 있었다 (audit §5).
+
+    동작:
+        - 빈/None 입력은 None 통과.
+        - 구분자 ``/`` / ``.`` 는 ``-`` 로 정규화.
+        - 포맷 후보를 순차 시도해 매칭되면 KST 가정 → UTC 로 변환해 반환.
+        - 매칭되지 않으면 경고 로그 후 None.
+
+    Returns:
+        UTC tz-aware ``datetime`` 또는 None.
     """
     if not value:
         return None
@@ -193,7 +207,11 @@ def _parse_datetime_text(value: Optional[str]) -> Optional[datetime]:
             naive_dt = datetime.strptime(normalized_text, candidate_format)
         except ValueError:
             continue
-        return naive_dt.replace(tzinfo=timezone.utc)
+        # IRIS / NTIS 가 보내는 텍스트는 모두 한국 현지 시각을 의미한다 (사용자 원문
+        # \"외부 응답(IRIS/NTIS): KST 가정 → UTC 변환 저장\"). 시·분 정보가 없는
+        # 'YYYY-MM-DD' 입력은 KST 자정이 되며 UTC 로는 전날 15:00 으로 저장된다.
+        kst_aware = naive_dt.replace(tzinfo=KST)
+        return kst_aware.astimezone(timezone.utc)
 
     logger.warning("날짜 텍스트 파싱 실패 — 무시: {!r}", value)
     return None

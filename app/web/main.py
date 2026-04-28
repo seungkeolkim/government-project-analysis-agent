@@ -61,6 +61,7 @@ from app.web.observability import (
     install_unhandled_exception_handler,
 )
 from app.web.routes import admin_router, bulk_router, favorites_router, relevance_router
+from app.web.template_filters import register_kst_filters
 
 # ──────────────────────────────────────────────────────────────
 # 상수
@@ -287,6 +288,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    # task 00040-3 — 모든 timestamp 표시는 KST 기준 필터(kst_format/kst_date)
+    # 경유로 통일한다. create_app 직후 한 번만 등록하면 충분하지만, 같은 키에
+    # 다시 대입해도 안전하므로 테스트에서 create_app 을 여러 번 호출해도
+    # idempotent 하다 (template_filters.register_kst_filters docstring 참조).
+    register_kst_filters(templates)
 
     fastapi_app = FastAPI(
         title="사업공고 로컬 열람",

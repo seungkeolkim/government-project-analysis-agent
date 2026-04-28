@@ -52,7 +52,8 @@
                     <span class="admin-badge admin-badge--running">진행 중</span>
                     <span class="admin-state__text">
                         id={{ running.id }} · trigger={{ running.trigger }} · pid={{ running.pid }}
-                        · started_at={{ running.started_at }}
+                        {# task 00040-3 — KST 표시용 사전 포맷 필드 사용. #}
+                        · started_at={{ running.started_at_display }}
                     </span>
                 </p>
                 {% if running.source_counts and running.source_counts.active_sources %}
@@ -117,8 +118,10 @@
     // fallback 은 5000ms.
     var defaultIntervalMs = 5000;
 
-    function formatDateTimeIso(value) {
-      // ISO 문자열 그대로 노출 — timezone/포맷 변환은 UI 에서 하지 않는다.
+    function formatDateTimeDisplay(value) {
+      // task 00040-3 — 서버가 'started_at_display' / 'ended_at_display' 필드로
+      // 이미 KST 포맷('%Y-%m-%d %H:%M:%S')으로 만들어 보내므로 JS 측 변환은
+      // 하지 않는다. None/누락 값에 대비해 빈 문자열로 폴백한다.
       return value || "";
     }
 
@@ -232,7 +235,7 @@
         '    id=' + running.id +
         '    · trigger=' + running.trigger +
         '    · pid=' + (running.pid != null ? running.pid : "?") +
-        '    · started_at=' + formatDateTimeIso(running.started_at) +
+        '    · started_at=' + formatDateTimeDisplay(running.started_at_display) +
         '  </span>' +
         '</p>' +
         sourcesLine +
@@ -266,8 +269,8 @@
           "<td>" + run.id + "</td>" +
           "<td>" + run.status + err + "</td>" +
           "<td>" + run.trigger + "</td>" +
-          "<td>" + formatDateTimeIso(run.started_at) + "</td>" +
-          "<td>" + formatDateTimeIso(run.ended_at) + "</td>" +
+          "<td>" + formatDateTimeDisplay(run.started_at_display) + "</td>" +
+          "<td>" + formatDateTimeDisplay(run.ended_at_display) + "</td>" +
           "<td>" + countsSummary + "</td>" +
           '<td><a href="/admin/scrape/runs/' + run.id + '/log">로그</a></td>' +
           "</tr>"

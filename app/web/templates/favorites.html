@@ -192,7 +192,7 @@
                         </td>
                         <td class="col-deadline">
                             {% if item.ann_deadline_at %}
-                                {{ item.ann_deadline_at.strftime("%Y-%m-%d %H:%M") }}
+                                {{ item.ann_deadline_at | kst_format }}
                             {% else %}-{% endif %}
                         </td>
                         <td class="col-relevance">

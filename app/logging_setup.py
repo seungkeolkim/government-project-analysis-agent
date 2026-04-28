@@ -28,6 +28,10 @@ import sys
 from loguru import logger
 
 from app.config import Settings, get_settings
+# task 00040-4 — 모든 로그 record 의 timestamp 를 명시적 KST 로 찍는다.
+# ``app.timezone`` 이 KST 단일 진실 소스 (호스트 컨테이너 ``TZ`` env 미설정에서도
+# 코드 레벨 변환이 동작하도록).
+from app.timezone import KST
 
 # stdlib logging 을 흡수해 loguru 로 다시 내보내는 핸들러에 주의가 필요한
 # 로거 이름들. uvicorn 계열은 자체 ``default`` logging config 가 있어 직접
@@ -48,6 +52,35 @@ _NOISY_LOGGER_NAMES: tuple[str, ...] = (
     "sqlalchemy.dialects",
     "alembic.runtime.migration",
 )
+
+
+def _patch_record_with_kst_time(record: dict) -> None:
+    """모든 loguru record 에 KST 변환된 timestamp 문자열을 부착한다.
+
+    배경 (task 00040-4):
+        loguru 의 ``{time:...}`` 토큰은 ``record[\"time\"]`` 의 호스트 로컬 tz 를
+        그대로 사용한다. 컨테이너에 ``TZ=Asia/Seoul`` env (00029) 가 있으면
+        의도대로 KST 로 찍히지만, env 가 빠진 호스트(개발자 노트북 등)에서는
+        호스트 tz 로 찍힌다. 사용자 원문 검증 ⑥ \"컨테이너 TZ 미설정에서도
+        코드 레벨 변환 동작\" 을 만족시키기 위해 patcher 단계에서 명시적으로
+        ``astimezone(KST)`` 를 적용한 결과를 ``record['extra']['kst_time_text']``
+        로 미리 만들어 둔다.
+
+    포맷 정밀도:
+        기존 sink format ``{time:YYYY-MM-DD HH:mm:ss.SSS}`` 의 millisecond
+        정밀도를 그대로 유지한다. ``%f`` 는 microsecond(6자리)이므로 1000 으로
+        나눠 millisecond 3자리로 자른다.
+
+    Args:
+        record: loguru 가 emit 직전에 patcher 로 넘겨주는 record dict.
+            ``record['time']`` 은 timezone-aware ``datetime`` (loguru 내부에서
+            호스트 로컬 tz 가 부착된 상태).
+    """
+    kst_time = record["time"].astimezone(KST)
+    record["extra"]["kst_time_text"] = (
+        kst_time.strftime("%Y-%m-%d %H:%M:%S")
+        + f".{kst_time.microsecond // 1000:03d}"
+    )
 
 
 class InterceptHandler(logging.Handler):
@@ -162,12 +195,22 @@ def configure_logging(settings: Settings | None = None) -> None:
     # "요청 기반 로그가 아님" 을 명확히 한다. ``logger.configure(extra=...)`` 은
     # 전역 기본 extras 를 덮어쓰므로 현재 사용 중인 다른 extra 키가 있다면
     # 함께 나열해야 하지만, 본 레포지토리에는 아직 없다.
-    logger.configure(extra={"request_id": "-"})
+    #
+    # task 00040-4 — patcher 로 모든 record 에 KST 변환된 timestamp 문자열
+    # ``extra[kst_time_text]`` 를 부착해 sink format 에서 그대로 출력한다.
+    # ``{time:...}`` 토큰을 사용하면 호스트 tz 의존성이 남으므로 사용하지
+    # 않는다. patcher 등록은 모든 record 적용을 보장하는 가장 단순한 경로.
+    logger.configure(
+        extra={"request_id": "-", "kst_time_text": "-"},
+        patcher=_patch_record_with_kst_time,
+    )
     logger.add(
         sys.stderr,
         level=level_name,
         format=(
-            "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> "
+            # extra[kst_time_text] 는 patcher 가 모든 record 에 부착한다
+            # (호스트 TZ 비의존). suffix 'KST' 로 의도된 표시 tz 를 명시한다.
+            "<green>{extra[kst_time_text]} KST</green> "
             "| <level>{level: <8}</level> "
             "| <magenta>req={extra[request_id]}</magenta> "
             "| <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> "
@@ -190,4 +233,4 @@ def configure_logging(settings: Settings | None = None) -> None:
     )
 
 
-__all__ = ["configure_logging", "InterceptHandler"]
+__all__ = ["configure_logging", "InterceptHandler", "_patch_record_with_kst_time"]
