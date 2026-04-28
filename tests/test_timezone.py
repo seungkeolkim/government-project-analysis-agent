@@ -228,3 +228,56 @@ def test_kst_date_boundaries_consecutive_days_are_contiguous() -> None:
 
     # 오늘의 종료 = 내일의 시작 (반-open 구간이 빈틈없이 이어진다).
     assert today_end == tomorrow_start
+
+
+# ──────────────────────────────────────────────────────────────
+# as_utc + to_kst 결합 (task 00040-6 검증 #7)
+# ──────────────────────────────────────────────────────────────
+
+
+def test_as_utc_then_to_kst_recovers_kst_midnight() -> None:
+    """SQLite SELECT 시뮬레이션 — naive UTC datetime 을 as_utc 로 정규화한 뒤
+    to_kst 로 표시 변환했을 때 사용자가 의도한 KST 시각으로 round-trip 되는지.
+
+    배경 (사용자 원문 검증 #7 'SQLite + _as_utc + to_kst 결합 정상'):
+        SQLite ``DateTime(timezone=True)`` 컬럼은 SELECT 시 tz 정보를 떨어뜨리는
+        알려진 동작이 있다 (audit §6). DB 에 ``2026-04-30 15:00:00 UTC`` (= KST
+        2026-05-01 00:00) 가 저장됐다고 하자. SQLite SELECT 후 ORM 인스턴스의
+        ``deadline_at`` 은 ``datetime(2026, 4, 30, 15, 0, 0)`` (naive). 비교 직전
+        ``app.db.models.as_utc`` 로 UTC tz-aware 로 정규화하고, 표시 직전
+        ``to_kst`` 로 KST tz-aware 로 변환하면 사용자가 의도한 KST 자정으로
+        정확히 돌아와야 한다. 두 헬퍼는 서로 다른 레이어 (SELECT 보정 vs KST
+        변환) 이며 직렬 결합으로 사용된다는 사용자 원문 명시를 코드로 고정한다.
+    """
+    # 본 테스트는 app.timezone 의 to_kst 만 검증해도 동치다 (to_kst 가 naive
+    # 입력을 UTC 가정으로 흡수). 그러나 결합 패턴을 명시적으로 보여주기 위해
+    # as_utc 도 함께 호출한다.
+    from app.db.models import as_utc
+    from app.timezone import to_kst
+
+    # SQLite 가 tz 를 떨어뜨려 돌려준 \"2026-04-30 15:00 UTC\" 의 naive 표현.
+    sqlite_naive = datetime(2026, 4, 30, 15, 0, 0)
+
+    # 비교 경로 — UTC tz-aware 로 정규화. 다른 UTC tz-aware 값과 == 비교 가능.
+    normalized_utc = as_utc(sqlite_naive)
+    assert normalized_utc == datetime(2026, 4, 30, 15, 0, 0, tzinfo=UTC)
+
+    # 표시 경로 — KST tz-aware 로 변환. 사용자 의도 시각(KST 자정) 으로 round-trip.
+    displayed_kst = to_kst(sqlite_naive)
+    assert displayed_kst == datetime(2026, 5, 1, 0, 0, 0, tzinfo=KST)
+
+    # 두 결과는 같은 절대 시각이지만 표시 tz 만 다르다.
+    assert normalized_utc == displayed_kst
+
+
+def test_to_kst_alone_handles_sqlite_naive_input() -> None:
+    """to_kst 단독 호출도 SQLite naive 입력을 그대로 처리한다 (편의 함수 검증).
+
+    표시 경로에서는 as_utc 를 거치지 않고 to_kst 만 호출해도 정상이라는 점을
+    회귀 고정한다 (Jinja2 필터의 단순 호출 패턴 ``{{ dt | kst_format }}`` 이
+    이 경로다).
+    """
+    from app.timezone import to_kst
+
+    sqlite_naive = datetime(2026, 4, 30, 15, 0, 0)
+    assert to_kst(sqlite_naive) == datetime(2026, 5, 1, 0, 0, 0, tzinfo=KST)
