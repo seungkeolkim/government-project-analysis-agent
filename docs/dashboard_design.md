@@ -260,48 +260,76 @@ A 섹션 카드가 모두 0 으로 뜨는 경우의 인지 부담을 README 한 
 
 비교일은 드롭다운 선택 (전날 / 전주 / 전월 / 전년) 또는 직접 선택 캘린더로
 들어오는데, 직접 선택 캘린더는 가용 날짜만 활성이지만 드롭다운 선택은 산술
-계산 결과가 가용 날짜가 아닐 수 있다. 이 경우의 처리:
+계산 결과가 가용 날짜가 아닐 수 있다. 이 경우의 처리는 두 단계로 나뉜다 —
+(1) `_resolve_effective_compare_date` 가 비교 baseline 일자를 결정하고,
+(2) `build_section_a` 가 `(range_from_exclusive, base_date]` 구간 안에 snapshot
+이 1건이라도 있는지 따져 진짜 "데이터 없음" 인지 최종 판정한다 (task 00044
+fix — baseline 부재라도 기준일 snapshot 이 있으면 누적 결과를 표시).
 
 ```
-def resolve_comparison_snapshot(session, *, requested_date) -> tuple[date | None, str | None]:
+def _resolve_effective_compare_date(session, *, requested_date) -> tuple[date | None, bool, str]:
     """
-    Returns (effective_snapshot_date, fallback_message) — None 이면 사용 안 됨.
+    Returns (effective_compare_date, applied, message).
+    - effective_compare_date is None == "비교 baseline 부재" 신호.
+    - applied 는 UI 가 안내문을 띄울지 결정 — (a) False, (b)/(c-NEW) True.
     """
     if get_scrape_snapshot_by_date(session, requested_date) is not None:
-        return requested_date, None
-    # 직전 가용 snapshot 검색 (snapshot_date < requested_date 중 최댓값).
+        return requested_date, False, ""              # (a)
     nearest = find_nearest_previous_snapshot_date(session, target_date=requested_date)
-    if nearest is None:
-        return None, None  # A 섹션 "데이터 없음" — §4.3 의 (b) 안내문 별도 처리.
-    return nearest, build_fallback_message(requested_date, nearest)
+    if nearest is not None:
+        return nearest, True, build_fallback_message(requested_date, nearest)  # (b)
+    # (c-NEW) baseline 없음. build_section_a 가 구간 안 snapshot 유무로 (c-NEW)
+    # vs (d) 분기를 마무리한다.
+    return None, True, build_no_baseline_message(requested_date)
 ```
 
-발동 조건은 두 가지:
+발동 조건은 네 가지로 세분된다:
 
-(a) `requested_date` snapshot 미존재 + 직전 snapshot 존재 → A 섹션은 직전
-    snapshot 으로 머지 + 안내문 (§4.3 (a)).
-(b) `requested_date` 이전 snapshot 자체가 전무 → A 섹션 "데이터 없음" + B 섹션
-    정상 (사용자 원문 검증 8).
+(a) `requested_date` snapshot 존재 → 그대로 사용. fallback 미발동.
+(b) `requested_date` snapshot 미존재 + 직전 snapshot 존재 → 직전 snapshot 으로
+    머지 baseline 잡고 안내문 (§4.3 (a)). fallback 발동.
+(c-NEW) `requested_date` 이전 snapshot 전무 + (requested_date, base_date] 구간
+    안에 snapshot 존재 → baseline 없이 누적 결과만 표시. 카드의 compare_count /
+    delta / delta_direction 은 모두 None → UI 의 "비교일 — " 분기 발동. 안내문
+    (§4.3 (a-NEW)) 으로 사용자에게 "compare 가 — 인 이유" 를 알린다 (사용자
+    원문 task 00044 — 기준일 snapshot 이 있는데도 0건으로 표시되던 버그 수정).
+(d) `requested_date` 이전 snapshot 도 없고, (requested_date, base_date] 구간
+    안에도 snapshot 0건 → 진짜 "데이터 없음" (§4.3 (b)). 카드 5종 모두 0 +
+    expand 빈 list. fallback 안내문은 띄우지 않고 "데이터 없음" 박스만 띄움
+    (사용자 원문 검증 8).
 
 **B 섹션 영향 없음**: B 섹션은 DB select 기반(`is_current=True` 활성 공고)
 이라 snapshot 가용성과 무관하게 정상 표시된다.
 
 ### §4.3 안내문 문구 (사용자 원문 그대로)
 
-(a) fallback 발동 — 직전 snapshot 사용:
+(a) fallback 발동 — 직전 snapshot 사용 (§4.2 분기 (b)):
 
 ```
 비교일 {requested_date} 일자 snapshot 이 없어 {effective_date} 일자 snapshot
 을 사용했습니다.
 ```
 
-(b) 비교일 이전 snapshot 전무 — A 섹션 데이터 없음:
+(a-NEW) baseline 부재 + 구간 안 snapshot 존재 (§4.2 분기 (c-NEW)):
+
+```
+비교일 {requested_date} 일자 snapshot 도, 그 이전 snapshot 도 없어 baseline
+없이 기준일까지의 누적 변화만 표시합니다.
+```
+
+카드 5종은 누적 머지 결과의 base_count 만 노출하고, compare_count / delta /
+delta_direction 은 모두 None → 템플릿의 "비교일 — " 분기로 렌더된다.
+
+(b) 비교일 이전 snapshot 전무 + 구간 안에도 snapshot 0건 — A 섹션 데이터
+없음 (§4.2 분기 (d)):
 
 ```
 데이터 없음
 ```
 
 (B 섹션 정상 표시는 그대로 유지 — A 섹션 카드 영역에만 회색 박스로 표기.)
+이 경우 fallback 안내문은 띄우지 않는다 — "데이터 없음" 박스가 우선이고
+사용자에게 baseline 부재 사실은 의미가 없다.
 
 (c) B 섹션 `to` 가 과거 (사용자 원문 그대로):
 
@@ -422,8 +450,11 @@ ID 리스트를 그대로 재사용해 추가 쿼리 없이 카운트한다.
   후 counts 의 차이로 계산" 규칙을 따른다 — task 00042-3 에서 v1 의 "단일 기준일
   snapshot.counts" 해석을 누적 머지 결과로 수정.
 - M: 비교일 effective snapshot 의 단일 `payload.counts[category_key]` (fallback
-  적용 후의 일자). 비교일 effective snapshot 이 아예 없는 "데이터 없음" 분기
-  (§4.2 (c)) 에서는 카드 5종 모두 base_count=0 + compare_count=None 으로 노출.
+  적용 후의 일자). 비교일 effective snapshot 이 아예 없고 (from, to] 구간 안에도
+  snapshot 이 0건인 "데이터 없음" 분기 (§4.2 (d)) 에서는 카드 5종 모두 base_count=0
+  + compare_count=None 으로 노출. baseline 만 없고 구간 안 snapshot 은 있는 분기
+  (§4.2 (c-NEW)) 에서는 base_count 는 누적 머지 결과 그대로, compare_count /
+  delta / delta_direction 만 None 으로 노출 — 템플릿의 "비교일 — " 분기 활용.
 - X: `N - M` 의 절대값. 부호에 따라 ↑ / ↓ / "변동 없음" 선택.
 
 expand 리스트의 행 list 는 `(from, to]` 누적 머지 결과의 카테고리 ID 전체 — 즉

@@ -235,15 +235,22 @@ def build_section_a(
     동작 순서 (``docs/dashboard_design.md §6.3``):
         1. ``requested_compare_date`` 의 snapshot 존재 여부 확인.
         2. 없으면 ``find_nearest_previous_snapshot_date`` 로 fallback. 직전
-           snapshot 도 없으면 \"데이터 없음\" 분기.
-        3. ``effective_compare_date`` 결정 후 ``(effective_compare_date, base_date]``
-           구간의 snapshot list 를 ``list_snapshots_in_range`` 로 fetch.
-        4. ``reduce(merge_snapshot_payload, payloads, None)`` 로 누적 머지 —
-           merge 의 normalize_payload 가 None 입력을 빈 정규형으로 변환해 주므로
-           초깃값을 None 으로 두면 첫 reduce step 이 ``merge(None, first)`` =
-           ``normalize(first)`` 로 idempotent.
+           snapshot 도 없으면 ``effective_compare_date`` 는 None — \"비교 baseline
+           부재\" 신호로 다음 단계가 사용한다 (구간 안에 snapshot 이 있는지
+           조회한 뒤 진짜 \"데이터 없음\" 인지 판정한다).
+        3. 누적 머지 대상 구간의 ``range_from_exclusive`` 결정 — baseline 이 있으면
+           ``effective_compare_date``, 없으면 ``requested_compare_date`` 그대로
+           사용해 ``(range_from_exclusive, base_date]`` 구간의 snapshot list 를
+           ``list_snapshots_in_range`` 로 fetch.
+        4. baseline 부재 + 구간 안 snapshot 도 0건 → 진짜 \"데이터 없음\" 분기.
+           그 외에는 ``reduce(merge_snapshot_payload, payloads, None)`` 로 누적
+           머지 — merge 의 normalize_payload 가 None 입력을 빈 정규형으로 변환해
+           주므로 초깃값을 None 으로 두면 첫 reduce step 이
+           ``merge(None, first)`` = ``normalize(first)`` 로 idempotent.
         5. 머지 결과 5종 카테고리 ID union → ``list_announcements_by_ids`` 1회.
-        6. 카테고리별 카드 데이터 조립 (counts 비교 + expand items).
+        6. 카테고리별 카드 데이터 조립 (counts 비교 + expand items). baseline 이
+           없는 경우 카드의 compare_count / delta / delta_direction 은 모두 None
+           으로 노출 (UI 의 \"비교일 — \" 분기를 발동).
 
     Args:
         session:                호출자 세션.
@@ -258,21 +265,42 @@ def build_section_a(
         ``SectionAData`` — 카드 list + fallback + 위젯 재사용용 ID list.
     """
     # ── (1) (2) fallback 적용 — effective_compare_date 결정 ───────────────
-    effective_compare_date, fallback_message, fallback_applied, is_no_data = (
+    effective_compare_date, fallback_applied, fallback_message = (
         _resolve_effective_compare_date(
             session, requested_compare_date=requested_compare_date
         )
     )
 
+    has_baseline = effective_compare_date is not None
+
+    # ── (3) (range_from_exclusive, base_date] 구간 snapshot list ──────────
+    # baseline 이 있으면 그 일자가 (from, to] 구간의 from 점이 되고,
+    # 없으면 사용자가 요청한 비교일을 그대로 from 점으로 써서 \"기준일까지의
+    # 누적 변화\" 만 보여 준다 (사용자 원문: scrape_snapshots 의 활용 일자가
+    # (from, to] 로 잘 되어 있으나 to 일자 snapshot 이 무시되던 버그 수정).
+    range_from_exclusive = (
+        effective_compare_date if has_baseline else requested_compare_date
+    )
+    snapshots_in_range = list_snapshots_in_range(
+        session,
+        from_exclusive=range_from_exclusive,
+        to_inclusive=base_date,
+    )
+
+    # ── (4-pre) 진짜 \"데이터 없음\" 판정 — baseline 도 없고 구간 안에 ─────
+    # snapshot 도 0건 일 때만 카드 5종을 모두 0 으로 채워 반환한다. baseline
+    # 이 없더라도 구간 안에 snapshot 이 1건이라도 있으면 누적 머지를 진행해
+    # 카드/expand 를 표시한다 (compare_count=None 으로 \"비교일 — \" 노출).
+    is_no_data = not has_baseline and not snapshots_in_range
+
     fallback = SectionAFallback(
-        applied=fallback_applied,
-        message=fallback_message,
+        applied=fallback_applied and not is_no_data,
+        message="" if is_no_data else fallback_message,
         requested_compare_date=requested_compare_date,
         effective_compare_date=effective_compare_date,
         is_no_data=is_no_data,
     )
 
-    # ── \"데이터 없음\" 분기 — A 섹션 카드를 모두 0 으로 채우고 expand 비움 ─
     if is_no_data:
         empty_cards = _build_empty_cards()
         return SectionAData(
@@ -281,15 +309,6 @@ def build_section_a(
             merged_announcement_ids=[],
             merged_canonical_group_ids=[],
         )
-
-    # ── (3) (from, to] 구간 snapshot list ─────────────────────────────────
-    # effective_compare_date 가 보장되어 있다 (None 이면 위에서 is_no_data 분기로 빠짐).
-    assert effective_compare_date is not None
-    snapshots_in_range = list_snapshots_in_range(
-        session,
-        from_exclusive=effective_compare_date,
-        to_inclusive=base_date,
-    )
 
     # ── (4) reduce 누적 머지 ──────────────────────────────────────────────
     # merge_snapshot_payload 는 None 입력을 normalize_payload 로 빈 정규형으로
@@ -312,11 +331,20 @@ def build_section_a(
     }
 
     # ── (6) 카테고리별 카드 + expand items 조립 ──────────────────────────
-    compare_payload = _fetch_compare_payload(session, effective_compare_date)
+    # baseline 이 없으면 비교일 payload 는 정규형 빈 dict 으로 두고, _build_cards
+    # 가 has_baseline=False 신호를 받아 compare_count/delta/direction 을 None 으로
+    # 강제한다.
+    if has_baseline:
+        assert effective_compare_date is not None
+        compare_payload = _fetch_compare_payload(session, effective_compare_date)
+    else:
+        compare_payload = normalize_payload(None)
+
     cards = _build_cards(
         merged_payload=merged_payload,
         compare_payload=compare_payload,
         announcement_meta_map=announcement_meta_map,
+        has_baseline=has_baseline,
     )
 
     canonical_group_ids = sorted({
@@ -342,37 +370,52 @@ def _resolve_effective_compare_date(
     session: Session,
     *,
     requested_compare_date: date,
-) -> tuple[date | None, str, bool, bool]:
+) -> tuple[date | None, bool, str]:
     """비교일 fallback 정책 (``docs/dashboard_design.md §4.2``) 을 적용한다.
 
     분기:
         (a) 요청된 비교일에 snapshot 이 있다 → 그대로 사용. fallback 미발동.
         (b) 없지만 그 이전 snapshot 이 있다 → 가장 가까운 이전 snapshot 사용 +
-            안내문 발동.
-        (c) 비교일 이전 snapshot 전무 → effective=None, is_no_data=True.
+            안내문 발동 (\"~ 일자 snapshot 을 사용했습니다.\").
+        (c-NEW) 비교일 이전 snapshot 도 전무 → ``effective=None`` 로 \"비교
+            baseline 부재\" 신호. 호출자가 (requested_compare_date, base_date]
+            구간 안에 snapshot 이 있는지 별도로 검사해 진짜 \"데이터 없음\"
+            인지 판정한다. baseline 부재라도 구간 안에 snapshot 이 있으면 누적
+            결과를 보여 주므로, 본 함수는 안내문도 \"baseline 없이 누적 변화만
+            표시\" 형식으로 같이 돌려준다.
 
     Returns:
-        ``(effective_compare_date, message, fallback_applied, is_no_data)``.
-        fallback_applied 와 is_no_data 는 상호 배타 — fallback_applied=True
-        는 (b), is_no_data=True 는 (c). 둘 다 False 는 (a).
+        ``(effective_compare_date, fallback_applied, message)``.
+        - effective_compare_date is None 은 \"baseline 부재\" 신호.
+        - fallback_applied 는 UI 가 안내문 박스를 보여 줄지 결정 — (a) False,
+          (b)/(c-NEW) True. (단, 호출자가 진짜 \"데이터 없음\" 분기로 판정한
+          경우에는 데이터 없음 박스가 우선이라 fallback_applied 를 무시한다.)
     """
     requested_snapshot = get_scrape_snapshot_by_date(session, requested_compare_date)
     if requested_snapshot is not None:
-        return requested_compare_date, "", False, False
+        # (a) requested 그대로 사용.
+        return requested_compare_date, False, ""
 
     nearest_previous = find_nearest_previous_snapshot_date(
         session, target_date=requested_compare_date
     )
-    if nearest_previous is None:
-        # (c) 비교일 이전 snapshot 전무.
-        return None, "", False, True
+    if nearest_previous is not None:
+        # (b) fallback 발동 — 사용자 원문 §4.3 (a) 안내문 그대로.
+        message = (
+            f"비교일 {requested_compare_date.isoformat()} 일자 snapshot 이 없어 "
+            f"{nearest_previous.isoformat()} 일자 snapshot 을 사용했습니다."
+        )
+        return nearest_previous, True, message
 
-    # (b) fallback 발동 — 사용자 원문 §4.3 (a) 안내문 그대로.
-    message = (
-        f"비교일 {requested_compare_date.isoformat()} 일자 snapshot 이 없어 "
-        f"{nearest_previous.isoformat()} 일자 snapshot 을 사용했습니다."
+    # (c-NEW) baseline 없음. 호출자가 (from, to] 구간 안에 snapshot 이 있는지
+    # 따져 진짜 데이터 없음 인지 판정한다. 구간 안에 snapshot 이 있으면
+    # 본 안내문이 \"compare 가 — 인 이유\" 를 사용자에게 알려 준다.
+    no_baseline_message = (
+        f"비교일 {requested_compare_date.isoformat()} 일자 snapshot 도, "
+        "그 이전 snapshot 도 없어 baseline 없이 기준일까지의 누적 변화만 "
+        "표시합니다."
     )
-    return nearest_previous, message, True, False
+    return None, True, no_baseline_message
 
 
 def _fetch_compare_payload(
@@ -436,6 +479,7 @@ def _build_cards(
     merged_payload: dict[str, Any],
     compare_payload: dict[str, Any],
     announcement_meta_map: dict[int, Announcement],
+    has_baseline: bool = True,
 ) -> list[SectionACategoryCard]:
     """5종 카테고리 카드 데이터를 조립한다.
 
@@ -444,6 +488,14 @@ def _build_cards(
         합산\" — base_count 는 ``merged_payload[\"counts\"][category_key]`` 에서,
         compare_count 는 ``compare_payload[\"counts\"][category_key]`` 에서 직접
         가져온다. ID 리스트의 ``len(items)`` 으로 표시하지 않는다.
+
+    baseline 부재 분기 (``has_baseline=False``):
+        비교 baseline snapshot 자체가 없을 때 (사용자 원문 시나리오 — 비교일도
+        그 이전 snapshot 도 없지만 기준일 snapshot 은 있다)는 카드의
+        ``compare_count`` / ``delta`` / ``delta_direction`` 을 모두 None 으로
+        강제한다. 템플릿이 ``compare_count is none`` 분기로 \"비교일 — \" 표기를
+        그대로 보여 주도록 신호를 주는 셈이다. ``compare_payload`` 인자는 이
+        분기에서는 사용되지 않으므로 빈 정규형 dict 이어도 무방하다.
 
     중복 배지:
         내용 변경 행에 한해 같은 announcement_id 가 다른 카테고리에도 등장하면
@@ -468,14 +520,24 @@ def _build_cards(
         is_transition = descriptor["is_transition"] == "true"
 
         base_count = int(merged_counts.get(key, 0))
-        compare_count = int(compare_counts.get(key, 0)) if compare_counts else 0
-        delta = base_count - compare_count
-        if delta > 0:
-            direction = "up"
-        elif delta < 0:
-            direction = "down"
+
+        compare_count: int | None
+        delta: int | None
+        direction: str | None
+        if has_baseline:
+            compare_count = int(compare_counts.get(key, 0)) if compare_counts else 0
+            delta = base_count - compare_count
+            if delta > 0:
+                direction = "up"
+            elif delta < 0:
+                direction = "down"
+            else:
+                direction = "flat"
         else:
-            direction = "flat"
+            # baseline 부재 — UI 의 \"비교일 — \" 분기에 매핑되는 None 트리오.
+            compare_count = None
+            delta = None
+            direction = None
 
         items = _build_expand_items_for_category(
             descriptor=descriptor,
