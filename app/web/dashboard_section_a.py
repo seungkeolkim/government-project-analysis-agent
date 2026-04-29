@@ -299,6 +299,11 @@ def build_section_a(
     # 카드/expand 를 표시한다 (compare_count=None 으로 \"비교일 — \" 노출).
     is_no_data = not has_baseline and not snapshots_in_range
 
+    # is_no_data 가 True 면 fallback 박스 대신 데이터 없음 박스가 우선이므로
+    # applied / message 를 강제로 빈 값으로 클램프한다. (c-NEW) 분기는 이미
+    # _resolve_effective_compare_date 에서 fallback_applied=False 로 돌아오므로
+    # 별도 클램프 없이 그대로 흐른다 (사용자 원문 task 00048 — baseline 부재
+    # 자체로는 노란 경고를 띄우지 않는다).
     fallback = SectionAFallback(
         applied=fallback_applied and not is_no_data,
         message="" if is_no_data else fallback_message,
@@ -382,19 +387,23 @@ def _resolve_effective_compare_date(
     분기:
         (a) 요청된 비교일에 snapshot 이 있다 → 그대로 사용. fallback 미발동.
         (b) 없지만 그 이전 snapshot 이 있다 → 가장 가까운 이전 snapshot 사용 +
-            안내문 발동 (\"~ 일자 snapshot 을 사용했습니다.\").
+            안내문 발동 (\"~ 일자 snapshot 을 사용했습니다.\"). 사용자에게
+            \"range 가 실제로 shift 됐다\" 는 의미 있는 정보다.
         (c-NEW) 비교일 이전 snapshot 도 전무 → ``effective=None`` 로 \"비교
             baseline 부재\" 신호. 호출자가 (requested_compare_date, base_date]
             구간 안에 snapshot 이 있는지 별도로 검사해 진짜 \"데이터 없음\"
-            인지 판정한다. baseline 부재라도 구간 안에 snapshot 이 있으면 누적
-            결과를 보여 주므로, 본 함수는 안내문도 \"baseline 없이 누적 변화만
-            표시\" 형식으로 같이 돌려준다.
+            인지 판정한다. (from, to] 누적 머지 모델에서 baseline 은 카드의
+            ``compare_count`` 표시용일 뿐 데이터 무결성에 영향을 주지 않으므로,
+            본 분기에서는 fallback_applied=False / message=\"\" 로 두고 노란
+            안내문을 띄우지 않는다 — 카드의 ``compare_count`` 는 None 으로 빠져
+            템플릿이 \"비교일 — \" 분기로 \"비교 기준 없음\" 을 자체 표시한다
+            (사용자 원문 task 00048).
 
     Returns:
         ``(effective_compare_date, fallback_applied, message)``.
         - effective_compare_date is None 은 \"baseline 부재\" 신호.
-        - fallback_applied 는 UI 가 안내문 박스를 보여 줄지 결정 — (a) False,
-          (b)/(c-NEW) True. (단, 호출자가 진짜 \"데이터 없음\" 분기로 판정한
+        - fallback_applied 는 UI 가 안내문 박스를 보여 줄지 결정 — (a)/(c-NEW)
+          False, (b) True. (단, 호출자가 진짜 \"데이터 없음\" 분기로 판정한
           경우에는 데이터 없음 박스가 우선이라 fallback_applied 를 무시한다.)
     """
     requested_snapshot = get_scrape_snapshot_by_date(session, requested_compare_date)
@@ -414,14 +423,10 @@ def _resolve_effective_compare_date(
         return nearest_previous, True, message
 
     # (c-NEW) baseline 없음. 호출자가 (from, to] 구간 안에 snapshot 이 있는지
-    # 따져 진짜 데이터 없음 인지 판정한다. 구간 안에 snapshot 이 있으면
-    # 본 안내문이 \"compare 가 — 인 이유\" 를 사용자에게 알려 준다.
-    no_baseline_message = (
-        f"비교일 {requested_compare_date.isoformat()} 일자 snapshot 도, "
-        "그 이전 snapshot 도 없어 baseline 없이 기준일까지의 누적 변화만 "
-        "표시합니다."
-    )
-    return None, True, no_baseline_message
+    # 따져 (c-NEW) vs (d) 분기를 마무리한다. baseline 부재 자체는 카드의
+    # compare_count 표시 source 일 뿐 누적 머지 결과에 영향을 주지 않으므로
+    # 노란 안내문을 띄우지 않는다 — 카드의 \"비교일 — \" 표기로 충분한 신호.
+    return None, False, ""
 
 
 def _fetch_compare_payload(

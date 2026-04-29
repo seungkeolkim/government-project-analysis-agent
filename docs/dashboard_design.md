@@ -271,7 +271,7 @@ def _resolve_effective_compare_date(session, *, requested_date) -> tuple[date | 
     """
     Returns (effective_compare_date, applied, message).
     - effective_compare_date is None == "비교 baseline 부재" 신호.
-    - applied 는 UI 가 안내문을 띄울지 결정 — (a) False, (b)/(c-NEW) True.
+    - applied 는 UI 가 안내문을 띄울지 결정 — (a)/(c-NEW) False, (b) True.
     """
     if get_scrape_snapshot_by_date(session, requested_date) is not None:
         return requested_date, False, ""              # (a)
@@ -279,20 +279,25 @@ def _resolve_effective_compare_date(session, *, requested_date) -> tuple[date | 
     if nearest is not None:
         return nearest, True, build_fallback_message(requested_date, nearest)  # (b)
     # (c-NEW) baseline 없음. build_section_a 가 구간 안 snapshot 유무로 (c-NEW)
-    # vs (d) 분기를 마무리한다.
-    return None, True, build_no_baseline_message(requested_date)
+    # vs (d) 분기를 마무리한다. baseline 부재 자체는 노란 안내문을 띄우지 않는다
+    # (task 00048 — diff 누적 집계 모델에서 baseline 은 카드의 compare_count
+    # 표시 source 일 뿐이라 부재가 데이터 무결성에 영향이 없다).
+    return None, False, ""
 ```
 
 발동 조건은 네 가지로 세분된다:
 
 (a) `requested_date` snapshot 존재 → 그대로 사용. fallback 미발동.
 (b) `requested_date` snapshot 미존재 + 직전 snapshot 존재 → 직전 snapshot 으로
-    머지 baseline 잡고 안내문 (§4.3 (a)). fallback 발동.
+    머지 baseline 잡고 안내문 (§4.3 (a)). fallback 발동. (사용자에게 "range 가
+    실제로 shift 됐다" 는 의미 있는 정보다.)
 (c-NEW) `requested_date` 이전 snapshot 전무 + (requested_date, base_date] 구간
     안에 snapshot 존재 → baseline 없이 누적 결과만 표시. 카드의 compare_count /
-    delta / delta_direction 은 모두 None → UI 의 "비교일 — " 분기 발동. 안내문
-    (§4.3 (a-NEW)) 으로 사용자에게 "compare 가 — 인 이유" 를 알린다 (사용자
-    원문 task 00044 — 기준일 snapshot 이 있는데도 0건으로 표시되던 버그 수정).
+    delta / delta_direction 은 모두 None → UI 의 "비교일 — " 분기 발동. (from,
+    to] 누적 머지 모델에서 baseline 은 카드의 `compare_count` 표시 source 일 뿐
+    이라 부재가 데이터 무결성에 영향이 없으므로 노란 안내문은 띄우지 않는다
+    (task 00048 — task 00044 fix 가 띄우던 안내문이 prev_day 모드의 정상 동작
+    에서 오탐으로 노출되던 것을 정정).
 (d) `requested_date` 이전 snapshot 도 없고, (requested_date, base_date] 구간
     안에도 snapshot 0건 → 진짜 "데이터 없음" (§4.3 (b)). 카드 5종 모두 0 +
     expand 빈 list. fallback 안내문은 띄우지 않고 "데이터 없음" 박스만 띄움
@@ -312,13 +317,20 @@ def _resolve_effective_compare_date(session, *, requested_date) -> tuple[date | 
 
 (a-NEW) baseline 부재 + 구간 안 snapshot 존재 (§4.2 분기 (c-NEW)):
 
-```
-비교일 {requested_date} 일자 snapshot 도, 그 이전 snapshot 도 없어 baseline
-없이 기준일까지의 누적 변화만 표시합니다.
-```
+별도 안내문을 띄우지 않는다 (task 00048 정정). (from, to] 누적 머지 모델에서
+baseline 은 카드의 `compare_count` 표시 source 일 뿐이라 부재가 데이터 무결성
+에 영향을 주지 않는다 — 카드 5종은 누적 머지 결과의 base_count 만 노출하고,
+compare_count / delta / delta_direction 은 모두 None → 템플릿의 "비교일 — "
+분기로 렌더되어 사용자에게 "비교 기준 없음" 신호를 카드 자체에서 전달한다.
 
-카드 5종은 누적 머지 결과의 base_count 만 노출하고, compare_count / delta /
-delta_direction 은 모두 None → 템플릿의 "비교일 — " 분기로 렌더된다.
+이전 동작은 task 00044 fix 가 다음 안내문을 노란 박스로 노출했지만, prev_day
+모드 (from=base_date-1, to=base_date) 의 정상 동작에서도 (c-NEW) 분기를 타
+오탐으로 표시되던 문제가 있어 task 00048 에서 안내문 자체를 제거했다:
+
+```
+(폐기) 비교일 {requested_date} 일자 snapshot 도, 그 이전 snapshot 도 없어
+       baseline 없이 기준일까지의 누적 변화만 표시합니다.
+```
 
 (b) 비교일 이전 snapshot 전무 + 구간 안에도 snapshot 0건 — A 섹션 데이터
 없음 (§4.2 분기 (d)):
