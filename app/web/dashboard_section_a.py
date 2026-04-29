@@ -119,6 +119,11 @@ class SectionAExpandItem:
         title:              공고 제목.
         source_type:        \"IRIS\" / \"NTIS\" 등 — 배지 표시.
         status_label:       현재 status 한글값 (접수중 / 접수예정 / 마감).
+        status_key:         AnnouncementStatus enum name 의 lowercase
+                            (``receiving`` / ``scheduled`` / ``closed``). list 페이지의
+                            ``status-{key}`` CSS 클래스 (status-receiving 등) 와
+                            동일 키를 사용해 대시보드 배지 색상도 목록 페이지와
+                            통일하기 위한 보조 필드 (task 00046-1).
         agency:             주관 기관명 (없으면 None).
         deadline_at:        마감 시각 UTC tz-aware datetime — 템플릿이 ``kst_date``
                             필터로 표시.
@@ -134,6 +139,7 @@ class SectionAExpandItem:
     title: str
     source_type: str
     status_label: str
+    status_key: str
     agency: str | None
     deadline_at: datetime | None
     canonical_group_id: int | None
@@ -594,6 +600,7 @@ def _build_expand_items_for_category(
                     title=announcement.title,
                     source_type=announcement.source_type,
                     status_label=announcement.status.value,
+                    status_key=announcement.status.name.lower(),
                     agency=announcement.agency,
                     deadline_at=announcement.deadline_at,
                     canonical_group_id=announcement.canonical_group_id,
@@ -627,6 +634,7 @@ def _build_expand_items_for_category(
                     title=announcement.title,
                     source_type=announcement.source_type,
                     status_label=announcement.status.value,
+                    status_key=announcement.status.name.lower(),
                     agency=announcement.agency,
                     deadline_at=announcement.deadline_at,
                     canonical_group_id=announcement.canonical_group_id,

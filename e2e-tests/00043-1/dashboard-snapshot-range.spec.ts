@@ -13,10 +13,10 @@ test.describe("대시보드 기본 렌더링", () => {
     );
     await expect(
       page.locator(".dashboard-section--a .dashboard-section__title")
-    ).toContainText("A. 공고의 변화");
+    ).toContainText("A. 공고 변화 목록");
     await expect(
       page.locator(".dashboard-section--b .dashboard-section__title")
-    ).toContainText("B. 조만간 변화 예정");
+    ).toContainText("B. D-Day 임박 공고 목록");
   });
 
   test("대시보드 컨트롤 폼 — 기준일 기본값이 오늘 날짜", async ({ page }) => {

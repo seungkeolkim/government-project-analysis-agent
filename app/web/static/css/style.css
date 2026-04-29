@@ -2595,26 +2595,9 @@ button.canonical-count-badge.siblings-toggle--open {
     font-style: italic;
 }
 
-/* 소스/상태 배지 — 기존 list 페이지 톤과 비슷하게 */
-.dashboard-source-badge {
-    display: inline-block;
-    background: #e5e7eb;
-    color: #1f2937;
-    font-size: 11px;
-    font-weight: 600;
-    padding: 2px 6px;
-    border-radius: 3px;
-}
-
-.dashboard-status-badge {
-    display: inline-block;
-    background: #dbeafe;
-    color: #1d4ed8;
-    font-size: 11px;
-    font-weight: 600;
-    padding: 2px 6px;
-    border-radius: 3px;
-}
+/* 소스/상태 배지: 대시보드는 list.html 과 동일한 ``source-badge / status-badge``
+ * 클래스 (style.css 상단 ``.source-iris`` / ``.status-receiving`` 등) 를 직접
+ * 재사용하므로 별도 정의를 두지 않는다 (task 00046-1 — 색상 단일 진입점화). */
 
 /* ──────────────────────────────────────────────────────────────
  * Phase 5b 대시보드 B 섹션 — 조만간 변화 예정 (task 00042-4 / 00043-2).
