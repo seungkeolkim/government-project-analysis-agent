@@ -142,8 +142,8 @@
        fallback: 비교일 가용 안 됨 / 비교일 이전 snapshot 전무 안내문.
        ───────────────────────────────────────────────────────── #}
     <section class="dashboard-section dashboard-section--a"
-             aria-label="공고의 변화 (diff 누적)">
-        <h3 class="dashboard-section__title">A. 공고의 변화</h3>
+             aria-label="공고 변화 목록 (diff 누적)">
+        <h3 class="dashboard-section__title">A. 공고 변화 목록</h3>
 
         {% if section_a %}
             {# fallback 안내문 — applied 또는 is_no_data 일 때 노란/회색 박스 #}
@@ -199,8 +199,8 @@
                                             {# 행 전체가 클릭 영역 (<a href>). 가운데 클릭 시 새 창 표준 동작. #}
                                             <a class="dashboard-card__expand-link"
                                                href="/announcements/{{ item.announcement_id }}">
-                                                <span class="dashboard-source-badge">{{ item.source_type }}</span>
-                                                <span class="dashboard-status-badge">{{ item.status_label }}</span>
+                                                <span class="source-badge source-{{ item.source_type | lower }}">{{ item.source_type }}</span>
+                                                <span class="status-badge status-{{ item.status_key }}">{{ item.status_label }}</span>
                                                 <span class="dashboard-card__expand-title">{{ item.title }}</span>
                                                 {% if item.transition_from %}
                                                     <span class="dashboard-card__transition-from">
@@ -244,9 +244,9 @@
        to 가 과거이면 회색 안내문 + 정상 표시 (DB select 는 is_current=True).
        ───────────────────────────────────────────────────────── #}
     <section class="dashboard-section dashboard-section--b"
-             aria-label="조만간 변화 예정 ({{ section_b.days_window }}일 이내)">
+             aria-label="D-Day 임박 공고 목록 ({{ section_b.days_window }}일 이내)">
         <h3 class="dashboard-section__title">
-            B. 조만간 변화 예정 (향후 {{ section_b.days_window }}일)
+            B. D-Day 임박 공고 목록 (향후 {{ section_b.days_window }}일)
         </h3>
 
         {% if section_b.is_to_in_past %}
@@ -275,7 +275,7 @@
                             <li class="dashboard-section-b__row">
                                 <a class="dashboard-section-b__link"
                                    href="/announcements/{{ row.announcement_id }}">
-                                    <span class="dashboard-source-badge">{{ row.source_type }}</span>
+                                    <span class="source-badge source-{{ row.source_type | lower }}">{{ row.source_type }}</span>
                                     <span class="dashboard-section-b__title">{{ row.title }}</span>
                                     {% if row.received_at %}
                                         {# 접수예정 그룹은 \"접수\" 일자를 bold+color 으로 강조. #}
@@ -318,7 +318,7 @@
                             <li class="dashboard-section-b__row">
                                 <a class="dashboard-section-b__link"
                                    href="/announcements/{{ row.announcement_id }}">
-                                    <span class="dashboard-source-badge">{{ row.source_type }}</span>
+                                    <span class="source-badge source-{{ row.source_type | lower }}">{{ row.source_type }}</span>
                                     <span class="dashboard-section-b__title">{{ row.title }}</span>
                                     {% if row.deadline_at %}
                                         <span class="dashboard-section-b__date dashboard-section-b__date--deadline">
