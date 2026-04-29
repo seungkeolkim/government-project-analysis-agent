@@ -69,7 +69,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 
 from loguru import logger
@@ -102,6 +102,7 @@ from app.db.snapshot import (
     normalize_payload,
 )
 from app.sources.config_schema import load_sources_config
+from app.timezone import kst_date_boundaries
 
 # RelevanceJudgmentHistory.archive_reason 의 허용값(app-level 상수).
 # DB CHECK 대신 여기서 관리 — 향후 관리자 이관·admin override 추가 시 확장한다.
@@ -3776,5 +3777,102 @@ def list_announcements_by_ids(
         select(Announcement)
         .where(Announcement.id.in_(deduped_ids))
         .order_by(Announcement.id.asc())
+    ).scalars().all()
+    return list(rows)
+
+
+# ──────────────────────────────────────────────────────────────
+# Phase 5b — B 섹션 (조만간 변화 예정 공고) 쿼리 헬퍼 (task 00042-4)
+# ──────────────────────────────────────────────────────────────
+
+
+def list_soon_to_open_announcements(
+    session: Session,
+    *,
+    to_kst_date: date,
+    days: int = 30,
+) -> list[Announcement]:
+    """``to`` 시점 기준 향후 ``days`` 일 이내 접수 시작 예정 공고를 반환한다.
+
+    Phase 5b (task 00042-4) 의 B 섹션 \"조만간 접수될 공고\" 그룹에 사용한다.
+    사용자 원문 \"조만간 접수될 공고: is_current=True AND status='접수예정' AND
+    received_at BETWEEN to AND to+30days\".
+
+    BETWEEN 경계 (KST 일자 → UTC tz-aware datetime 변환):
+        - 시작 = ``kst_date_boundaries(to_kst_date)[0]`` (KST 자정 → UTC).
+          기준일이 \"오늘\" 이면 정확히 오늘 KST 0시부터.
+        - 끝   = ``kst_date_boundaries(to_kst_date + timedelta(days=days))[0]``
+          (KST 자정 → UTC). 반-open 구간 ``[start_utc, end_utc)`` 그대로 사용.
+
+    호출 규약 / 정렬:
+        - ``is_current=True`` 활성 공고만 (사용자 원문 주의사항).
+        - ``announcement`` 단위 — canonical 묶기 없음.
+        - 정렬: ``received_at ASC`` (임박 순). NULL 은 끝으로 — SQLite 기본
+          NULLS FIRST 와 다르므로 정렬 키에 ``IS NULL`` 보조를 둔다.
+
+    Args:
+        session:     호출자 세션.
+        to_kst_date: 기준일 (KST date) — B 섹션의 ``to``.
+        days:        구간 길이. 기본 30 (사용자 원문 \"1개월 이내\").
+
+    Returns:
+        ``Announcement`` ORM 인스턴스 list — 임박순. 매칭 0건은 빈 list.
+    """
+    start_utc, _start_end_unused = kst_date_boundaries(to_kst_date)
+    end_utc, _end_end_unused = kst_date_boundaries(to_kst_date + timedelta(days=days))
+
+    rows = session.execute(
+        select(Announcement)
+        .where(Announcement.is_current.is_(True))
+        .where(Announcement.status == AnnouncementStatus.SCHEDULED)
+        .where(Announcement.received_at.is_not(None))
+        .where(Announcement.received_at >= start_utc)
+        .where(Announcement.received_at < end_utc)
+        .order_by(Announcement.received_at.asc(), Announcement.id.asc())
+    ).scalars().all()
+    return list(rows)
+
+
+def list_soon_to_close_announcements(
+    session: Session,
+    *,
+    to_kst_date: date,
+    days: int = 30,
+) -> list[Announcement]:
+    """``to`` 시점 기준 향후 ``days`` 일 이내 마감 예정 공고를 반환한다.
+
+    Phase 5b (task 00042-4) 의 B 섹션 \"조만간 마감될 공고\" 그룹. 사용자 원문
+    \"조만간 마감될 공고: is_current=True AND status='접수중' AND deadline_at
+    BETWEEN to AND to+30days\".
+
+    BETWEEN 경계는 :func:`list_soon_to_open_announcements` 와 동일한 KST 자정
+    → UTC 반-open 구간 ``[start_utc, end_utc)`` 를 사용한다.
+
+    호출 규약 / 정렬:
+        - ``is_current=True`` 활성 공고만 (사용자 원문 주의사항 — 이력 row 활용
+          은 범위 밖).
+        - announcement 단위.
+        - 정렬: ``deadline_at ASC`` (임박 순) + tie-breaker ``id ASC``.
+        - 마감일이 NULL 인 공고는 BETWEEN 비교에서 자연스럽게 제외된다.
+
+    Args:
+        session:     호출자 세션.
+        to_kst_date: 기준일 (KST date) — B 섹션의 ``to``.
+        days:        구간 길이. 기본 30.
+
+    Returns:
+        ``Announcement`` ORM 인스턴스 list — 임박순. 매칭 0건은 빈 list.
+    """
+    start_utc, _start_end_unused = kst_date_boundaries(to_kst_date)
+    end_utc, _end_end_unused = kst_date_boundaries(to_kst_date + timedelta(days=days))
+
+    rows = session.execute(
+        select(Announcement)
+        .where(Announcement.is_current.is_(True))
+        .where(Announcement.status == AnnouncementStatus.RECEIVING)
+        .where(Announcement.deadline_at.is_not(None))
+        .where(Announcement.deadline_at >= start_utc)
+        .where(Announcement.deadline_at < end_utc)
+        .order_by(Announcement.deadline_at.asc(), Announcement.id.asc())
     ).scalars().all()
     return list(rows)

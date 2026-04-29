@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -390,3 +390,117 @@ class TestSectionAOnPage:
         # 카드 라벨도 보여 줘야 한다.
         assert "신규" in body
         assert "내용 변경" in body
+
+
+# ---------------------------------------------------------------------------
+# B 섹션 (task 00042-4) — 라우트 통합 테스트
+# ---------------------------------------------------------------------------
+
+
+def _insert_announcement_with_dates(
+    *,
+    canonical_key: str,
+    title: str,
+    source_announcement_id: str,
+    status_value: str,
+    received_at: datetime | None = None,
+    deadline_at: datetime | None = None,
+    is_current: bool = True,
+    source_type: str = "IRIS",
+) -> int:
+    """B 섹션 라우트 테스트용 announcement INSERT — received_at / deadline_at 포함."""
+    from app.db.models import (
+        Announcement,
+        AnnouncementStatus,
+        CanonicalProject,
+    )
+
+    status_enum = next(s for s in AnnouncementStatus if s.value == status_value)
+    with session_scope() as session:
+        canonical = CanonicalProject(
+            canonical_key=canonical_key,
+            key_scheme="official",
+            representative_title=title,
+        )
+        session.add(canonical)
+        session.flush()
+        announcement = Announcement(
+            source_type=source_type,
+            source_announcement_id=source_announcement_id,
+            title=title,
+            agency="테스트기관",
+            status=status_enum,
+            received_at=received_at,
+            deadline_at=deadline_at,
+            is_current=is_current,
+            scraped_at=datetime(2026, 4, 1, 0, 0, tzinfo=UTC),
+            canonical_group_id=canonical.id,
+            canonical_key=canonical_key,
+        )
+        session.add(announcement)
+        session.flush()
+        return announcement.id
+
+
+class TestSectionBOnPage:
+    """``GET /dashboard`` 응답에 B 섹션 두 그룹 + past 안내문 회귀."""
+
+    def test_section_b_renders_two_groups(self, client: TestClient) -> None:
+        """검증 3 (base case): 기준일 = 오늘 → B 섹션 두 그룹 영역 노출."""
+        from app.timezone import now_kst
+
+        today_kst_iso = now_kst().date().isoformat()
+        response = client.get(
+            "/dashboard", params={"base_date": today_kst_iso}
+        )
+        assert response.status_code == 200
+        body = response.text
+        # 두 그룹 컨테이너 모두 노출.
+        assert 'data-section-b-group="soon_to_open"' in body
+        assert 'data-section-b-group="soon_to_close"' in body
+        # 헤더 텍스트.
+        assert "조만간 접수될 공고" in body
+        assert "조만간 마감될 공고" in body
+        # 매칭 0건이면 빈 안내문.
+        assert "예정된 접수 공고가 없습니다." in body
+        assert "임박한 마감 공고가 없습니다." in body
+
+    def test_section_b_lists_soon_to_close_announcements(
+        self, client: TestClient
+    ) -> None:
+        """to 기준 30일 이내 마감예정 공고가 마감예정 그룹에 포함."""
+        # 기준일 = 2026-04-29. 마감 = 2026-05-10 (KST) → UTC.
+        deadline_utc = datetime(2026, 5, 9, 15, tzinfo=UTC)
+        announcement_id = _insert_announcement_with_dates(
+            canonical_key="bk-900",
+            title="B 섹션 마감예정 공고",
+            source_announcement_id="B-900",
+            status_value="접수중",
+            deadline_at=deadline_utc,
+        )
+
+        response = client.get(
+            "/dashboard", params={"base_date": "2026-04-29"}
+        )
+        assert response.status_code == 200
+        body = response.text
+        # 마감예정 그룹 안에 공고 링크 노출.
+        assert f'href="/announcements/{announcement_id}"' in body
+        assert "B 섹션 마감예정 공고" in body
+
+    def test_section_b_past_notice_when_to_in_past(
+        self, client: TestClient
+    ) -> None:
+        """검증 11: to=과거이면 past 안내문 + B 섹션 정상 (DB select 영향 없음)."""
+        from app.timezone import now_kst
+
+        past_iso = (now_kst().date() - timedelta(days=10)).isoformat()
+        response = client.get("/dashboard", params={"base_date": past_iso})
+        assert response.status_code == 200
+        body = response.text
+        # 안내문 마커 + 한국어 본문 일부.
+        assert "data-section-b-past-notice" in body
+        assert "기준일이 과거라" in body
+        # 두 그룹 영역은 그대로 렌더.
+        assert 'data-section-b-group="soon_to_open"' in body
+        assert 'data-section-b-group="soon_to_close"' in body

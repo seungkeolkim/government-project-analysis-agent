@@ -2600,3 +2600,104 @@ button.canonical-count-badge.siblings-toggle--open {
     padding: 2px 6px;
     border-radius: 3px;
 }
+
+/* ──────────────────────────────────────────────────────────────
+ * Phase 5b 대시보드 B 섹션 — 조만간 변화 예정 (task 00042-4).
+ * 두 그룹(접수예정 / 마감예정) 을 가로 2열로 배치.
+ * ────────────────────────────────────────────────────────────── */
+
+.dashboard-section__notice--past-base {
+    background: #f3f4f6;
+    border: 1px solid #d1d5db;
+    color: #4b5563;
+}
+
+.dashboard-section-b__columns {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+
+@media (max-width: 720px) {
+    /* 좁은 화면에서는 세로로 스택. */
+    .dashboard-section-b__columns {
+        grid-template-columns: 1fr;
+    }
+}
+
+.dashboard-section-b__column {
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    background: #fafbfc;
+    padding: 10px 12px 12px;
+}
+
+.dashboard-section-b__group-title {
+    margin: 0 0 8px;
+    font-size: 14px;
+    font-weight: 700;
+    color: #111827;
+}
+
+.dashboard-section-b__list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    max-height: 360px;
+    overflow-y: auto;
+}
+
+.dashboard-section-b__row {
+    border-bottom: 1px solid #f3f4f6;
+}
+
+.dashboard-section-b__row:last-child {
+    border-bottom: none;
+}
+
+.dashboard-section-b__link {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 4px;
+    color: inherit;
+    text-decoration: none;
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.dashboard-section-b__link:hover {
+    background: #eff6ff;
+}
+
+.dashboard-section-b__title {
+    flex: 1 1 200px;
+    min-width: 180px;
+    color: #111827;
+}
+
+.dashboard-section-b__link:hover .dashboard-section-b__title {
+    color: #1d4ed8;
+    text-decoration: underline;
+}
+
+.dashboard-section-b__date {
+    color: #6b7280;
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.dashboard-section-b__date--deadline {
+    margin-left: auto;
+    color: #b91c1c;
+    font-weight: 600;
+}
+
+.dashboard-section-b__empty {
+    margin: 4px 0 0;
+    padding: 6px 4px;
+    color: #9ca3af;
+    font-size: 13px;
+    font-style: italic;
+}

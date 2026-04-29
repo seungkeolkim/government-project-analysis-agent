@@ -219,18 +219,88 @@
     </section>
 
     {# ─────────────────────────────────────────────────────────
-       4. B 섹션 — 조만간 변화 예정. 후속 subtask 00042-4.
+       4. B 섹션 — 조만간 변화 예정 (to 기준 1개월 이내). task 00042-4.
+       두 그룹: '조만간 접수될 공고' (status=접수예정 + received_at) /
+                '조만간 마감될 공고' (status=접수중 + deadline_at).
+       to 가 과거이면 회색 안내문 + 정상 표시 (DB select 는 is_current=True).
        ───────────────────────────────────────────────────────── #}
     <section class="dashboard-section dashboard-section--b"
-             aria-label="조만간 변화 예정 (1개월 이내)">
-        <h3 class="dashboard-section__title">B. 조만간 변화 예정</h3>
-        {% if section_b %}
-            {# 00042-4 가 채움. #}
-        {% else %}
-            <p class="dashboard-section__placeholder">
-                B 섹션은 후속 subtask 에서 채워집니다 (조만간 접수/마감 공고).
+             aria-label="조만간 변화 예정 ({{ section_b.days_window }}일 이내)">
+        <h3 class="dashboard-section__title">
+            B. 조만간 변화 예정 (향후 {{ section_b.days_window }}일)
+        </h3>
+
+        {% if section_b.is_to_in_past %}
+            <p class="dashboard-section__notice dashboard-section__notice--past-base"
+               data-section-b-past-notice>
+                {{ section_b.past_notice_message }}
             </p>
         {% endif %}
+
+        <div class="dashboard-section-b__columns">
+            {# 4-1. 조만간 접수될 공고 (status=접수예정, 임박순) #}
+            <div class="dashboard-section-b__column"
+                 data-section-b-group="soon_to_open"
+                 aria-label="조만간 접수될 공고">
+                <h4 class="dashboard-section-b__group-title">조만간 접수될 공고</h4>
+                {% if section_b.soon_to_open %}
+                    <ul class="dashboard-section-b__list">
+                        {% for row in section_b.soon_to_open %}
+                            <li class="dashboard-section-b__row">
+                                <a class="dashboard-section-b__link"
+                                   href="/announcements/{{ row.announcement_id }}">
+                                    <span class="dashboard-source-badge">{{ row.source_type }}</span>
+                                    <span class="dashboard-section-b__title">{{ row.title }}</span>
+                                    {% if row.received_at %}
+                                        <span class="dashboard-section-b__date">
+                                            접수 {{ row.received_at | kst_date }}
+                                        </span>
+                                    {% endif %}
+                                    {% if row.deadline_at %}
+                                        <span class="dashboard-section-b__date dashboard-section-b__date--deadline">
+                                            마감 {{ row.deadline_at | kst_date }}
+                                        </span>
+                                    {% endif %}
+                                </a>
+                            </li>
+                        {% endfor %}
+                    </ul>
+                {% else %}
+                    <p class="dashboard-section-b__empty">
+                        예정된 접수 공고가 없습니다.
+                    </p>
+                {% endif %}
+            </div>
+
+            {# 4-2. 조만간 마감될 공고 (status=접수중, 임박순) #}
+            <div class="dashboard-section-b__column"
+                 data-section-b-group="soon_to_close"
+                 aria-label="조만간 마감될 공고">
+                <h4 class="dashboard-section-b__group-title">조만간 마감될 공고</h4>
+                {% if section_b.soon_to_close %}
+                    <ul class="dashboard-section-b__list">
+                        {% for row in section_b.soon_to_close %}
+                            <li class="dashboard-section-b__row">
+                                <a class="dashboard-section-b__link"
+                                   href="/announcements/{{ row.announcement_id }}">
+                                    <span class="dashboard-source-badge">{{ row.source_type }}</span>
+                                    <span class="dashboard-section-b__title">{{ row.title }}</span>
+                                    {% if row.deadline_at %}
+                                        <span class="dashboard-section-b__date dashboard-section-b__date--deadline">
+                                            마감 {{ row.deadline_at | kst_date }}
+                                        </span>
+                                    {% endif %}
+                                </a>
+                            </li>
+                        {% endfor %}
+                    </ul>
+                {% else %}
+                    <p class="dashboard-section-b__empty">
+                        임박한 마감 공고가 없습니다.
+                    </p>
+                {% endif %}
+            </div>
+        </div>
     </section>
 
     {# ─────────────────────────────────────────────────────────
