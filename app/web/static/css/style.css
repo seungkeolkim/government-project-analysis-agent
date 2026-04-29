@@ -2602,8 +2602,9 @@ button.canonical-count-badge.siblings-toggle--open {
 }
 
 /* ──────────────────────────────────────────────────────────────
- * Phase 5b 대시보드 B 섹션 — 조만간 변화 예정 (task 00042-4).
- * 두 그룹(접수예정 / 마감예정) 을 가로 2열로 배치.
+ * Phase 5b 대시보드 B 섹션 — 조만간 변화 예정 (task 00042-4 / 00043-2).
+ * task 00043-2: 두 그룹을 가로 2컬럼이 아닌 세로 2행 stack 으로 배치해
+ * 폭을 넓게 사용. 컨테이너 클래스명도 ``__columns`` → ``__rows`` 로 변경.
  * ────────────────────────────────────────────────────────────── */
 
 .dashboard-section__notice--past-base {
@@ -2612,17 +2613,10 @@ button.canonical-count-badge.siblings-toggle--open {
     color: #4b5563;
 }
 
-.dashboard-section-b__columns {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 16px;
-}
-
-@media (max-width: 720px) {
-    /* 좁은 화면에서는 세로로 스택. */
-    .dashboard-section-b__columns {
-        grid-template-columns: 1fr;
-    }
+.dashboard-section-b__rows {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
 }
 
 .dashboard-section-b__column {
@@ -2637,6 +2631,14 @@ button.canonical-count-badge.siblings-toggle--open {
     font-size: 14px;
     font-weight: 700;
     color: #111827;
+}
+
+/* 그룹 제목 옆 건수 표시 (task 00043-2 §2-1). 약하게 회색으로 보조 정보임을 시사. */
+.dashboard-section-b__group-count {
+    margin-left: 6px;
+    color: #6b7280;
+    font-size: 13px;
+    font-weight: 500;
 }
 
 .dashboard-section-b__list {
@@ -2688,10 +2690,33 @@ button.canonical-count-badge.siblings-toggle--open {
     white-space: nowrap;
 }
 
+/* 마감 강조 — soon_to_close 그룹 전용. 빨간색 + bold (기존 톤 유지). */
 .dashboard-section-b__date--deadline {
-    margin-left: auto;
     color: #b91c1c;
     font-weight: 600;
+}
+
+/* 접수 강조 — soon_to_open 그룹 전용. 파란색 + bold (task 00043-2 §2-2).
+ * 사용자 원문 \"접수될 공고는 마감이 아닌 접수를 bold + color\" 그대로. */
+.dashboard-section-b__date--received {
+    color: #1d4ed8;
+    font-weight: 600;
+}
+
+/* 부수적 일자 (soon_to_open 의 마감) 는 강조 해제 — 회색 일반 톤. */
+.dashboard-section-b__date--muted {
+    color: #6b7280;
+    font-weight: 400;
+}
+
+/* D-Day 배지 — 행 우측 끝 정렬 (task 00043-2 §2-2).
+ * margin-left: auto 로 flex 의 free space 를 모두 흡수해 우측에 붙는다. */
+.dashboard-section-b__d-day {
+    margin-left: auto;
+    color: #111827;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
 }
 
 .dashboard-section-b__empty {
