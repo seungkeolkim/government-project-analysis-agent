@@ -69,11 +69,11 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Literal
 
 from loguru import logger
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.canonical import compute_canonical_key
@@ -83,6 +83,8 @@ from app.db.models import (
     AnnouncementUserState,
     Attachment,
     CanonicalProject,
+    DeltaAnnouncement,
+    DeltaAttachment,
     FavoriteEntry,
     FavoriteFolder,
     RelevanceJudgment,
@@ -91,7 +93,13 @@ from app.db.models import (
     SCRAPE_RUN_TERMINAL_STATUSES,
     SCRAPE_RUN_TRIGGERS,
     ScrapeRun,
+    ScrapeSnapshot,
     User,
+)
+from app.db.snapshot import (
+    build_snapshot_payload,
+    merge_snapshot_payload,
+    normalize_payload,
 )
 from app.sources.config_schema import load_sources_config
 
@@ -2803,3 +2811,824 @@ def list_favorites_with_announcements(
         )
 
     return items, total
+
+
+# ──────────────────────────────────────────────────────────────
+# Phase 5a (task 00041) — delta 적재 + apply_delta_to_main
+# ──────────────────────────────────────────────────────────────
+#
+# 설계 근거: docs/snapshot_pipeline_design.md §7·§8.
+#
+# 흐름:
+#   1. 수집 단계 (cli._run_source_announcements):
+#      - 공고 1건마다 insert_delta_announcement → update_delta_announcement_detail
+#        (상세 수집 후) → insert_delta_attachment (첨부 1건마다) 호출.
+#      - 본 테이블 announcements / attachments 는 절대 건드리지 않는다.
+#
+#   2. 수집 종료 단계 (cli._async_main finalize 직전):
+#      - status == 'cancelled' (SIGTERM) 또는 orchestrator-level failed:
+#          별도 트랜잭션에서 clear_delta_for_run(scrape_run_id) 만 호출.
+#          본 테이블·snapshot 변경 없음 — 검증 2 만족.
+#      - status == 'completed' / 'partial':
+#          단일 session_scope 안에서 apply_delta_to_main(scrape_run_id) 호출.
+#          이 함수가 (a) 4-branch UPSERT, (b) 2차 감지, (c) 사용자 라벨링 reset
+#          (Phase 1a 호환 — upsert_announcement / reapply_version_with_reset 가
+#          그대로 호출됨), (d) delta DELETE 를 같은 트랜잭션에서 수행한다.
+#          (snapshot UPSERT 는 00041-4 에서 같은 트랜잭션에 통합 추가될 예정.)
+#      - apply 트랜잭션 자체가 raise 하면 SQLAlchemy auto-rollback 으로 본
+#        테이블 / snapshot / delta 모두 원상복구 — 검증 11 만족.
+
+
+# delta_announcements 에 INSERT 가능한 컬럼 화이트리스트 (id / created_at 제외).
+_DELTA_ANNOUNCEMENT_ALLOWED_FIELDS: frozenset[str] = frozenset(
+    {
+        "scrape_run_id",
+        "source_type",
+        "source_announcement_id",
+        "title",
+        "status",
+        "agency",
+        "received_at",
+        "deadline_at",
+        "detail_url",
+        "detail_html",
+        "detail_text",
+        "detail_fetched_at",
+        "detail_fetch_status",
+        "ancm_no",
+        "raw_metadata",
+    }
+)
+
+# delta_announcements 의 detail-stage 필드 — update_delta_announcement_detail 화이트리스트.
+_DELTA_DETAIL_ALLOWED_FIELDS: frozenset[str] = frozenset(
+    {
+        "detail_html",
+        "detail_text",
+        "detail_fetched_at",
+        "detail_fetch_status",
+        "ancm_no",
+    }
+)
+
+# delta_attachments INSERT 화이트리스트 (id / created_at 제외).
+_DELTA_ATTACHMENT_ALLOWED_FIELDS: frozenset[str] = frozenset(
+    {
+        "delta_announcement_id",
+        "original_filename",
+        "stored_path",
+        "file_ext",
+        "file_size",
+        "download_url",
+        "sha256",
+        "downloaded_at",
+    }
+)
+
+
+@dataclass(frozen=True)
+class TransitionRecord:
+    """status 단독 전이 1건의 기록.
+
+    apply 단계의 (c) status_transitioned 분기에서 만들어진다. snapshot.payload 의
+    transitioned_to_X 카테고리 항목 ``{id, from}`` 으로 직렬화될 raw 값이다.
+
+    Attributes:
+        announcement_id: 본 테이블 적용 후 시점의 announcements.id (in-place
+                         UPDATE 라 적용 전후 동일).
+        status_from: 적용 직전 본 테이블 status 값 (한글: 접수예정/접수중/마감).
+        status_to:   적용 후 status 값 (delta 가 정규화되기 전 값을 본 테이블의
+                     enum 으로 강제한 결과 — 결국 한글 3종 중 하나).
+    """
+
+    announcement_id: int
+    status_from: str
+    status_to: str
+
+
+@dataclass
+class DeltaApplyResult:
+    """``apply_delta_to_main`` 의 반환값.
+
+    snapshot 머지 단계(00041-4) 가 본 결과의 5종 카테고리 ID 를 그대로 가져다
+    payload 를 구성하므로, 카테고리 정의는 docs/snapshot_pipeline_design.md
+    §9.1 과 1:1 일치한다.
+
+    Attributes:
+        new_announcement_ids: (a) created — apply 시점에 본 테이블에 처음
+                               INSERT 된 announcements.id 목록. asc 정렬.
+        content_changed_announcement_ids: (d) new_version (1차) 또는 2차 감지로
+                               reapply 된 announcements.id 목록. asc 정렬.
+                               같은 announcement 가 2차 감지로 두 번 들어가지
+                               않도록 set 으로 dedup 한 뒤 정렬한다.
+        transitions: (c) status_transitioned 분기에서 발생한 status 단독 전이.
+                     announcement_id 별로 1 개씩.
+        upsert_action_counts: 1차 4-branch action 분포.
+                              keys: created / unchanged / new_version /
+                              status_transitioned. 통계 / 로그용.
+        attachment_success_count: delta_attachments → 본 테이블 attachments 로
+                                  새로 INSERT 되었거나 변경 UPDATE 된 첨부 수.
+        attachment_skipped_count: sha256 동일로 본 테이블 attachments 가
+                                   변경되지 않고 스킵된 첨부 수.
+        attachment_content_change_count: 2차 감지로 reapply_version_with_reset
+                                          이 발동한 announcement 수.
+        delta_announcement_count: 이번 apply 가 처리한 delta_announcements row 수.
+    """
+
+    new_announcement_ids: list[int] = field(default_factory=list)
+    content_changed_announcement_ids: list[int] = field(default_factory=list)
+    transitions: list[TransitionRecord] = field(default_factory=list)
+    upsert_action_counts: dict[str, int] = field(default_factory=dict)
+    attachment_success_count: int = 0
+    attachment_skipped_count: int = 0
+    attachment_content_change_count: int = 0
+    delta_announcement_count: int = 0
+
+
+# ── delta INSERT / UPDATE 헬퍼 ─────────────────────────────────────────────
+
+
+def insert_delta_announcement(
+    session: Session,
+    *,
+    scrape_run_id: int,
+    payload: Mapping[str, Any],
+) -> DeltaAnnouncement:
+    """공고 1건을 delta_announcements 에 INSERT 한다.
+
+    수집 단계가 본 테이블 ``announcements`` 대신 호출한다 — 4-branch 판정은
+    apply 단계로 미뤄지고, delta 는 raw 값을 그대로 보존한다.
+
+    호출 규약:
+        - ``scrape_run_id`` 는 caller 가 별도 인자로 명시 (payload 안에 같이
+          넣어도 동작하지만, 의도를 분명히 하기 위해 분리).
+        - status 정규화는 하지 않는다 — apply 단계의 ``_coerce_status`` 가
+          본 테이블에 INSERT/UPDATE 할 때 정규화한다.
+        - commit 은 호출자 책임. 본 함수는 flush 까지만 수행한다.
+
+    Args:
+        session:       호출자 세션.
+        scrape_run_id: 적재가 속한 ScrapeRun 의 PK.
+        payload:       어댑터가 만든 delta_announcement 컬럼 매핑.
+                       최소 키: source_type, source_announcement_id, title,
+                       status. 그 외 컬럼은 _DELTA_ANNOUNCEMENT_ALLOWED_FIELDS
+                       화이트리스트로 필터된다.
+
+    Returns:
+        flush 후 id 가 부여된 ``DeltaAnnouncement`` 인스턴스.
+
+    Raises:
+        KeyError: 필수 키(source_type/source_announcement_id/title/status)가 없을 때.
+    """
+    for required_key in ("source_type", "source_announcement_id", "title", "status"):
+        if required_key not in payload:
+            raise KeyError(
+                f"delta_announcement payload 에 {required_key!r} 가 반드시 포함되어야 합니다."
+            )
+
+    clean = _filter_payload(payload, _DELTA_ANNOUNCEMENT_ALLOWED_FIELDS)
+    # raw_metadata 가 빠져 있으면 빈 dict 로 정규화 (모델 컬럼이 NOT NULL).
+    clean.setdefault("raw_metadata", {})
+
+    delta_row = DeltaAnnouncement(scrape_run_id=scrape_run_id, **clean)
+    session.add(delta_row)
+    session.flush()
+    return delta_row
+
+
+def update_delta_announcement_detail(
+    session: Session,
+    delta_announcement_id: int,
+    detail_fields: Mapping[str, Any],
+) -> DeltaAnnouncement | None:
+    """delta_announcements 의 상세 수집 결과 필드를 갱신한다.
+
+    detail_html / detail_text / detail_fetched_at / detail_fetch_status / ancm_no
+    만 갱신 가능하다 (그 외 키는 화이트리스트 _DELTA_DETAIL_ALLOWED_FIELDS
+    로 무시된다 — payload 오염 방지).
+
+    Args:
+        session:               호출자 세션.
+        delta_announcement_id: 갱신 대상 delta row 의 PK.
+        detail_fields:         상세 수집 결과 매핑.
+
+    Returns:
+        갱신된 ``DeltaAnnouncement`` 인스턴스. 대상이 없으면 ``None``.
+    """
+    delta_row = session.get(DeltaAnnouncement, delta_announcement_id)
+    if delta_row is None:
+        return None
+
+    clean = _filter_payload(detail_fields, _DELTA_DETAIL_ALLOWED_FIELDS)
+    for field_name, field_value in clean.items():
+        setattr(delta_row, field_name, field_value)
+    session.flush()
+    return delta_row
+
+
+def append_delta_announcement_errors(
+    session: Session,
+    delta_announcement_id: int,
+    error_entries: list[dict[str, Any]],
+) -> DeltaAnnouncement | None:
+    """delta_announcements.raw_metadata.attachment_errors 에 오류 항목을 누적한다.
+
+    수집 단계의 첨부 다운로드가 실패한 경우 호출자가 본 함수로 원본 메타에
+    오류를 기록한다 (Phase 1a 의 announcements.raw_metadata.attachment_errors
+    와 동일 의도, 다만 적재 위치가 delta 일 뿐).
+
+    apply 단계에서 raw_metadata 그대로 본 테이블 announcements.raw_metadata
+    로 흘려 넣어진다.
+
+    Args:
+        session:               호출자 세션.
+        delta_announcement_id: 대상 delta row PK.
+        error_entries:         오류 dict 리스트 (key: original_filename / atc_file_id /
+                               error / attempted_at 등 — 자유 스키마).
+
+    Returns:
+        갱신된 ``DeltaAnnouncement`` 또는 None.
+    """
+    if not error_entries:
+        # no-op — 호출자 편의를 위해 빈 리스트도 허용.
+        return session.get(DeltaAnnouncement, delta_announcement_id)
+
+    delta_row = session.get(DeltaAnnouncement, delta_announcement_id)
+    if delta_row is None:
+        return None
+
+    merged = dict(delta_row.raw_metadata or {})
+    existing_errors = list(merged.get("attachment_errors", []))
+    existing_errors.extend(error_entries)
+    merged["attachment_errors"] = existing_errors
+    delta_row.raw_metadata = merged
+    session.flush()
+    return delta_row
+
+
+def insert_delta_attachment(
+    session: Session,
+    *,
+    delta_announcement_id: int,
+    payload: Mapping[str, Any],
+) -> DeltaAttachment:
+    """첨부 1건을 delta_attachments 에 INSERT 한다.
+
+    delta 는 매 ScrapeRun 종료 시 비워지는 staging 이라 sha256 기반 중복 판정을
+    하지 않는다 — apply 단계에서 본 테이블 attachments 의 sha256 비교가 그
+    역할을 담당한다.
+
+    Args:
+        session:               호출자 세션.
+        delta_announcement_id: 부모 DeltaAnnouncement 의 PK.
+        payload:               첨부 메타 매핑. 필수 키: original_filename /
+                                stored_path / file_ext / downloaded_at.
+                                다운로드 실패 시 호출 자체를 생략한다 (호출자
+                                책임) — 본 함수는 항상 실제 INSERT 를 시도한다.
+
+    Returns:
+        flush 후 id 가 부여된 ``DeltaAttachment`` 인스턴스.
+
+    Raises:
+        KeyError: 필수 키가 누락되었을 때.
+    """
+    for required_key in ("original_filename", "stored_path", "file_ext", "downloaded_at"):
+        if required_key not in payload:
+            raise KeyError(
+                f"delta_attachment payload 에 {required_key!r} 가 반드시 포함되어야 합니다."
+            )
+
+    clean = _filter_payload(payload, _DELTA_ATTACHMENT_ALLOWED_FIELDS)
+    delta_attachment = DeltaAttachment(
+        delta_announcement_id=delta_announcement_id, **clean
+    )
+    session.add(delta_attachment)
+    session.flush()
+    return delta_attachment
+
+
+def clear_delta_for_run(session: Session, scrape_run_id: int) -> int:
+    """해당 ScrapeRun 의 delta_announcements + delta_attachments 를 전수 DELETE.
+
+    cancelled / orchestrator-failed 분기에서 별도 트랜잭션으로 호출되어 검증 2
+    의 "delta 비워짐" 을 보장한다. apply_delta_to_main 도 마지막 단계에서
+    동일 의도로 호출하지만, 거기서는 같은 트랜잭션 내에서 동작한다.
+
+    동작:
+        - delta_attachments 는 delta_announcements 에 ON DELETE CASCADE 가
+          걸려 있어 자동 cascade 되지만, SQLite 의 FK enforcement 가 ON
+          이어야 한다. 안전성을 위해 명시적으로 attachments 를 먼저 DELETE
+          한 뒤 announcements 를 DELETE 한다.
+
+    Args:
+        session:       호출자 세션.
+        scrape_run_id: 비울 ScrapeRun 의 PK.
+
+    Returns:
+        삭제된 delta_announcements row 수 (delta_attachments 수는 별도 집계 X).
+    """
+    # 자식부터 (delta_attachments WHERE delta_announcement_id IN (... 이번 run ...))
+    session.execute(
+        delete(DeltaAttachment).where(
+            DeltaAttachment.delta_announcement_id.in_(
+                select(DeltaAnnouncement.id).where(
+                    DeltaAnnouncement.scrape_run_id == scrape_run_id
+                )
+            )
+        )
+    )
+
+    # 부모.
+    delete_result = session.execute(
+        delete(DeltaAnnouncement).where(
+            DeltaAnnouncement.scrape_run_id == scrape_run_id
+        )
+    )
+    session.flush()
+    deleted = int(delete_result.rowcount or 0)
+    if deleted:
+        logger.info(
+            "delta 비움: scrape_run_id={} 삭제된 delta_announcements={}",
+            scrape_run_id,
+            deleted,
+        )
+    return deleted
+
+
+# ── apply_delta_to_main — 4-branch + 2차 감지 + reset + delta DELETE ───────
+
+
+def _delta_payload_to_announcement_payload(
+    delta: DeltaAnnouncement,
+) -> dict[str, Any]:
+    """DeltaAnnouncement 인스턴스를 upsert_announcement payload dict 로 변환한다.
+
+    upsert_announcement 는 ``ancm_no`` 를 별도 키로 받기 때문에 DeltaAnnouncement
+    의 컬럼을 그대로 펼쳐 넘기되 detail 관련 필드(detail_html / detail_text /
+    detail_fetched_at / detail_fetch_status) 는 ``upsert_announcement`` 의
+    화이트리스트(_ANNOUNCEMENT_ALLOWED_FIELDS) 에 포함되지 않으므로 제외한다.
+
+    detail 필드 적용은 apply 단계에서 별도 ``upsert_announcement_detail`` 로
+    수행한다.
+
+    Args:
+        delta: delta_announcements 의 한 row.
+
+    Returns:
+        upsert_announcement 가 받을 수 있는 dict.
+    """
+    return {
+        "source_announcement_id": delta.source_announcement_id,
+        "source_type": delta.source_type,
+        "title": delta.title,
+        "agency": delta.agency,
+        # status 는 raw 값 그대로 — _coerce_status 가 정규화한다.
+        "status": delta.status,
+        "received_at": delta.received_at,
+        "deadline_at": delta.deadline_at,
+        "detail_url": delta.detail_url,
+        "ancm_no": delta.ancm_no,
+        "raw_metadata": dict(delta.raw_metadata or {}),
+    }
+
+
+def _has_attachment_errors(delta: DeltaAnnouncement) -> bool:
+    """delta.raw_metadata.attachment_errors 에 오류 항목이 있는지 확인한다.
+
+    2차 감지 false-positive 방지 가드 — Phase 1a 의 ``failure_count == 0``
+    조건과 동일 의도. 다운로드 실패가 있으면 본 테이블 attachments 가
+    실제보다 줄어든 것처럼 보여 reapply 가 잘못 발동될 수 있다.
+    """
+    raw_metadata = delta.raw_metadata or {}
+    errors = raw_metadata.get("attachment_errors") or []
+    return bool(errors)
+
+
+def _peek_main_status(
+    session: Session,
+    *,
+    source_type: str,
+    source_announcement_id: str,
+) -> str | None:
+    """본 테이블의 is_current=True row 의 status 를 한 번에 조회한다.
+
+    apply 단계에서 (c) status_transitioned 분기의 ``status_from`` 을 캡처할 때
+    사용된다. ``upsert_announcement`` 가 호출되기 직전 시점의 status 를 읽어
+    이후 in-place UPDATE 가 status 를 바꾸기 전에 from 을 확보한다.
+
+    Args:
+        session:                호출자 세션.
+        source_type:            예: ``IRIS``.
+        source_announcement_id: 소스 측 공고 ID.
+
+    Returns:
+        is_current=True row 가 있으면 한글 status 문자열, 없으면 None.
+    """
+    row_status = session.execute(
+        select(Announcement.status).where(
+            Announcement.source_type == source_type,
+            Announcement.source_announcement_id == source_announcement_id,
+            Announcement.is_current.is_(True),
+        )
+    ).scalar_one_or_none()
+    if row_status is None:
+        return None
+    # AnnouncementStatus enum 인 경우 .value, 문자열인 경우 그대로.
+    if isinstance(row_status, AnnouncementStatus):
+        return row_status.value
+    return str(row_status)
+
+
+def peek_main_can_skip_detail(
+    session: Session,
+    *,
+    source_type: str,
+    source_announcement_id: str,
+    payload: Mapping[str, Any],
+) -> bool:
+    """본 테이블 안내 row 가 이번 row 와 동일하고 detail 이 이미 있는지 확인한다.
+
+    수집 단계의 detail 스크랩 생략 최적화를 위한 read-only peek. apply 단계의
+    4-branch 판정과 동일 비교 로직(_detect_changes / _normalize_for_comparison)
+    을 사용한다 — 이로써 "스킵 가능 여부" 의 시맨틱이 apply 의 (b) unchanged
+    분기와 1:1 일치한다.
+
+    Phase 1a 의 ``upsert_result.needs_detail_scraping`` 과 동일 시맨틱이지만,
+    본 테이블에 INSERT/UPDATE 를 일으키지 않는 read-only 변형이다 — apply 가
+    아직 도착하지 않은 수집 단계에서 안전하게 호출할 수 있다.
+
+    Args:
+        session:                호출자 세션.
+        source_type:            예: ``IRIS``.
+        source_announcement_id: 소스 측 공고 ID.
+        payload:                현재 수집 row 의 4-branch 비교 필드를 담은 매핑
+                                (title / status / agency / deadline_at).
+
+    Returns:
+        True 이면 detail 수집을 생략해도 안전하다 (본 테이블에 unchanged 인
+        is_current row 가 있고 detail_html 도 채워져 있음).
+        False 이면 detail 을 다시 받아야 한다 (신규 / 변경 / detail 미보유).
+    """
+    existing = session.execute(
+        select(Announcement).where(
+            Announcement.source_type == source_type,
+            Announcement.source_announcement_id == source_announcement_id,
+            Announcement.is_current.is_(True),
+        )
+    ).scalar_one_or_none()
+    if existing is None:
+        return False
+    if existing.detail_fetched_at is None or not existing.detail_html:
+        return False
+
+    # status 는 비교 전 정규화 (payload 가 raw 문자열이면 enum 으로).
+    clean = dict(payload)
+    if "status" in clean:
+        try:
+            clean["status"] = _coerce_status(clean["status"])
+        except (TypeError, ValueError):
+            # raw 가 비정상이면 변경으로 간주(보수적으로 detail 재수집).
+            return False
+    changed = _detect_changes(existing, clean)
+    return not changed
+
+
+def apply_delta_to_main(
+    session: Session,
+    *,
+    scrape_run_id: int,
+) -> DeltaApplyResult:
+    """delta → 본 테이블 4-branch UPSERT + 2차 감지 + reset + delta DELETE.
+
+    docs/snapshot_pipeline_design.md §7.4·§8 의 단일 트랜잭션 본문이다.
+    호출자(``cli._async_main``) 가 ``session_scope()`` 안에서 부르고, 본 함수가
+    return 한 뒤 같은 session 으로 ``upsert_scrape_snapshot`` (00041-4) 을 추가
+    호출하면 모든 작업이 같은 트랜잭션에 묶인다.
+
+    동작 (호출자 session 에서):
+        1. ``DeltaAnnouncement`` (+ selectinload attachments) 전수 조회 —
+           이번 ``scrape_run_id`` 한정.
+        2. 각 delta 마다:
+           a. 본 테이블의 기존 status 캡처 (``_peek_main_status``) — (c) 분기의
+              ``status_from`` 용.
+           b. ``upsert_announcement(session, payload)`` — Phase 1a 의 4-branch
+              판정 + (d) 분기의 사용자 라벨링 reset 이 그대로 발동된다.
+           c. ``announcement_id`` 확정 (=upsert_result.announcement.id).
+           d. delta_attachments 를 본 테이블 attachments 에 sha256 기반 upsert.
+           e. 다운로드 실패가 없는 경우만 2차 감지 (signature_before vs
+              signature_after) → 변경 시 ``reapply_version_with_reset`` 로
+              is_current 순환 + 사용자 라벨링 reset.
+        3. 카테고리 누적: created → new, new_version/2차 감지 → content_changed,
+           status_transitioned → transitions(from/to).
+        4. ``clear_delta_for_run(scrape_run_id)`` — 같은 트랜잭션 안에서
+           delta 비우기. 트랜잭션 실패 시 SQLAlchemy auto-rollback 으로 delta 도
+           원상복구된다 (검증 11).
+
+    트랜잭션 경계:
+        - 본 함수는 flush 까지만 한다. commit 은 호출자 책임.
+        - 한 delta row 의 처리 중 예외가 발생하면 raise 가 호출자까지 전파
+          되어 트랜잭션 전체가 rollback 된다 — 검증 11 의 "트랜잭션 실패 시
+          delta 그대로, 본 테이블 변화 없음" 을 보장한다.
+
+    공고 1건당 비용:
+        본 함수는 1차 / 2차 감지를 분리 호출(설계 §8.4 권장안) 하지만, delta
+        에 이미 첨부 메타까지 다 들어 있으므로 N+1 query 는 발생하지 않는다.
+        DeltaAnnouncement.attachments relationship 이 selectinload 로 묶여
+        있어 첫 SELECT 한 번에 모든 첨부가 로드된다.
+
+    Args:
+        session:        호출자 세션.
+        scrape_run_id:  apply 대상 ScrapeRun 의 PK.
+
+    Returns:
+        ``DeltaApplyResult`` — 5종 카테고리 ID 리스트 + transition 기록 +
+        action 분포 + 첨부 카운터 + 처리한 delta 수.
+    """
+    # 1. delta 전수 조회 — selectinload 로 attachments 까지 한 번에 로드.
+    deltas: list[DeltaAnnouncement] = list(
+        session.execute(
+            select(DeltaAnnouncement)
+            .options(selectinload(DeltaAnnouncement.attachments))
+            .where(DeltaAnnouncement.scrape_run_id == scrape_run_id)
+            .order_by(DeltaAnnouncement.id.asc())
+        )
+        .scalars()
+        .all()
+    )
+
+    result = DeltaApplyResult(delta_announcement_count=len(deltas))
+
+    # dedup 용 set — content_changed 에 1차 (d) 와 2차 감지가 동시에 들어가도
+    # 같은 announcement_id 가 두 번 박히지 않게 한다.
+    new_id_set: set[int] = set()
+    content_changed_id_set: set[int] = set()
+    transitions_buffer: list[TransitionRecord] = []
+    action_counts: dict[str, int] = {}
+
+    for delta in deltas:
+        # 2-a. (c) 분기에서 쓸 status_from 을 미리 캡처.
+        status_from = _peek_main_status(
+            session,
+            source_type=delta.source_type,
+            source_announcement_id=delta.source_announcement_id,
+        )
+
+        # 2-b. 1차 4-branch UPSERT — Phase 1a 의 시맨틱 그대로 (reset 포함).
+        payload = _delta_payload_to_announcement_payload(delta)
+        upsert_result = upsert_announcement(session, payload)
+        action = upsert_result.action
+        action_counts[action] = action_counts.get(action, 0) + 1
+
+        # 2-b'. detail 필드는 별도로 본 테이블에 적용한다 — upsert_announcement
+        # 의 화이트리스트(_ANNOUNCEMENT_ALLOWED_FIELDS) 에 detail_* 가 포함되지
+        # 않기 때문이다. (a) created / (d) new_version 신규 row 와 (c) in-place
+        # UPDATE row 모두에 detail_html 등을 채워 다음 수집의 detail 스킵
+        # 최적화(_peek_main_can_skip_detail) 가 정확히 작동하도록 한다.
+        # delta 에 detail 이 안 채워졌으면(예: skip_detail/실패) NULL 그대로 둔다.
+        if delta.detail_fetched_at is not None or delta.detail_html is not None:
+            upsert_announcement_detail(
+                session,
+                delta.source_announcement_id,
+                {
+                    "detail_html": delta.detail_html,
+                    "detail_text": delta.detail_text,
+                    "detail_fetched_at": delta.detail_fetched_at,
+                    "detail_fetch_status": delta.detail_fetch_status,
+                },
+                source_type=delta.source_type,
+            )
+
+        announcement_id = upsert_result.announcement.id
+
+        # 2-b''. NTIS 의 fuzzy → official canonical 승급은 1차 4-branch 가 본
+        # 테이블의 (b) unchanged 분기에서 ancm_no 변경을 감지하지 못하므로
+        # (ancm_no 가 _CHANGE_DETECTION_FIELDS 에 없음) 별도 호출로 보강한다.
+        # recompute 헬퍼는 이미 official scheme 인 row 를 건드리지 않으므로
+        # 매 호출이 idempotent 다.
+        if delta.ancm_no:
+            recompute_canonical_with_ancm_no(
+                session,
+                delta.source_announcement_id,
+                source_type=delta.source_type,
+                ancm_no=delta.ancm_no,
+            )
+
+        # 2-c. 1차 카테고리 분류.
+        if action == "created":
+            new_id_set.add(announcement_id)
+        elif action == "new_version":
+            content_changed_id_set.add(announcement_id)
+        elif action == "status_transitioned":
+            # status_to 는 본 테이블의 정규화된 enum 값 (한글 3종) 으로 통일.
+            normalized_to = upsert_result.announcement.status
+            status_to_value = (
+                normalized_to.value
+                if isinstance(normalized_to, AnnouncementStatus)
+                else str(normalized_to)
+            )
+            transitions_buffer.append(
+                TransitionRecord(
+                    announcement_id=announcement_id,
+                    # status_from 이 None 이면 created 분기여야 하지만 안전 fallback.
+                    status_from=status_from or status_to_value,
+                    status_to=status_to_value,
+                )
+            )
+        # action == 'unchanged' 는 어떤 카테고리에도 들어가지 않는다.
+
+        # 2-d. delta_attachments → 본 테이블 attachments sha256 기반 upsert.
+        signature_before = snapshot_announcement_attachments(
+            session, announcement_id
+        )
+        for delta_att in delta.attachments:
+            # 다운로드 실패로 sha256 이 NULL 인 경우는 본 테이블에 그대로
+            # INSERT 하지 않는다(부분 데이터로 본 테이블 신뢰성을 깨지 않기
+            # 위함). 단 stored_path 가 명시되어 있고 실제로 파일이 디스크에
+            # 있는 정상 케이스만 본 테이블 적재 대상이다.
+            if not delta_att.sha256:
+                # 다운로드 실패 첨부 — 본 테이블 미반영. raw_metadata 의
+                # attachment_errors 가 이미 채워져 있으므로 다음 수집에서
+                # 재시도가 자연스럽게 일어난다.
+                continue
+            attachment_payload = {
+                "announcement_id": announcement_id,
+                "original_filename": delta_att.original_filename,
+                "stored_path": delta_att.stored_path,
+                "file_ext": delta_att.file_ext,
+                "file_size": delta_att.file_size,
+                "download_url": delta_att.download_url,
+                "sha256": delta_att.sha256,
+                "downloaded_at": delta_att.downloaded_at,
+            }
+            _, was_upserted = upsert_attachment(session, attachment_payload)
+            if was_upserted:
+                result.attachment_success_count += 1
+            else:
+                result.attachment_skipped_count += 1
+
+        # 2-e. 2차 감지 — false-positive 가드 (다운로드 실패 0 + 1차 action 적격).
+        secondary_allowed = action in ("unchanged", "status_transitioned")
+        if secondary_allowed and not _has_attachment_errors(delta):
+            signature_after = snapshot_announcement_attachments(
+                session, announcement_id
+            )
+            change = detect_attachment_changes(signature_before, signature_after)
+            if change.changed:
+                reapply_result = reapply_version_with_reset(
+                    session,
+                    announcement_id,
+                    changed_fields=frozenset({"attachments"}),
+                )
+                content_changed_id_set.add(reapply_result.announcement.id)
+                result.attachment_content_change_count += 1
+                logger.info(
+                    "apply 2차 감지 — 첨부 변경으로 버전 갱신: "
+                    "delta_id={} source={}/{} new_announcement_id={} "
+                    "added={} removed={} count_changed={}",
+                    delta.id,
+                    delta.source_type,
+                    delta.source_announcement_id,
+                    reapply_result.announcement.id,
+                    len(change.added),
+                    len(change.removed),
+                    change.count_changed,
+                )
+
+    # 3. 카테고리 결과를 dataclass 로 정리 — id 기준 asc 정렬 (재현성 + 머지 안정성).
+    result.new_announcement_ids = sorted(new_id_set)
+    result.content_changed_announcement_ids = sorted(content_changed_id_set)
+    # transitions 도 announcement_id asc 정렬.
+    result.transitions = sorted(transitions_buffer, key=lambda t: t.announcement_id)
+    result.upsert_action_counts = action_counts
+
+    # 4. delta 비움 — 같은 트랜잭션이라 apply 전체가 rollback 되면 함께 되돌아간다.
+    clear_delta_for_run(session, scrape_run_id)
+
+    logger.info(
+        "apply_delta_to_main 완료: scrape_run_id={} 처리={}건 "
+        "actions={} new={} content_changed={} transitions={} "
+        "attachment_success={} attachment_skipped={} 2차변경={}",
+        scrape_run_id,
+        len(deltas),
+        action_counts,
+        len(result.new_announcement_ids),
+        len(result.content_changed_announcement_ids),
+        len(result.transitions),
+        result.attachment_success_count,
+        result.attachment_skipped_count,
+        result.attachment_content_change_count,
+    )
+    return result
+
+
+# ──────────────────────────────────────────────────────────────
+# ScrapeSnapshot UPSERT — 같은 KST 날짜 1 row + payload 머지
+# ──────────────────────────────────────────────────────────────
+#
+# 설계 근거: docs/snapshot_pipeline_design.md §9.6·§10.
+#
+# 호출 위치:
+#   - app/cli.py 의 _async_main 안 apply_session 트랜잭션에서 apply_delta_to_main
+#     반환 직후 호출된다. 같은 session 으로 호출하므로 본 테이블·delta·snapshot
+#     모두 단일 atomic 단위에 묶인다.
+#
+# 동시성 고려:
+#   - ScrapeRun lock (Phase 2 — running row 1개) 으로 동시 ScrapeRun 이 차단되어
+#     같은 snapshot_date 에 대한 race 는 사실상 발생하지 않는다.
+#   - 그래도 SELECT-then-INSERT/UPDATE 패턴으로 단일 트랜잭션 안에서 원자성을
+#     확보한다. UNIQUE(snapshot_date) (00041-2 migration) 가 최후 방어선.
+#
+# 머지는 본 모듈이 아니라 app/db/snapshot.py 의 순수 함수 merge_snapshot_payload
+# 가 담당한다 — DB session 의존을 떼어내 유닛 테스트가 1줄 import 로 가능하도록.
+
+
+def upsert_scrape_snapshot(
+    session: Session,
+    *,
+    snapshot_date: date,
+    new_payload: dict[str, Any],
+) -> ScrapeSnapshot:
+    """같은 KST 날짜의 ScrapeSnapshot 이 있으면 머지, 없으면 신규 INSERT 한다.
+
+    동작 (호출자 session 사용 — flush 까지만 수행, commit 은 호출자 책임):
+        1. SELECT scrape_snapshots WHERE snapshot_date = :snapshot_date
+        2. 매칭 row 가 없으면 → INSERT (payload=normalize_payload(new_payload)).
+           normalize_payload 가 5종 카테고리를 빈 배열로 채워 5b 의 view 가
+           KeyError 없이 0 건도 표시할 수 있게 한다 (설계 §10.3).
+        3. 매칭 row 가 있으면 → merge_snapshot_payload(existing, new) 결과로
+           UPDATE. updated_at 은 모델의 onupdate 가 자동 갱신.
+
+    트랜잭션 경계:
+        본 함수는 flush 까지만 수행한다. 호출자(_async_main 의 apply_session)
+        가 commit 시점을 통제하므로, apply_delta_to_main 과 같은 트랜잭션에
+        묶여 일관성이 보장된다 — apply 가 raise 하면 SQLAlchemy auto-rollback
+        으로 snapshot 도 함께 원상복구되어 검증 11 시나리오를 만족한다.
+
+    빈 ScrapeRun (5종 카테고리 모두 빈 배열) 처리:
+        설계 §10.3 권장안에 따라 신규 INSERT 시에도 row 를 만든다 — 같은 날의
+        후속 ScrapeRun 이 머지할 대상이 되며, 5b 의 캘린더가 \"이 날 수집 시도가
+        있었음\" 을 표시할 수 있다.
+
+    Args:
+        session:        호출자 세션.
+        snapshot_date:  KST 기준 날짜 (date 객체). 호출자가
+                        ``app.timezone.now_kst().date()`` 로 계산해 전달한다.
+        new_payload:    이번 ScrapeRun 의 ``build_snapshot_payload(apply_result)``
+                        결과. 카테고리가 누락되어 있으면 normalize_payload 가
+                        빈 컨테이너로 채운다.
+
+    Returns:
+        flush 후 id 가 부여된 ``ScrapeSnapshot`` 인스턴스 (신규 INSERT 또는
+        머지 UPDATE 결과).
+    """
+    existing_row = session.execute(
+        select(ScrapeSnapshot).where(ScrapeSnapshot.snapshot_date == snapshot_date)
+    ).scalar_one_or_none()
+
+    if existing_row is None:
+        # 신규 INSERT — 빈 카테고리도 명시적으로 정규형으로 채운다.
+        normalized = normalize_payload(new_payload)
+        snapshot = ScrapeSnapshot(
+            snapshot_date=snapshot_date,
+            payload=normalized,
+        )
+        session.add(snapshot)
+        session.flush()
+        logger.info(
+            "ScrapeSnapshot 신규 INSERT: snapshot_date={} counts={}",
+            snapshot_date.isoformat(),
+            normalized.get("counts", {}),
+        )
+        return snapshot
+
+    # 기존 row → merge_snapshot_payload 결과로 UPDATE.
+    merged = merge_snapshot_payload(existing_row.payload, new_payload)
+    existing_row.payload = merged
+    session.flush()
+    logger.info(
+        "ScrapeSnapshot 머지 UPDATE: snapshot_date={} counts={}",
+        snapshot_date.isoformat(),
+        merged.get("counts", {}),
+    )
+    return existing_row
+
+
+def get_scrape_snapshot_by_date(
+    session: Session,
+    snapshot_date: date,
+) -> ScrapeSnapshot | None:
+    """``snapshot_date`` 의 ScrapeSnapshot row 를 조회한다 (없으면 None).
+
+    UNIQUE(snapshot_date) 제약상 0 또는 1 건만 존재한다. 5b 의 dashboard view
+    에서 \"오늘의 변화 요약\" 을 빠르게 가져올 때 사용한다.
+
+    Args:
+        session:       호출자 세션.
+        snapshot_date: 조회할 KST 날짜.
+
+    Returns:
+        ``ScrapeSnapshot`` 또는 None.
+    """
+    return session.execute(
+        select(ScrapeSnapshot).where(ScrapeSnapshot.snapshot_date == snapshot_date)
+    ).scalar_one_or_none()

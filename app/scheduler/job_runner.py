@@ -24,6 +24,7 @@ from app.scrape_control import (
     ScrapeAlreadyRunningError,
     start_scrape_run,
 )
+from app.scrape_control.orphan_gc import run_gc
 
 
 def scheduled_scrape(active_sources: list[str]) -> None:
@@ -77,6 +78,55 @@ def scheduled_scrape(active_sources: list[str]) -> None:
         )
 
 
+def gc_orphan_attachments_job() -> None:
+    """APScheduler 가 호출하는 고아 첨부 파일 GC 진입점 (Phase 5a / task 00041-5).
+
+    APScheduler jobstore 에 ``app.scheduler.job_runner.gc_orphan_attachments_job``
+    경로로 pickle 되므로, 이 함수의 모듈 경로·이름은 **절대 변경 금지**.
+
+    동작:
+        - ``app.scrape_control.orphan_gc.run_gc(dry_run=False)`` 를 호출한다.
+          자동 실행이므로 dry_run=False (실제 삭제) 가 기본 — 운영자가 cron 으로
+          등록할 때 \"매일 새벽 청소\" 의도를 그대로 수행한다.
+        - ``ScrapeRun.status='running'`` 이 있으면 ``run_gc`` 가 자체적으로
+          가드해 GC 를 거부한다 (skipped_due_to_running_scrape_run=True). 이
+          경우 다음 주기에 다시 시도한다 (cron 자체는 유지).
+        - 인자 없음 — APScheduler 가 pickle 하는 args 가 없어 jobstore 에서
+          \"호출 시 어떤 source 를 GC 할지\" 같은 부수 상태가 따라가지 않는다.
+
+    예외 처리 정책 (scheduled_scrape 와 동일):
+        - 모든 예외를 swallow + ``logger.exception`` — APScheduler 스레드가
+          조용히 죽지 않게 한다. cron 은 다음 주기에 다시 실행된다.
+    """
+    try:
+        report = run_gc(dry_run=False)
+        if report.skipped_due_to_running_scrape_run:
+            logger.warning(
+                "GC 자동 실행 건너뜀 — ScrapeRun running 으로 거부됨. "
+                "다음 cron 주기에 재시도됩니다.",
+            )
+            return
+        logger.info(
+            "GC 자동 실행 완료: scanned_root={} disk_files={} db_paths={} "
+            "deleted={} failed={} removed_dirs={} freed_bytes={}",
+            report.scanned_root,
+            report.disk_file_count,
+            report.db_referenced_count,
+            report.deleted_count,
+            len(report.deletion_failed),
+            report.removed_directory_count,
+            report.total_orphan_bytes,
+        )
+    except Exception as exc:
+        # APScheduler 가 잡 예외를 전파하게 두면 일부 버전에서 이후 주기가
+        # 스킵될 수 있어, 안전하게 삼킨다 (scheduled_scrape 와 동일 정책).
+        logger.exception(
+            "GC 자동 실행 중 예기치 못한 예외(다음 주기로 이월): {}: {}",
+            type(exc).__name__, exc,
+        )
+
+
 __all__ = [
+    "gc_orphan_attachments_job",
     "scheduled_scrape",
 ]

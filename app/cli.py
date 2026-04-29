@@ -75,23 +75,23 @@ from loguru import logger
 from app.config import Settings, get_settings
 from app.db.init_db import init_db
 from app.db.repository import (
-    AttachmentChange,
-    UpsertResult,
+    DeltaApplyResult,
+    apply_delta_to_main,
+    append_delta_announcement_errors,
+    clear_delta_for_run,
     create_scrape_run,
-    detect_attachment_changes,
     finalize_scrape_run,
-    get_announcement_by_id,
     get_running_scrape_run,
-    reapply_version_with_reset,
-    recompute_canonical_with_ancm_no,
+    insert_delta_announcement,
+    insert_delta_attachment,
+    peek_main_can_skip_detail,
     set_scrape_run_pid,
-    snapshot_announcement_attachments,
-    upsert_announcement,
-    upsert_announcement_detail,
-    upsert_attachment,
+    update_delta_announcement_detail,
+    upsert_scrape_snapshot,
 )
-from app.db.models import ScrapeRun
+from app.db.models import DeltaAnnouncement, ScrapeRun
 from app.db.session import session_scope
+from app.db.snapshot import build_snapshot_payload
 from app.logging_setup import configure_logging
 from app.scrape_control.constants import (
     SCRAPE_ACTIVE_SOURCES_ENV_VAR,
@@ -100,7 +100,7 @@ from app.scrape_control.constants import (
 from app.scraper.attachment_downloader import scrape_attachments_for_announcement
 from app.scraper.base import BaseSourceAdapter
 from app.scraper.registry import get_adapter
-from app.timezone import KST
+from app.timezone import KST, now_kst
 from app.sources.config_schema import (
     ScrapeRunConfig,
     SourceConfig,
@@ -254,187 +254,128 @@ def _build_announcement_payload(row_metadata: dict[str, Any]) -> dict[str, Any]:
 
 
 @dataclass
-class AttachmentStageResult:
-    """`_scrape_and_store_attachments` 단일 공고 처리 결과.
+class DeltaAttachmentStageResult:
+    """단일 공고의 첨부 수집 → delta_attachments 적재 결과 (Phase 5a).
+
+    Phase 1a 의 ``AttachmentStageResult`` 가 본 테이블 attachments 에 직접
+    upsert 하던 시점의 통계를 담고, 동시에 2차 감지/reapply 까지 같은 세션에서
+    수행했다. Phase 5a 에서는 본 테이블 직접 변경이 사라지고 모두 delta 로
+    옮겨졌으므로 이 dataclass 는 다음만 다룬다:
 
     Attributes:
-        success_count: upsert_attachment 로 신규 또는 변경 저장된 첨부 수.
-        failure_count: 다운로드 단계에서 오류가 난 첨부 수.
-        skipped_count: 기존과 sha256 이 동일해 저장을 건너뛴 첨부 수.
-        content_change_detected: 2차 감지(첨부 기반) 결과 변경이 감지되어
-                                 `reapply_version_with_reset` 이 실행됐는지.
-        effective_announcement_id: 2차 감지로 new_version 이 발생한 경우
-                                   신규 row 의 id. 그 외에는 호출 당시의 id 를 그대로.
-        detected_change: AttachmentChange 객체 (감지 세부 — added/removed/count_changed).
-                         2차 감지가 실행되지 않은 경우 None.
+        download_success_count: 다운로드 성공해 delta_attachments 에 INSERT 된 첨부 수.
+        download_failure_count: 다운로드 실패로 raw_metadata.attachment_errors 에 누적된 첨부 수.
+
+    2차 감지(reapply_version_with_reset) 는 apply 단계로 이동했으므로 본
+    dataclass 에는 더 이상 ``content_change_detected`` 가 없다 — apply 가
+    DeltaApplyResult 의 attachment_content_change_count 로 보고한다.
     """
 
-    success_count: int = 0
-    failure_count: int = 0
-    skipped_count: int = 0
-    content_change_detected: bool = False
-    effective_announcement_id: int = 0
-    detected_change: Optional[AttachmentChange] = None
+    download_success_count: int = 0
+    download_failure_count: int = 0
 
 
-async def _scrape_and_store_attachments(
+async def _scrape_and_store_delta_attachments(
     *,
-    announcement_id: int,
+    delta_announcement_id: int,
     source_type: str,
     source_announcement_id: str,
     settings: Settings,
     adapter: Optional[BaseSourceAdapter] = None,
-    upsert_action: Optional[str] = None,
-) -> AttachmentStageResult:
-    """공고 한 건의 첨부파일을 수집·저장하고 2차 변경 감지까지 수행한다.
+) -> DeltaAttachmentStageResult:
+    """공고 한 건의 첨부를 다운로드해 delta_attachments 에 INSERT 한다.
+
+    Phase 1a/2 의 ``_scrape_and_store_attachments`` 를 delta 흐름으로 이식한
+    버전이다. 본 테이블 ``attachments`` 는 절대 건드리지 않으며, 2차 감지/
+    reapply 도 수행하지 않는다 — apply 단계가 모두 처리한다 (검증 9 회귀 보존
+    은 apply_delta_to_main 안에서 같은 트랜잭션에서 일어남).
 
     단계:
-        1. 새 세션에서 공고를 조회하고 '다운로드 이전' 첨부 signature 를 스냅샷한다.
-           공고가 없거나 detail_html 이 없으면 즉시 빈 결과 반환.
-           ORM 인스턴스는 비동기 컨텍스트에서 안전하게 쓰도록 expunge 한다.
-        2. 세션 바깥에서 비동기 다운로드 실행.
-        3. 새 세션에서 성공 항목을 upsert_attachment 로 저장하고,
-           오류 항목은 공고의 raw_metadata.attachment_errors 에 누적한다.
-        4. 실패 0 + 다운로드 시도 존재 + upsert 1차 action 이 적격일 때에만 2차 감지:
-           'after' signature 를 같은 세션에서 캡처하고 before 와 비교.
-           변경이 있으면 `reapply_version_with_reset` 으로 is_current 순환 +
-           사용자 라벨링 리셋을 동일 트랜잭션에서 수행.
+        1. 새 세션에서 ``DeltaAnnouncement`` 를 조회하고 detail_html 이 채워져
+           있는지 확인. detail_html 이 없으면 첨부 수집 자체를 건너뛴다.
+        2. 세션에서 expunge 한 뒤 비동기 컨텍스트에서
+           ``scrape_attachments_for_announcement`` 호출 — 이 함수는 announcement
+           기반의 5 개 필드(.id / .source_type / .source_announcement_id /
+           .detail_html / .detail_url) 만 사용하므로 DeltaAnnouncement 도
+           duck-typing 으로 그대로 쓸 수 있다. 결과의 success_entries 는
+           Phase 1a 의 upsert_attachment payload 형식과 동일하다.
+        3. 새 세션에서 성공 항목마다 ``insert_delta_attachment`` 를 호출해
+           delta_attachments 에 INSERT. 오류 항목은
+           ``append_delta_announcement_errors`` 로 delta.raw_metadata 에 누적
+           — apply 단계가 이 메타를 그대로 본 테이블 raw_metadata 로 흘려 보내
+           Phase 1a 와 의미적으로 동일한 표현이 된다.
 
-    2차 감지 발동 조건 (AND 결합):
-        - `upsert_action` 이 'unchanged' 또는 'status_transitioned' 일 것.
-          created/new_version 경로에서는 2차 감지를 건너뛴다 — 1차 감지가 이미
-          버전 분기를 처리했고, 방금 INSERT 된 신규 row 는 첨부가 0 개인 상태라
-          다운로드 후 비교하면 무조건 '변경' 으로 판정되어 row 가 중복 생성된다.
-          upsert_action=None 인 경우(예: 단위 테스트) 는 보수적으로 발동 허용.
-        - 다운로드 단계에서 오류가 0 건일 것 — 부분 데이터로 false-positive 변경
-          판정을 피한다.
-        - 다운로드 시도가 존재할 것(success/error 합이 > 0) — 없으면 비교 불필요.
-        - `dry_run=True` 또는 `skip_attachments=True` 인 경로는 호출자가 이미
-          이 함수를 호출하지 않으므로 여기서는 추가 체크 없음.
-
-    첨부 재배치 정책 (범위 밖):
-        2차 감지로 new_version 이 발생하면 기존 첨부는 **구 row 에 그대로 남는다**.
-        신규 row 는 빈 첨부 세트로 시작하며, 다음 수집 사이클에서 재수집된다.
-        이력 누적 모델(구 row = 이력 + 첨부, 신규 row = 현재)에 부합하는
-        Phase 1a 범위의 의도적 선택. guidance 참조.
-
-    공고 단위 예외는 호출자(_run_source_announcements)에서 격리한다.
+    공고 단위 예외는 호출자(_run_source_announcements) 에서 격리한다.
 
     Args:
-        announcement_id:          공고 내부 PK.
+        delta_announcement_id:    부모 DeltaAnnouncement 의 PK.
         source_type:              로그 컨텍스트용 소스 유형.
         source_announcement_id:   로그 컨텍스트용 소스 공고 ID.
         settings:                 전역 설정.
-        adapter:                  소스 어댑터(선택). scrape_attachments 일부 구현이 사용.
-        upsert_action:            목록 UPSERT 1차 분기 결과. 'unchanged' 또는
-                                  'status_transitioned' 만 2차 감지 대상이다.
-                                  None 이면(기본) 발동을 허용한다 — 단위 테스트 편의용.
+        adapter:                  소스 어댑터.
 
     Returns:
-        AttachmentStageResult.
+        DeltaAttachmentStageResult.
     """
-    # 1. 최신 공고 조회 + before signature 캡처. detail_html 필수.
-    announcement_for_scraping = None
-    signature_before = None
-    with session_scope() as session:
-        fresh_ann = get_announcement_by_id(session, announcement_id)
-        if not fresh_ann or not fresh_ann.detail_html:
-            logger.debug(
-                "첨부파일 수집 건너뜀: detail_html 없음 — announcement_id={}",
-                announcement_id,
-            )
-            return AttachmentStageResult(effective_announcement_id=announcement_id)
-        # 2차 감지 기준점: 다운로드 실행 전 현재 DB 의 첨부 집합.
-        signature_before = snapshot_announcement_attachments(session, announcement_id)
-        # 세션에서 분리하여 비동기 컨텍스트에서 안전하게 사용
-        session.expunge(fresh_ann)
-        announcement_for_scraping = fresh_ann
+    stage = DeltaAttachmentStageResult()
 
-    # 2. 첨부파일 다운로드 (비동기 네트워크 I/O — 세션 바깥에서 실행)
+    # 1. delta row 조회 + detail_html 존재 확인. ORM 인스턴스는 비동기 컨텍스트
+    #    에서 안전하게 사용되도록 expunge 후 반환.
+    delta_for_scraping: Optional[DeltaAnnouncement] = None
+    with session_scope() as session:
+        fresh_delta = session.get(DeltaAnnouncement, delta_announcement_id)
+        if fresh_delta is None or not fresh_delta.detail_html:
+            logger.debug(
+                "첨부파일 수집 건너뜀: detail_html 없음 — delta_announcement_id={}",
+                delta_announcement_id,
+            )
+            return stage
+        session.expunge(fresh_delta)
+        delta_for_scraping = fresh_delta
+
+    # 2. 첨부 다운로드 (비동기 네트워크 I/O — 세션 밖). DeltaAnnouncement 가
+    #    Announcement 와 동일한 5 개 필드를 노출하므로 duck-typing 으로 그대로 사용.
     att_result = await scrape_attachments_for_announcement(
-        announcement_for_scraping,
+        delta_for_scraping,
         settings=settings,
         adapter=adapter,
     )
 
-    stage = AttachmentStageResult(effective_announcement_id=announcement_id)
-
-    # 다운로드 시도 자체가 없으면(이 공고에 첨부 링크가 없거나 전부 이미 파일시스템에
-    # 있음) DB 세션 열 필요 없음. 2차 감지도 스킵.
     if not att_result.success_entries and not att_result.error_entries:
         logger.info(
-            "첨부파일 수집 완료: source={} id={} 성공={} 스킵={} 실패={}",
-            source_type, source_announcement_id, 0, 0, 0,
+            "첨부파일 수집 완료: source={} id={} 성공={} 실패={} (다운로드 시도 없음)",
+            source_type,
+            source_announcement_id,
+            0,
+            0,
         )
         return stage
 
-    # 3. 수집 결과를 DB 에 저장 (성공·오류 둘 다 있는 경우도 포함)
+    # 3. 결과를 delta_attachments / delta.raw_metadata 에 적재.
     with session_scope() as session:
-        # 성공 항목: upsert_attachment (sha256 기반 중복 방지)
         for entry in att_result.success_entries:
-            _, was_upserted = upsert_attachment(session, entry)
-            if was_upserted:
-                stage.success_count += 1
-            else:
-                # sha256 동일 → 이미 최신 상태, DB 변경 없음
-                stage.skipped_count += 1
+            insert_delta_attachment(
+                session,
+                delta_announcement_id=delta_announcement_id,
+                payload=entry,
+            )
+            stage.download_success_count += 1
 
-        # 오류 항목: raw_metadata.attachment_errors 에 누적 (기존 오류와 병합)
         if att_result.error_entries:
-            ann = get_announcement_by_id(session, announcement_id)
-            if ann is not None:
-                existing_raw = dict(ann.raw_metadata or {})
-                existing_errors: list[Any] = existing_raw.get("attachment_errors", [])
-                existing_raw["attachment_errors"] = existing_errors + att_result.error_entries
-                ann.raw_metadata = existing_raw
-            stage.failure_count += len(att_result.error_entries)
-
-        # 4. 2차 감지 — 다음 3개 조건이 모두 충족될 때만 수행:
-        #   (i) 다운로드 실패 0 건 (false-positive 방지)
-        #   (ii) signature_before 확보 (1 단계 통과 경로)
-        #   (iii) upsert 1차 action 이 'unchanged' 또는 'status_transitioned'.
-        #        created/new_version 은 방금 INSERT 된 신규 row 라 signature_before
-        #        가 첨부 0 개인 상태이므로 다운로드 후 비교하면 무조건 '변경' 이 되어
-        #        row 중복이 발생한다. 이 경로는 1차 감지가 이미 버전 분기를 끝냈으므로
-        #        2차 감지를 건너뛰어야 한다.
-        #        upsert_action=None 은 보수적으로 발동 허용 (테스트 편의).
-        secondary_detection_allowed = (
-            upsert_action is None
-            or upsert_action in ("unchanged", "status_transitioned")
-        )
-        if (
-            stage.failure_count == 0
-            and signature_before is not None
-            and secondary_detection_allowed
-        ):
-            signature_after = snapshot_announcement_attachments(session, announcement_id)
-            change = detect_attachment_changes(signature_before, signature_after)
-            if change.changed:
-                # is_current 순환 + 리셋 — 모두 같은 session = 같은 트랜잭션.
-                reapply_result = reapply_version_with_reset(
-                    session,
-                    announcement_id,
-                    changed_fields=frozenset({"attachments"}),
-                )
-                stage.content_change_detected = True
-                stage.effective_announcement_id = reapply_result.announcement.id
-                stage.detected_change = change
-                logger.info(
-                    "2차 감지 — 첨부 변경으로 버전 갱신: source={} id={} "
-                    "→ new_id={} added={} removed={} count_changed={}",
-                    source_type, source_announcement_id,
-                    reapply_result.announcement.id,
-                    len(change.added), len(change.removed),
-                    change.count_changed,
-                )
+            append_delta_announcement_errors(
+                session,
+                delta_announcement_id,
+                att_result.error_entries,
+            )
+            stage.download_failure_count += len(att_result.error_entries)
 
     logger.info(
-        "첨부파일 수집 완료: source={} id={} 성공={} 스킵={} 실패={} 2차변경={}",
-        source_type, source_announcement_id,
-        stage.success_count, stage.skipped_count, stage.failure_count,
-        stage.content_change_detected,
+        "첨부파일 수집 완료: source={} id={} delta_attachments INSERT={} 실패={}",
+        source_type,
+        source_announcement_id,
+        stage.download_success_count,
+        stage.download_failure_count,
     )
-
     return stage
 
 
@@ -475,11 +416,20 @@ async def _run_source_announcements(
         dry_run:           True 면 DB 쓰기를 건너뛴다.
 
     Returns:
-        {success_count, failure_count, failed_announcement_ids,
-         detail_success_count, detail_failure_count, skipped_detail_count,
-         action_counts,
-         attachment_success_count, attachment_failure_count, attachment_skipped_count,
-         attachment_content_change_count}
+        Phase 5a 수집 단계 통계 dict — 본 테이블 4-branch 결과(action_counts /
+        attachment_content_change_count 등) 는 모두 apply 단계에서 결정되므로
+        포함되지 않는다.
+
+        keys:
+          - delta_inserted_count: 공고 1건 → delta_announcements INSERT 성공 수
+          - delta_failed_count:  delta INSERT 단계에서 실패한 공고 수
+          - failed_source_announcement_ids: 실패 공고의 source_announcement_id list
+          - detail_success_count: detail 수집 성공 수 (delta 의 detail_html 채워짐)
+          - detail_failure_count: detail 수집 실패 수
+          - skipped_detail_count: peek_main_can_skip_detail 로 detail 수집을 건너뛴 수
+          - attachment_download_success_count: delta_attachments INSERT 성공 첨부 수
+          - attachment_download_failure_count: 다운로드 실패로 delta.raw_metadata 에
+                                                attachment_errors 로 누적된 첨부 수
     """
     source_type = adapter.source_type
 
@@ -495,47 +445,43 @@ async def _run_source_announcements(
             source_type, max_announcements, len(target_rows),
         )
 
+    empty_summary: dict[str, Any] = {
+        "delta_inserted_count": 0,
+        "delta_failed_count": 0,
+        "failed_source_announcement_ids": [],
+        "detail_success_count": 0,
+        "detail_failure_count": 0,
+        "skipped_detail_count": 0,
+        "attachment_download_success_count": 0,
+        "attachment_download_failure_count": 0,
+    }
+
     if not target_rows:
         logger.warning("처리할 공고가 없음: source={}", source_type)
-        return {
-            "success_count": 0,
-            "failure_count": 0,
-            "failed_announcement_ids": [],
-            "detail_success_count": 0,
-            "detail_failure_count": 0,
-            "skipped_detail_count": 0,
-            "action_counts": {},
-            "attachment_success_count": 0,
-            "attachment_failure_count": 0,
-            "attachment_skipped_count": 0,
-            "attachment_content_change_count": 0,
-        }
+        return empty_summary
 
-    success_count = 0
-    failure_count = 0
-    failed_announcement_ids: list[str] = []
+    delta_inserted_count = 0
+    delta_failed_count = 0
+    failed_source_announcement_ids: list[str] = []
     detail_success_count = 0
     detail_failure_count = 0
-    # 변경 없음 + 기존 상세 있음 → 상세 수집을 생략한 건수
     skipped_detail_count = 0
-    # upsert action 별 건수 (created / unchanged / new_version / status_transitioned)
-    action_counts: dict[str, int] = {}
-    # 첨부파일 카운터
-    attachment_success_count = 0
-    attachment_failure_count = 0
-    attachment_skipped_count = 0
-    # 2차 감지(첨부 기반) 로 신규 버전이 발생한 공고 수.
-    # 1차의 action_counts['new_version'] 과 독립적으로 집계한다 — 1차는 목록 UPSERT 단계,
-    # 2차는 첨부 다운로드 후 단계이므로 원인이 다르다.
-    attachment_content_change_count = 0
+    attachment_download_success_count = 0
+    attachment_download_failure_count = 0
 
     # 상세 수집 실제 요청 순서 인덱스 (지연 계산용)
     detail_request_index = 0
 
+    # ScrapeRun id 는 _async_main 이 환경 또는 lock 으로 확보한 뒤 ENV 로 전달
+    # 한다 — 본 함수는 그 id 를 import-time 헬퍼 _resolve_active_scrape_run_id
+    # 로 가져온다 (테스트 격리 + 단일 source 에서도 일관 동작).
+    scrape_run_id = _resolve_active_scrape_run_id()
+
     for row_index, row_metadata in enumerate(target_rows, start=1):
         # ── (0) SIGTERM 플래그 체크 ─────────────────────────────────────────
-        # 공고 1건 내부에서는 중단하지 않는다(atomic 보장). 이 지점에서만 확인해
-        # 다음 공고로 넘어가기 전에 깨끗이 이탈한다.
+        # 공고 1건 내부에서는 중단하지 않는다 — delta INSERT 의 단위 트랜잭션을
+        # 깨면 raw_metadata 와 attachments 가 어긋날 수 있다. 다음 공고로 넘어
+        # 가기 전 경계에서만 break 한다.
         if _is_cancel_requested():
             remaining = len(target_rows) - row_index + 1
             logger.warning(
@@ -552,50 +498,65 @@ async def _run_source_announcements(
             row_index, len(target_rows), source_type, source_announcement_id,
         )
 
-        # ── (1) 목록 UPSERT ──────────────────────────────────────────────────
-        upsert_result: Optional[UpsertResult] = None
+        # ── (1) delta_announcements INSERT (목록 메타) ───────────────────────
+        delta_announcement_id: Optional[int] = None
         try:
             payload = _build_announcement_payload(row_metadata)
             if dry_run:
                 logger.info(
-                    "[dry-run] upsert_announcement(skip): source={} id={}",
+                    "[dry-run] insert_delta_announcement(skip): source={} id={}",
                     source_type, source_announcement_id,
                 )
             else:
                 with session_scope() as session:
-                    upsert_result = upsert_announcement(session, payload)
-                _log_upsert_action(upsert_result, source_type, source_announcement_id)
-                # action 분포 집계
-                action_counts[upsert_result.action] = action_counts.get(upsert_result.action, 0) + 1
-            success_count += 1
+                    delta_row = insert_delta_announcement(
+                        session,
+                        scrape_run_id=scrape_run_id,
+                        payload=payload,
+                    )
+                    delta_announcement_id = delta_row.id
+                logger.debug(
+                    "delta_announcement INSERT: source={} id={} delta_id={}",
+                    source_type, source_announcement_id, delta_announcement_id,
+                )
+            delta_inserted_count += 1
         except Exception as exc:
-            failure_count += 1
-            failed_announcement_ids.append(str(source_announcement_id))
+            delta_failed_count += 1
+            failed_source_announcement_ids.append(str(source_announcement_id))
             logger.exception(
-                "공고 upsert 실패(스킵): source={} id={} ({}: {})",
+                "delta INSERT 실패(스킵): source={} id={} ({}: {})",
                 source_type, source_announcement_id, type(exc).__name__, exc,
             )
-            # UPSERT 실패 시 상세·첨부 단계도 스킵
+            # delta INSERT 실패 시 상세·첨부 단계도 스킵
             continue
 
-        # ── (2) 상세 수집 ────────────────────────────────────────────────────
-        # announcement_has_detail: 이번 루프 종료 시점에 DB 에 detail_html 이 있으면 True.
-        # - 방금 수집 성공 했거나
-        # - unchanged 이고 기존 detail_html 이 있거나
-        announcement_has_detail = False
+        # ── (2) detail 수집 ──────────────────────────────────────────────────
+        # delta_announcement_has_detail: 이번 루프 종료 시점에 delta 에 detail_html
+        # 이 있으면 True (다음 단계 attachments 의 detail_html 의존을 만족).
+        delta_announcement_has_detail = False
 
         if skip_detail or dry_run:
             # skip_detail: 목록 적재만 요청됨. dry_run: DB 쓰기 없음.
             # 두 경우 모두 상세·첨부 수집 없이 다음 공고로.
             pass
 
-        elif upsert_result is not None and not upsert_result.needs_detail_scraping:
-            # 변경 없음 + 기존 상세 데이터 있음 → 상세 수집 생략
-            # detail_html 이 DB 에 이미 있으므로 첨부 수집은 가능하다.
+        elif _can_skip_detail_against_main(
+            source_type=source_type,
+            source_announcement_id=source_announcement_id,
+            payload=payload,
+        ):
+            # 본 테이블에 동일 비교 필드 + detail_html 이 있는 unchanged row 가
+            # 존재 — apply 단계의 (b) unchanged 분기에서도 detail 재수집 불필요로
+            # 판정될 row 다. 현 수집 단계에서 detail 다운로드를 생략한다.
+            #
+            # 단, delta 의 detail_html 은 비어 있게 되므로 apply 가 본 테이블에
+            # detail 을 덮어쓰지 않는다. (apply_delta_to_main 이 delta.detail_*
+            # 가 채워진 경우에만 upsert_announcement_detail 호출하도록 가드 되어
+            # 있다 — repository 참조.)
             skipped_detail_count += 1
-            announcement_has_detail = True
+            delta_announcement_has_detail = True
             logger.info(
-                "상세 수집 생략(변경 없음, 기존 데이터 재사용): source={} id={}",
+                "상세 수집 생략(본 테이블에 unchanged + detail 보유): source={} id={}",
                 source_type, source_announcement_id,
             )
 
@@ -622,53 +583,34 @@ async def _run_source_announcements(
 
             try:
                 with session_scope() as session:
-                    upsert_announcement_detail(
+                    detail_payload: dict[str, Any] = dict(detail_result)
+                    # NTIS 의 ntis_ancm_no 가 detail 결과에 들어오면 delta.ancm_no
+                    # 로 흘려 보낸다 — apply 단계가 이를 사용해 canonical 을
+                    # fuzzy → official 로 승급한다.
+                    ntis_ancm_no: Optional[str] = detail_payload.get("ntis_ancm_no")
+                    if ntis_ancm_no:
+                        detail_payload["ancm_no"] = ntis_ancm_no
+                    update_delta_announcement_detail(
                         session,
-                        source_announcement_id,
-                        detail_result,
-                        source_type=source_type,
+                        delta_announcement_id,
+                        detail_payload,
                     )
             except Exception as exc:
                 logger.exception(
-                    "상세 DB 갱신 실패: source={} id={} ({}: {})",
+                    "delta detail 갱신 실패: source={} id={} ({}: {})",
                     source_type, source_announcement_id, type(exc).__name__, exc,
                 )
                 detail_failure_count += 1
-                # 상세 저장 실패 → detail_html 미보장 → 첨부 스킵
+                # detail 저장 실패 → detail_html 미보장 → 첨부 스킵
             else:
                 fetch_status = detail_result.get("detail_fetch_status", "error")
                 if fetch_status == "ok":
                     detail_success_count += 1
-                    announcement_has_detail = True
+                    delta_announcement_has_detail = True
                     logger.info(
                         "상세 수집 완료(ok): source={} id={}",
                         source_type, source_announcement_id,
                     )
-                    # NTIS 전용: 상세 파싱에서 공식 공고번호가 확보된 경우 canonical 재계산.
-                    # 목록 단계에서는 공고번호를 알 수 없어 fuzzy canonical 이 부여되었으므로
-                    # 여기서 official key 로 승급하여 cross-source 매칭 정확도를 높인다.
-                    ntis_ancm_no: Optional[str] = detail_result.get("ntis_ancm_no")
-                    if ntis_ancm_no:
-                        try:
-                            with session_scope() as session:
-                                recomputed = recompute_canonical_with_ancm_no(
-                                    session,
-                                    source_announcement_id,
-                                    source_type=source_type,
-                                    ancm_no=ntis_ancm_no,
-                                )
-                            if recomputed:
-                                logger.info(
-                                    "canonical 재계산 완료(fuzzy→official): "
-                                    "source={} id={} ancm_no={}",
-                                    source_type, source_announcement_id, ntis_ancm_no,
-                                )
-                        except Exception as exc:
-                            logger.warning(
-                                "canonical 재계산 실패(스킵, 공고 수집은 유지됨): "
-                                "source={} id={} ({}: {})",
-                                source_type, source_announcement_id, type(exc).__name__, exc,
-                            )
                 else:
                     detail_failure_count += 1
                     logger.warning(
@@ -676,100 +618,108 @@ async def _run_source_announcements(
                         fetch_status, source_type, source_announcement_id,
                     )
 
-        # ── (3) 첨부파일 수집 + 2차 변경 감지 ──────────────────────────────────
-        # 조건: detail_html 이 DB 에 있고, 첨부 수집 건너뜀 플래그가 없고, dry_run 도 아닐 것.
-        # upsert_result 가 None 인 경우는 dry_run=True 에서만 발생하며 위에서 이미 pass.
-        # 2차 감지(첨부 signature 비교)는 _scrape_and_store_attachments 내부에서
-        # 다운로드 실패가 없을 때만 수행된다 — false-positive 방지 (guidance 참조).
+        # ── (3) 첨부파일 수집 → delta_attachments 적재 ─────────────────────────
+        # 조건: detail_html 이 delta 에 있고, 첨부 수집 건너뜀 플래그가 없고,
+        # dry_run 도 아닐 것. delta_announcement_id 가 None 인 경우(dry_run) 는
+        # 위에서 이미 pass 처리. 2차 감지/reapply 는 apply 단계로 이동했으므로
+        # 본 단계에서는 다운로드 + delta INSERT 만 수행한다.
         if (
             not skip_attachments
             and not dry_run
-            and announcement_has_detail
-            and upsert_result is not None
+            and delta_announcement_has_detail
+            and delta_announcement_id is not None
         ):
             try:
-                attachment_stage = await _scrape_and_store_attachments(
-                    announcement_id=upsert_result.announcement.id,
+                attachment_stage = await _scrape_and_store_delta_attachments(
+                    delta_announcement_id=delta_announcement_id,
                     source_type=source_type,
                     source_announcement_id=source_announcement_id,
                     settings=settings,
                     adapter=adapter,
-                    # 1차 action 에 따라 2차 감지 발동 여부를 결정한다.
-                    # unchanged / status_transitioned 만 2차 감지 대상
-                    # (created / new_version 은 signature_before 가 0 이라 false-positive).
-                    upsert_action=upsert_result.action,
                 )
-                attachment_success_count += attachment_stage.success_count
-                attachment_failure_count += attachment_stage.failure_count
-                attachment_skipped_count += attachment_stage.skipped_count
-                if attachment_stage.content_change_detected:
-                    attachment_content_change_count += 1
+                attachment_download_success_count += attachment_stage.download_success_count
+                attachment_download_failure_count += attachment_stage.download_failure_count
             except Exception as exc:
                 logger.exception(
-                    "첨부파일 수집 실패(스킵, 공고 upsert 성공은 유지됨): "
+                    "첨부파일 수집 실패(스킵, 공고 delta INSERT 성공은 유지됨): "
                     "source={} id={} ({}: {})",
                     source_type, source_announcement_id, type(exc).__name__, exc,
                 )
-                # 첨부 실패는 공고 성공 카운터에 영향 없음.
-                # 2차 감지 예외도 동일 try/except 로 공고 단위 격리된다.
-                attachment_failure_count += 1
+                # 첨부 실패는 공고 성공 카운터에 영향 없음 — apply 단계가
+                # delta.raw_metadata.attachment_errors 로부터 false-positive 를
+                # 회피한다.
+                attachment_download_failure_count += 1
 
     return {
-        "success_count": success_count,
-        "failure_count": failure_count,
-        "failed_announcement_ids": failed_announcement_ids,
+        "delta_inserted_count": delta_inserted_count,
+        "delta_failed_count": delta_failed_count,
+        "failed_source_announcement_ids": failed_source_announcement_ids,
         "detail_success_count": detail_success_count,
         "detail_failure_count": detail_failure_count,
         "skipped_detail_count": skipped_detail_count,
-        "action_counts": action_counts,
-        "attachment_success_count": attachment_success_count,
-        "attachment_failure_count": attachment_failure_count,
-        "attachment_skipped_count": attachment_skipped_count,
-        "attachment_content_change_count": attachment_content_change_count,
+        "attachment_download_success_count": attachment_download_success_count,
+        "attachment_download_failure_count": attachment_download_failure_count,
     }
 
 
-def _log_upsert_action(
-    result: UpsertResult,
+# 활성 ScrapeRun id 를 함수 단위에서 안전하게 노출하기 위한 모듈 레벨 cache.
+# _async_main 이 ScrapeRun row 를 확보한 직후 set 하고, _run_source_announcements
+# 가 delta INSERT 시 FK 인자로 사용한다. 테스트는 set/reset 헬퍼로 격리.
+_active_scrape_run_id: list[Optional[int]] = [None]
+
+
+def _set_active_scrape_run_id(run_id: int) -> None:
+    """현재 실행 중인 ScrapeRun id 를 모듈 레벨에 등록한다 (_async_main 전용)."""
+    _active_scrape_run_id[0] = run_id
+
+
+def _resolve_active_scrape_run_id() -> int:
+    """delta INSERT 시 사용할 활성 ScrapeRun id 를 반환한다.
+
+    _async_main 이 _set_active_scrape_run_id 로 등록한 값이 있으면 그것을 쓴다.
+    등록 전에 호출되면 ValueError 로 빠르게 실패시켜 잘못된 분리 호출을 막는다.
+    """
+    run_id = _active_scrape_run_id[0]
+    if run_id is None:
+        raise ValueError(
+            "활성 ScrapeRun id 가 설정되지 않았습니다 — _async_main 이 "
+            "_set_active_scrape_run_id() 를 먼저 호출해야 합니다."
+        )
+    return run_id
+
+
+def _reset_active_scrape_run_id_for_tests() -> None:
+    """테스트에서 모듈 레벨 캐시를 초기화한다. 운영 코드에서는 부르지 않는다."""
+    _active_scrape_run_id[0] = None
+
+
+def _can_skip_detail_against_main(
+    *,
     source_type: str,
     source_announcement_id: str,
-) -> None:
-    """UpsertResult.action 에 따라 적절한 로그를 남긴다.
+    payload: dict[str, Any],
+) -> bool:
+    """본 테이블의 unchanged + detail 보유 여부를 1회 SELECT 로 peek 한다.
 
-    status_transitioned 는 접수예정→접수중→마감 전이가 감지된 정상 경로이며 INFO 로 기록한다.
-    title/deadline_at/agency 도 함께 바뀐 경우에는 new_version 분기(INFO)로 기록된다.
+    Phase 1a 의 ``upsert_result.needs_detail_scraping`` 분기를 delta 흐름에서도
+    살리기 위한 read-only 우회로다. apply 단계의 4-branch 와 동일 비교 필드를
+    사용하므로 의미적으로 1:1 일치한다.
 
     Args:
-        result:                 upsert_announcement 의 반환값.
-        source_type:            공고 소스 유형 (로그 컨텍스트용).
-        source_announcement_id: 공고 소스 ID (로그 컨텍스트용).
+        source_type:            소스 유형 (예: 'IRIS').
+        source_announcement_id: 공고 소스 ID.
+        payload:                _build_announcement_payload 결과 (title/status/
+                                agency/deadline_at 포함).
+
+    Returns:
+        True 이면 detail 수집을 건너뛴다.
     """
-    action = result.action
-    if action == "created":
-        logger.info(
-            "신규 공고 등록: source={} id={}",
-            source_type, source_announcement_id,
-        )
-    elif action == "unchanged":
-        logger.debug(
-            "변경 없음: source={} id={} (needs_detail={})",
-            source_type, source_announcement_id, result.needs_detail_scraping,
-        )
-    elif action == "new_version":
-        logger.info(
-            "내용 변경 — 신규 버전 등록: source={} id={} changed_fields={}",
-            source_type, source_announcement_id, sorted(result.changed_fields),
-        )
-    elif action == "status_transitioned":
-        # 동일 공고의 상태(status)만 변경된 경우 — 정상 전이 경로 (in-place UPDATE)
-        logger.info(
-            "상태 전이 — in-place 갱신: source={} id={} changed_fields={}",
-            source_type, source_announcement_id, sorted(result.changed_fields),
-        )
-    else:
-        logger.warning(
-            "알 수 없는 upsert action: source={} id={} action={}",
-            source_type, source_announcement_id, action,
+    with session_scope() as session:
+        return peek_main_can_skip_detail(
+            session,
+            source_type=source_type,
+            source_announcement_id=source_announcement_id,
+            payload=payload,
         )
 
 
@@ -830,18 +780,17 @@ async def _orchestrate(
     active_sources = _resolve_active_sources(scrape_config, sources_cfg)
     logger.info("활성 소스: {}", [s.id for s in active_sources])
 
-    # (3) 소스별 실행 및 통계 집계
-    total_success = 0
-    total_failure = 0
-    total_failed_ids: list[str] = []
+    # (3) 소스별 실행 및 통계 집계 — Phase 5a 의 수집-단계 통계만 집계.
+    # action_counts / attachment_content_change_count 같은 본 테이블 결과 통계는
+    # apply_delta_to_main 의 DeltaApplyResult 가 별도로 보고한다.
+    total_delta_inserted = 0
+    total_delta_failed = 0
+    total_failed_source_announcement_ids: list[str] = []
     total_detail_success = 0
     total_detail_failure = 0
     total_skipped_detail = 0
-    total_action_counts: dict[str, int] = {}
-    total_attachment_success = 0
-    total_attachment_failure = 0
-    total_attachment_skipped = 0
-    total_attachment_content_change = 0
+    total_attachment_download_success = 0
+    total_attachment_download_failure = 0
 
     for source_config in active_sources:
         # ── (0) SIGTERM 플래그 체크 ─────────────────────────────────────────
@@ -891,52 +840,45 @@ async def _orchestrate(
             )
             continue
 
-        total_success += source_stats["success_count"]
-        total_failure += source_stats["failure_count"]
-        total_failed_ids.extend(source_stats["failed_announcement_ids"])
+        total_delta_inserted += source_stats["delta_inserted_count"]
+        total_delta_failed += source_stats["delta_failed_count"]
+        total_failed_source_announcement_ids.extend(
+            source_stats["failed_source_announcement_ids"]
+        )
         total_detail_success += source_stats["detail_success_count"]
         total_detail_failure += source_stats["detail_failure_count"]
         total_skipped_detail += source_stats["skipped_detail_count"]
-        for action, count in source_stats.get("action_counts", {}).items():
-            total_action_counts[action] = total_action_counts.get(action, 0) + count
-        total_attachment_success += source_stats.get("attachment_success_count", 0)
-        total_attachment_failure += source_stats.get("attachment_failure_count", 0)
-        total_attachment_skipped += source_stats.get("attachment_skipped_count", 0)
-        total_attachment_content_change += source_stats.get("attachment_content_change_count", 0)
+        total_attachment_download_success += source_stats[
+            "attachment_download_success_count"
+        ]
+        total_attachment_download_failure += source_stats[
+            "attachment_download_failure_count"
+        ]
 
-        source_action_counts = source_stats.get("action_counts", {})
         logger.info(
-            "소스 {} 완료: 목록 성공 {}건 / 실패 {}건 | "
-            "상세 성공 {}건 / 실패 {}건 / 생략(변경없음) {}건 | "
-            "첨부 저장 {}건 / 스킵 {}건 / 실패 {}건 | "
-            "action 분포: 신규={} 변경없음={} 버전갱신={} 상태전이={} | "
-            "2차 감지(첨부 변경)={}건",
+            "소스 {} 완료(수집 단계): delta INSERT 성공 {}건 / 실패 {}건 | "
+            "상세 성공 {}건 / 실패 {}건 / 생략(unchanged peek) {}건 | "
+            "첨부 다운로드 성공 {}건 / 실패 {}건 "
+            "(action_counts / 2차 감지 통계는 apply 단계에서 집계됩니다)",
             source_config.id,
-            source_stats["success_count"], source_stats["failure_count"],
-            source_stats["detail_success_count"], source_stats["detail_failure_count"],
+            source_stats["delta_inserted_count"],
+            source_stats["delta_failed_count"],
+            source_stats["detail_success_count"],
+            source_stats["detail_failure_count"],
             source_stats["skipped_detail_count"],
-            source_stats.get("attachment_success_count", 0),
-            source_stats.get("attachment_skipped_count", 0),
-            source_stats.get("attachment_failure_count", 0),
-            source_action_counts.get("created", 0),
-            source_action_counts.get("unchanged", 0),
-            source_action_counts.get("new_version", 0),
-            source_action_counts.get("status_transitioned", 0),
-            source_stats.get("attachment_content_change_count", 0),
+            source_stats["attachment_download_success_count"],
+            source_stats["attachment_download_failure_count"],
         )
 
     return {
-        "success_count": total_success,
-        "failure_count": total_failure,
-        "failed_announcement_ids": total_failed_ids,
+        "delta_inserted_count": total_delta_inserted,
+        "delta_failed_count": total_delta_failed,
+        "failed_source_announcement_ids": total_failed_source_announcement_ids,
         "detail_success_count": total_detail_success,
         "detail_failure_count": total_detail_failure,
         "skipped_detail_count": total_skipped_detail,
-        "action_counts": total_action_counts,
-        "attachment_success_count": total_attachment_success,
-        "attachment_failure_count": total_attachment_failure,
-        "attachment_skipped_count": total_attachment_skipped,
-        "attachment_content_change_count": total_attachment_content_change,
+        "attachment_download_success_count": total_attachment_download_success,
+        "attachment_download_failure_count": total_attachment_download_failure,
     }
 
 
@@ -948,37 +890,71 @@ async def _orchestrate(
 def _build_final_source_counts(
     summary: dict[str, Any],
     scrape_config: ScrapeRunConfig,
+    apply_result: Optional[DeltaApplyResult] = None,
 ) -> dict[str, Any]:
     """ScrapeRun.source_counts 컬럼에 저장할 최종 요약 JSON 을 만든다.
 
-    UI 가 마지막 실행의 결과 요약을 표시할 수 있도록, 오케스트레이터가 반환한
-    통계를 그대로 JSON 에 접어 넣는다. 구조는 자유 스키마이며, 설계 문서
-    §7.5 가 가이드한 active_sources / totals / action_counts 를 포함한다.
+    수집 단계의 요약(`summary` — _orchestrate 반환 dict) 과 apply 단계의 결과
+    (`apply_result` — DeltaApplyResult 또는 None) 를 합쳐 자유 스키마 JSON 으로
+    구성한다. apply 가 실행되지 않은 경우(cancelled / orchestrator-failed) 에도
+    summary 만으로 호출 가능하다.
 
     Args:
-        summary:       `_orchestrate` 의 반환 dict.
-        scrape_config: 이번 run 의 ScrapeRunConfig — active_sources 기록용.
+        summary:        `_orchestrate` 의 반환 dict (수집 단계 통계).
+        scrape_config:  이번 run 의 ScrapeRunConfig — active_sources 기록용.
+        apply_result:   apply_delta_to_main 의 반환값. 없으면 0 으로 채운다.
 
     Returns:
-        JSON 직렬화 가능한 dict.
+        JSON 직렬화 가능한 dict — UI 가 마지막 실행의 결과 요약을 표시할 수
+        있도록 active_sources / collection / apply / failed_source_announcement_ids
+        섹션을 둔다.
     """
+    apply_action_counts = (
+        dict(apply_result.upsert_action_counts) if apply_result is not None else {}
+    )
     return {
         "active_sources": list(scrape_config.active_sources),
-        "totals": {
-            "success": summary.get("success_count", 0),
-            "failure": summary.get("failure_count", 0),
+        "collection": {
+            "delta_inserted": summary.get("delta_inserted_count", 0),
+            "delta_failed": summary.get("delta_failed_count", 0),
             "detail_success": summary.get("detail_success_count", 0),
             "detail_failure": summary.get("detail_failure_count", 0),
             "skipped_detail": summary.get("skipped_detail_count", 0),
-            "attachment_success": summary.get("attachment_success_count", 0),
-            "attachment_failure": summary.get("attachment_failure_count", 0),
-            "attachment_skipped": summary.get("attachment_skipped_count", 0),
-            "attachment_content_change": summary.get(
-                "attachment_content_change_count", 0
+            "attachment_download_success": summary.get(
+                "attachment_download_success_count", 0
+            ),
+            "attachment_download_failure": summary.get(
+                "attachment_download_failure_count", 0
             ),
         },
-        "action_counts": dict(summary.get("action_counts", {})),
-        "failed_announcement_ids": list(summary.get("failed_announcement_ids", [])),
+        "apply": {
+            "executed": apply_result is not None,
+            "delta_announcement_count": (
+                apply_result.delta_announcement_count if apply_result else 0
+            ),
+            "action_counts": apply_action_counts,
+            "new_announcement_ids": list(
+                apply_result.new_announcement_ids if apply_result else []
+            ),
+            "content_changed_announcement_ids": list(
+                apply_result.content_changed_announcement_ids if apply_result else []
+            ),
+            "transition_count": (
+                len(apply_result.transitions) if apply_result else 0
+            ),
+            "attachment_success": (
+                apply_result.attachment_success_count if apply_result else 0
+            ),
+            "attachment_skipped": (
+                apply_result.attachment_skipped_count if apply_result else 0
+            ),
+            "attachment_content_change": (
+                apply_result.attachment_content_change_count if apply_result else 0
+            ),
+        },
+        "failed_source_announcement_ids": list(
+            summary.get("failed_source_announcement_ids", [])
+        ),
     }
 
 
@@ -989,19 +965,23 @@ def _resolve_final_cli_status(
 ) -> str:
     """수집 결과 summary 로부터 ScrapeRun 최종 status 를 판정한다.
 
-    우선순위:
+    apply 단계에서의 예외는 호출자(_async_main) 가 별도로 처리하므로, 여기서는
+    수집 단계 통계만 본다 (apply 자체 실패는 호출자가 status='failed' 로
+    덮어씀).
+
+    우선순위 (수집 단계 결과 한정):
         1. cancel_requested=True → 'cancelled'.
-        2. success_count=0 이고 failure_count>0 → 'failed'.
-        3. success_count>0 이고 failure_count>0 → 'partial'.
+        2. delta_inserted_count=0 이고 delta_failed_count>0 → 'failed'.
+        3. delta_inserted_count>0 이고 delta_failed_count>0 → 'partial'.
         4. 그 외(실패 0) → 'completed'.
     """
     if cancel_requested:
         return "cancelled"
-    failure_count = int(summary.get("failure_count", 0))
-    success_count = int(summary.get("success_count", 0))
-    if failure_count > 0 and success_count == 0:
+    delta_failed = int(summary.get("delta_failed_count", 0))
+    delta_inserted = int(summary.get("delta_inserted_count", 0))
+    if delta_failed > 0 and delta_inserted == 0:
         return "failed"
-    if failure_count > 0:
+    if delta_failed > 0:
         return "partial"
     return "completed"
 
@@ -1197,8 +1177,27 @@ async def _async_main() -> int:
             )
             return 1
 
-    # ── 실행 + finalize 보장 ────────────────────────────────────────────────
+    # ── 활성 ScrapeRun id 를 모듈 레벨에 등록 ────────────────────────────────
+    # _run_source_announcements 가 delta INSERT 시 FK 인자로 사용한다.
+    # finally 블록에서 _reset_active_scrape_run_id_for_tests 로 정리한다.
+    _set_active_scrape_run_id(scrape_run_id)
+
+    # ── 실행 + apply + finalize 보장 ────────────────────────────────────────
+    # 단계:
+    #   (1) _orchestrate 가 수집 단계만 수행 (delta INSERT). summary 반환.
+    #   (2) _resolve_final_cli_status 가 수집 결과로 candidate status 산정.
+    #   (3) candidate == 'cancelled' (SIGTERM): 별도 트랜잭션으로
+    #       clear_delta_for_run 만 호출 — 본 테이블 / snapshot 변경 없음
+    #       (검증 2 만족).
+    #   (4) candidate ∈ {completed, partial}: session_scope 안에서
+    #       apply_delta_to_main 호출. 트랜잭션 commit 시 본 테이블 / delta /
+    #       (00041-4 에서 snapshot) 모두 영구화. 트랜잭션 자체가 raise 하면
+    #       SQLAlchemy auto-rollback 으로 모두 원상복구 (검증 11 만족) + status
+    #       를 'failed' 로 덮어쓰고 delta 보존(추가 clear 호출하지 않음).
+    #   (5) orchestrator-level 예외(apply 도달 전): status='failed' + 별도
+    #       트랜잭션으로 clear_delta_for_run.
     summary: Optional[dict[str, Any]] = None
+    apply_result: Optional[DeltaApplyResult] = None
     final_status: str = "failed"
     final_error: Optional[str] = None
     exit_code: int = 1
@@ -1210,9 +1209,65 @@ async def _async_main() -> int:
             scrape_config=scrape_config,
             sources_cfg=sources_cfg,
         )
-        final_status = _resolve_final_cli_status(
+        candidate_status = _resolve_final_cli_status(
             summary, cancel_requested=_is_cancel_requested()
         )
+
+        if candidate_status == "cancelled":
+            # SIGTERM 분기 — 검증 2: delta 비워짐 + 본 테이블 / snapshot 변경 없음.
+            try:
+                with session_scope() as cancel_session:
+                    cleared = clear_delta_for_run(cancel_session, scrape_run_id)
+                logger.warning(
+                    "수집 중단(cancelled) — apply 건너뜀 + delta 비움 (deleted={})",
+                    cleared,
+                )
+            except Exception as clear_exc:
+                logger.exception(
+                    "cancelled 분기 delta clear 실패: id={} ({}: {})",
+                    scrape_run_id, type(clear_exc).__name__, clear_exc,
+                )
+            final_status = "cancelled"
+        else:
+            # completed / partial — apply 트랜잭션 단일 진입.
+            try:
+                with session_scope() as apply_session:
+                    apply_result = apply_delta_to_main(
+                        apply_session,
+                        scrape_run_id=scrape_run_id,
+                    )
+                    # ── snapshot 생성/머지 (00041-4) ──────────────────────────
+                    # apply 와 같은 트랜잭션에서 ScrapeSnapshot UPSERT 를 수행해
+                    # \"본 테이블 적용 + delta 비움 + snapshot 생성\" 의 atomic
+                    # 단위를 완성한다 (사용자 원문 \"수집 종료 시: 단일 트랜잭션\").
+                    # apply 단계가 raise 하면 SQLAlchemy auto-rollback 으로
+                    # snapshot UPSERT 도 함께 원상복구되어 검증 11 시나리오를
+                    # 만족한다 (apply / snapshot 어느 단계가 raise 하든 동일).
+                    # snapshot_date 는 종료 시점의 KST 날짜 — Phase 4 컨벤션.
+                    snapshot_payload = build_snapshot_payload(apply_result)
+                    upsert_scrape_snapshot(
+                        apply_session,
+                        snapshot_date=now_kst().date(),
+                        new_payload=snapshot_payload,
+                    )
+                final_status = candidate_status
+                logger.info(
+                    "apply_delta_to_main 트랜잭션 commit 완료: status={}",
+                    final_status,
+                )
+            except Exception as apply_exc:
+                # 검증 11 — apply 트랜잭션 자체 실패. SQLAlchemy auto-rollback 으로
+                # 본 테이블 / delta / (snapshot) 모두 원상복구. 추가 clear 는 하지
+                # 않는다 — delta 가 보존되어 다음 ScrapeRun 또는 운영자 수동
+                # 재시도 경로가 살아있다.
+                final_status = "failed"
+                final_error = f"apply 트랜잭션 실패 — {type(apply_exc).__name__}: {apply_exc}"
+                logger.exception(
+                    "apply_delta_to_main 트랜잭션 실패 — delta 보존, status=failed: "
+                    "({}: {})",
+                    type(apply_exc).__name__, apply_exc,
+                )
+
         # completed/partial/cancelled 모두 '수집 자체는 정상 흐름' 이므로 exit 0.
         # failed 만 1.
         exit_code = 1 if final_status == "failed" else 0
@@ -1220,16 +1275,35 @@ async def _async_main() -> int:
         # Ctrl+C / SIGINT — SIGTERM 과 달리 중단 의사가 즉시적이지만,
         # 공고 단위 atomic 은 이미 깨졌을 가능성이 있다. status='cancelled' 로
         # 기록하고 main() 에서 130 반환하도록 재발생.
+        # cancelled 분기와 동일하게 delta 만 비운다 (best-effort).
         keyboard_interrupt_raised = True
         final_status = "cancelled"
         final_error = "SIGINT (사용자 중단)"
+        try:
+            with session_scope() as cancel_session:
+                clear_delta_for_run(cancel_session, scrape_run_id)
+        except Exception as clear_exc:
+            logger.exception(
+                "SIGINT 분기 delta clear 실패: id={} ({}: {})",
+                scrape_run_id, type(clear_exc).__name__, clear_exc,
+            )
     except Exception as exc:
+        # orchestrator/수집-단계 예외 — apply 도달 전. delta 가 incomplete 일
+        # 가능성이 있어 별도 트랜잭션으로 비운다 (재시도하지 않음).
         final_status = "failed"
         final_error = f"{type(exc).__name__}: {exc}"
         logger.exception(
-            "오케스트레이션 중 전역 예외 — status=failed: ({}: {})",
+            "오케스트레이션 중 전역 예외 — status=failed (apply 도달 전): ({}: {})",
             type(exc).__name__, exc,
         )
+        try:
+            with session_scope() as cancel_session:
+                clear_delta_for_run(cancel_session, scrape_run_id)
+        except Exception as clear_exc:
+            logger.exception(
+                "orchestrator-failed 분기 delta clear 실패: id={} ({}: {})",
+                scrape_run_id, type(clear_exc).__name__, clear_exc,
+            )
     finally:
         # ScrapeRun 마감 — 어떤 경로로 빠져나가도 한 번은 호출된다.
         # finalize_scrape_run 은 idempotent 이므로 중복 호출도 안전.
@@ -1240,7 +1314,7 @@ async def _async_main() -> int:
                     scrape_run_id,
                     status=final_status,
                     source_counts=(
-                        _build_final_source_counts(summary, scrape_config)
+                        _build_final_source_counts(summary, scrape_config, apply_result)
                         if summary is not None
                         else None
                     ),
@@ -1251,33 +1325,37 @@ async def _async_main() -> int:
                 "ScrapeRun finalize 실패(스킵): id={} ({}: {})",
                 scrape_run_id, type(fin_exc).__name__, fin_exc,
             )
+        # 모듈 레벨 활성 ScrapeRun id 정리 — 다음 실행이 stale 값을 보지 않도록.
+        _reset_active_scrape_run_id_for_tests()
 
     if summary is not None:
-        final_action_counts = summary.get("action_counts", {})
+        apply_action_counts = (
+            apply_result.upsert_action_counts if apply_result is not None else {}
+        )
         logger.info(
-            "scrape 실행 완료: 목록 성공 {}건 / 목록 실패 {}건 | "
-            "상세 성공 {}건 / 실패 {}건 / 생략(변경없음) {}건 | "
-            "첨부 저장 {}건 / 스킵 {}건 / 실패 {}건 | "
-            "action 분포: 신규={} 변경없음={} 버전갱신={} 상태전이={} | "
-            "2차 감지(첨부 변경)={}건 | final_status={}",
-            summary["success_count"],
-            summary["failure_count"],
+            "scrape 실행 완료: delta INSERT 성공 {}건 / 실패 {}건 | "
+            "상세 성공 {}건 / 실패 {}건 / 생략(unchanged peek) {}건 | "
+            "첨부 다운로드 성공 {}건 / 실패 {}건 | "
+            "apply action 분포: 신규={} 변경없음={} 버전갱신={} 상태전이={} | "
+            "apply 2차 감지(첨부 변경)={}건 | final_status={}",
+            summary["delta_inserted_count"],
+            summary["delta_failed_count"],
             summary["detail_success_count"],
             summary["detail_failure_count"],
             summary["skipped_detail_count"],
-            summary.get("attachment_success_count", 0),
-            summary.get("attachment_skipped_count", 0),
-            summary.get("attachment_failure_count", 0),
-            final_action_counts.get("created", 0),
-            final_action_counts.get("unchanged", 0),
-            final_action_counts.get("new_version", 0),
-            final_action_counts.get("status_transitioned", 0),
-            summary.get("attachment_content_change_count", 0),
+            summary["attachment_download_success_count"],
+            summary["attachment_download_failure_count"],
+            apply_action_counts.get("created", 0),
+            apply_action_counts.get("unchanged", 0),
+            apply_action_counts.get("new_version", 0),
+            apply_action_counts.get("status_transitioned", 0),
+            apply_result.attachment_content_change_count if apply_result else 0,
             final_status,
         )
-        if summary["failure_count"]:
+        if summary["delta_failed_count"]:
             logger.warning(
-                "목록 실패 공고 ID 목록: {}", summary["failed_announcement_ids"]
+                "delta INSERT 실패 source_announcement_id 목록: {}",
+                summary["failed_source_announcement_ids"],
             )
 
     if keyboard_interrupt_raised:
@@ -1307,7 +1385,7 @@ if __name__ == "__main__":
 
 __all__ = [
     "main",
-    "AttachmentStageResult",
+    "DeltaAttachmentStageResult",
     "DEFAULT_STATUS_LABEL",
     "CODE_DEFAULT_MAX_PAGES",
     "CODE_DEFAULT_MAX_ANNOUNCEMENTS",
@@ -1317,14 +1395,16 @@ __all__ = [
 # ──────────────────────────────────────────────────────────────
 # 테스트 전용 헬퍼 export (운영 코드에서는 사용하지 않음)
 # ──────────────────────────────────────────────────────────────
-# _cancel_flag 전역 상태를 테스트가 초기화할 수 있도록 공개한다.
-# 외부에서 직접 플래그를 조작하는 운영 코드는 없어야 한다.
+# _cancel_flag / _active_scrape_run_id 등 모듈 전역 상태를 테스트가
+# 초기화할 수 있도록 공개한다. 외부에서 직접 조작하는 운영 코드는 없어야 한다.
 
 __all__ += [
     "_apply_active_sources_override",
     "_build_final_source_counts",
     "_handle_sigterm",
     "_is_cancel_requested",
+    "_reset_active_scrape_run_id_for_tests",
     "_reset_cancel_flag_for_tests",
     "_resolve_final_cli_status",
+    "_set_active_scrape_run_id",
 ]

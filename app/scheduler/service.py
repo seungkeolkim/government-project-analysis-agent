@@ -34,7 +34,7 @@ from app.scheduler.constants import (
     MAX_INTERVAL_HOURS,
     SCHEDULER_JOBS_TABLENAME,
 )
-from app.scheduler.job_runner import scheduled_scrape
+from app.scheduler.job_runner import gc_orphan_attachments_job, scheduled_scrape
 # task 00040-4 — APScheduler 의 글로벌/트리거 timezone 을 Asia/Seoul 로 통일.
 # ``app.timezone`` 이 KST 의 단일 진실 소스이므로 직접 ``ZoneInfo("Asia/Seoul")``
 # 을 만들지 않고 그곳의 상수를 가져온다.
@@ -551,6 +551,94 @@ def toggle_schedule(job_id: str, *, enabled: bool) -> ScheduleSummary:
     return _summary_from_job(updated)
 
 
+# ──────────────────────────────────────────────────────────────
+# Phase 5a (task 00041-5) — 고아 첨부 파일 GC 의 일 1회 자동 실행
+# ──────────────────────────────────────────────────────────────
+#
+# 운영자는 본 함수를 한 번 호출해 cron 잡을 등록하고, 등록 이후로는 jobstore
+# 가 재기동에도 잡을 자동 복원한다. UI 노출은 5b 의 범위로 본 task 에서는
+# 다루지 않는다 — 운영자는 Python REPL / 일회성 스크립트로 등록한다.
+#
+# 등록 예 (컨테이너 안에서):
+#   python -c \"from app.scheduler.service import start, add_gc_orphan_cron_schedule; \\
+#               start(); add_gc_orphan_cron_schedule(cron_expression='0 4 * * *')\"
+
+
+# 기본 cron — 설계 §11.4 의 권장값 (KST 04:00).
+GC_ORPHAN_DEFAULT_CRON: str = "0 4 * * *"
+
+# job_id prefix — cron / interval 과 별개로 GC 잡임을 식별하기 위함.
+JOB_ID_PREFIX_GC_ORPHAN: str = "gc-orphan"
+
+# job.name prefix — list_schedules 가 trigger_spec 을 복원하는 패턴.
+JOB_NAME_GC_ORPHAN_PREFIX: str = "gc-orphan-cron:"
+
+
+def add_gc_orphan_cron_schedule(
+    *,
+    cron_expression: str = GC_ORPHAN_DEFAULT_CRON,
+    enabled: bool = True,
+) -> ScheduleSummary:
+    """고아 첨부 파일 GC 잡을 cron 표현식으로 등록한다 (task 00041-5).
+
+    수집(scheduled_scrape) 잡과 같은 BackgroundScheduler / SQLAlchemyJobStore 를
+    공유하지만 함수 자체는 ``app.scheduler.job_runner.gc_orphan_attachments_job``
+    이라 jobstore 에 별도로 pickle 된다. ``ScrapeRun`` 가드는 잡 함수 안에서
+    ``run_gc`` 가 자체 처리하므로 본 등록 함수는 단순히 trigger 설정만 한다.
+
+    Args:
+        cron_expression: 5-필드 cron 표현식 (분 시 일 월 요일).
+                          기본값 ``0 4 * * *`` (KST 04:00 — 설계 §11.4 권장).
+                          타임존은 ``app.timezone.KST`` 로 고정 — Phase 4 컨벤션.
+        enabled:         False 면 등록 직후 paused 상태로 둔다.
+
+    Returns:
+        등록된 잡의 ``ScheduleSummary``.
+
+    Raises:
+        ScheduleValidationError: cron 표현식이 잘못됐거나 빈 문자열.
+    """
+    cron_expression = (cron_expression or "").strip()
+    if not cron_expression:
+        raise ScheduleValidationError("GC cron 표현식이 비어 있습니다.")
+
+    # Lazy import — apscheduler 의 호환성 문제를 런타임에만 노출한다 (다른 add_*
+    # 함수들과 동일 패턴).
+    from apscheduler.triggers.cron import CronTrigger
+
+    try:
+        # task 00040-4 의 KST 컨벤션 그대로 — trigger 자체에 timezone 명시.
+        trigger = CronTrigger.from_crontab(cron_expression, timezone=KST)
+    except Exception as exc:
+        raise ScheduleValidationError(
+            f"GC cron 표현식 파싱 실패: {exc}"
+        ) from exc
+
+    scheduler = _require_running_scheduler()
+    job_id = _make_job_id(JOB_ID_PREFIX_GC_ORPHAN)
+    scheduler.add_job(
+        gc_orphan_attachments_job,
+        trigger=trigger,
+        # GC 잡은 인자 없이 호출 — pickle 안정성 + jobstore 단순성.
+        args=[],
+        id=job_id,
+        name=f"{JOB_NAME_GC_ORPHAN_PREFIX}{cron_expression}",
+        replace_existing=False,
+    )
+    if not enabled:
+        scheduler.pause_job(job_id)
+
+    updated = scheduler.get_job(job_id)
+    logger.info(
+        "GC 고아 파일 cron 스케줄 등록: job_id={} expr={!r} enabled={} next_run_time={}",
+        job_id,
+        cron_expression,
+        enabled,
+        getattr(updated, "next_run_time", None),
+    )
+    return _summary_from_job(updated)
+
+
 def delete_schedule(job_id: str) -> None:
     """스케줄을 영구 삭제한다 (jobstore 에서 제거).
 
@@ -566,9 +654,13 @@ def delete_schedule(job_id: str) -> None:
 
 
 __all__ = [
+    "GC_ORPHAN_DEFAULT_CRON",
+    "JOB_ID_PREFIX_GC_ORPHAN",
+    "JOB_NAME_GC_ORPHAN_PREFIX",
     "ScheduleSummary",
     "ScheduleValidationError",
     "add_cron_schedule",
+    "add_gc_orphan_cron_schedule",
     "add_interval_schedule",
     "delete_schedule",
     "is_scheduler_running",
