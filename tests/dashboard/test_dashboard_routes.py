@@ -591,13 +591,17 @@ class TestTrendChartOnPage:
         assert "/static/js/dashboard_trend_chart.js" in body
 
     def test_trend_chart_embeds_31_day_json(self, client: TestClient) -> None:
-        """임베드 JSON 에 31개 일자 + 양끝 ISO 일자 포함 (검증 12 + design doc §9.1)."""
+        """임베드 JSON 에 31개 일자 + 양끝 ISO 일자 포함 (검증 12 + task 00043-3).
+
+        새 시맨틱 (task 00043-3): 기준일 기준 과거 30일 → 구간 [base-30, base].
+        base = 2026-04-29 → 시작 = 2026-03-30, 끝 = 2026-04-29.
+        """
         response = client.get("/dashboard", params={"base_date": "2026-04-29"})
         assert response.status_code == 200
         body = response.text
         # 양끝 일자가 임베드 JSON 안에 들어 있어야 한다.
-        assert "2026-04-14" in body
-        assert "2026-05-14" in body
+        assert "2026-03-30" in body  # base - 30 = 시작 일자.
+        assert "2026-04-29" in body  # base = 끝 일자.
         # x_axis_label 키가 임베드 JSON 에 노출되어 있어야 한다.
         assert "x_axis_label" in body
 
@@ -607,8 +611,8 @@ class TestTrendChartOnPage:
         body = response.text
         # 임베드 JSON 안에 \"x_axis_label\": \"04-29\" 같은 패턴이 들어 있어야 한다.
         # tojson | safe 가 한글/영문 모두 이스케이프 처리하므로 substring 매칭.
-        assert '"04-14"' in body  # 시작 일자 라벨.
-        assert '"05-14"' in body  # 끝 일자 라벨.
+        assert '"03-30"' in body  # 시작 일자 라벨 (base - 30).
+        assert '"04-29"' in body  # 끝 일자 라벨 (base).
 
     def test_chart_js_vendor_bundle_exists(self) -> None:
         """vendor 디렉토리에 실제 chart.min.js 가 존재해야 한다 (라이선스 NOTICE 정합)."""

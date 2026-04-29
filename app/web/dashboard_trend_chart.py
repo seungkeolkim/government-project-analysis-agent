@@ -1,30 +1,36 @@
-"""대시보드 추이 차트 — 기준일 ±15일 일별 카운트 빌더 (Phase 5b / task 00042-6).
+"""대시보드 추이 차트 — 기준일 기준 과거 30일 일별 카운트 빌더 (Phase 5b / task 00043-3).
 
-배경 (사용자 원문):
-    \"기준일 중심 ±15일 (총 30일) 범위의 일별 신규/내용 변경/전이 카운트 line chart.
-    Chart.js. snapshot 없는 날짜는 0 또는 gap 처리. x축 라벨은 format_kst(date,
-    \"%m-%d\") 등 KST 표시.\"
+배경 (사용자 원문 — task 00043):
+    \"추이는 기준일 +- 15일이 아니라 기준일 ~ 기준일 - 30일 로 해줘.\"
 
-설계 근거 (``docs/dashboard_design.md §9``):
-    - §9.1 31일 (양끝 포함) — base_date 를 가운데 두고 base-15 ~ base+15 범위.
-      snapshot 없는 날짜는 0 으로 채운다 (gap 처리 대신 골짜기로 표시).
-    - §9.2 서버 사전 계산 후 JSON 임베드 — 별도 fetch/API 호출 없음.
-    - §9.3 Chart.js 4.x 로컬 vendor 번들 (외부 CDN 금지 컨벤션).
+    초기 (task 00042-6) 에는 기준일을 가운데 두고 ±15일 (총 31일) 양방향 그래프
+    였으나, 사용자 요구에 따라 기준일을 그래프의 오른쪽 끝에 두고 과거 30일을
+    펼치는 단방향 그래프로 변경됐다 (총 31일은 동일 — 양끝 포함).
+
+설계 근거:
+    - 새로운 구간: ``[base_date - 30days, base_date]`` 양끝 포함 → 31일.
+    - 기존 ±15일 → 31일과 총 일수는 같지만 그래프의 의미가 달라진다 (\"미래까지
+      펼쳐 보던\" 시야가 \"과거 30일을 돌아보는\" 시야로 이동).
+    - snapshot 없는 날짜는 0 으로 채운다 (기존과 동일).
+    - 서버 사전 계산 후 JSON 임베드 (별도 fetch/API 호출 없음).
+    - Chart.js 4.x 로컬 vendor 번들 — 클라이언트 JS 는 days[].x_axis_label 그대로
+      사용하므로 클라이언트 변경 불필요.
 
 데이터 흐름 (1회 IN 쿼리):
-    1. ``list_snapshots_in_inclusive_range(from_inclusive=base-15, to_inclusive=base+15)``
+    1. ``list_snapshots_in_inclusive_range(from_inclusive=base-30, to_inclusive=base)``
        으로 31일 구간의 ScrapeSnapshot list fetch.
     2. snapshot_date → counts dict map 으로 변환.
-    3. base-15 ~ base+15 31일을 순회하며 각 날짜별로 series 3종 (신규 /
-       내용 변경 / 전이) 카운트를 채운다. 매칭 안되는 날짜는 0.
-    4. x축 라벨은 ``format_kst(date_obj, \"%m-%d\")`` 와 동일하게 'MM-DD' KST
-       표시 — 본 모듈은 date 객체만 다루므로 ``date.strftime(\"%m-%d\")`` 로
-       동치 (KST date 라 변환 불필요).
+    3. base-30 ~ base 31일을 순회하며 각 날짜별로 series 3종 (신규 / 내용 변경 /
+       전이) 카운트를 채운다. 매칭 안되는 날짜는 0.
+    4. x축 라벨은 ``date.strftime(\"%m-%d\")`` 로 'MM-DD' KST 표시 (KST date 라
+       변환 불필요).
 
 API 표면:
+    - :data:`TREND_CHART_DEFAULT_PAST_DAYS` — 기본 과거 일수 상수 (= 30).
     - :class:`TrendChartDayPoint` — 한 일자의 series 3종 카운트.
     - :class:`TrendChartData` — 라우트가 템플릿에 전달하는 dict 표현 dataclass.
     - :func:`build_trend_chart` — 단일 진입점.
+    - :func:`serialize_trend_chart_for_template` — Jinja2 ``| tojson`` 친화 dict.
 """
 
 from __future__ import annotations
@@ -43,12 +49,13 @@ from app.db.snapshot import (
 
 
 # ──────────────────────────────────────────────────────────────
-# 상수 — design doc §9.1 의 31일 (양끝 포함) 결정
+# 상수 — task 00043-3 의 \"기준일 기준 과거 30일\" 결정
 # ──────────────────────────────────────────────────────────────
 
 
-# 기준일 양옆으로 펼치는 일수. half_window=15 → 총 31일 (base-15..base+15 양끝 포함).
-TREND_CHART_DEFAULT_HALF_WINDOW: int = 15
+# 기준일 기준 과거로 펼치는 일수. past_days=30 → 총 31일 (base-30..base 양끝 포함).
+# 사용자 원문 \"기준일 ~ 기준일 - 30일\".
+TREND_CHART_DEFAULT_PAST_DAYS: int = 30
 
 
 def _transition_count_keys() -> tuple[str, ...]:
@@ -94,11 +101,11 @@ class TrendChartData:
     """추이 차트 컨텍스트 — ``dashboard.html`` 의 trend_chart placeholder 가 사용.
 
     Attributes:
-        base_date:    기준일 (KST date) — 그래프 가운데에 위치.
-        from_date:    그래프 시작 일자 (= base - half_window).
-        to_date:      그래프 끝 일자 (= base + half_window).
-        half_window:  기준일 양옆으로 펼친 일수 (기본 15).
-        days:         day-by-day 데이터 list — 31개 (base-15..base+15 양끝 포함).
+        base_date:    기준일 (KST date) — 그래프의 오른쪽 끝 일자.
+        from_date:    그래프 시작 일자 (= ``base_date - past_days``).
+        to_date:      그래프 끝 일자 (= ``base_date``).
+        past_days:    기준일 기준 과거로 펼친 일수 (기본 30 → 총 31일).
+        days:         day-by-day 데이터 list — ``past_days + 1`` 개 (양끝 포함).
                       각 항목이 ``TrendChartDayPoint``.
 
     클라이언트는 ``days`` list 를 그대로 ``Chart.js`` 의 datasets 에 넘긴다 —
@@ -108,7 +115,7 @@ class TrendChartData:
     base_date: date
     from_date: date
     to_date: date
-    half_window: int
+    past_days: int
     days: list[TrendChartDayPoint]
 
 
@@ -121,31 +128,30 @@ def build_trend_chart(
     session: Session,
     *,
     base_date: date,
-    half_window: int = TREND_CHART_DEFAULT_HALF_WINDOW,
+    past_days: int = TREND_CHART_DEFAULT_PAST_DAYS,
 ) -> TrendChartData:
-    """추이 차트의 31일 day-by-day 데이터를 단일 IN 쿼리로 산출한다.
+    """추이 차트의 ``past_days + 1`` 일 day-by-day 데이터를 단일 IN 쿼리로 산출.
 
     호출 흐름:
-        1. ``[base - half_window, base + half_window]`` 양끝 포함 구간 산출.
-        2. ``list_snapshots_in_inclusive_range`` 로 1회 SELECT — N+1 회피
-           (사용자 원문 검증 15 의 동일 패턴).
+        1. ``[base_date - past_days, base_date]`` 양끝 포함 구간 산출.
+        2. ``list_snapshots_in_inclusive_range`` 로 1회 SELECT — N+1 회피.
         3. snapshot_date → counts dict 로 lookup map 생성.
-        4. 31일을 순회하며 각 날짜별 series 3종 카운트 산출 — snapshot 없으면 0
-           (사용자 원문 \"snapshot 없는 날짜는 0 또는 gap 처리\" 에서 0 선택).
+        4. ``past_days + 1`` 일을 순회하며 각 날짜별 series 3종 카운트 산출 —
+           snapshot 없으면 0.
         5. ``TrendChartDayPoint`` list 로 묶어 ``TrendChartData`` 반환.
 
     Args:
-        session:     호출자 세션.
-        base_date:   기준일 (KST date) — 그래프 가운데.
-        half_window: 양옆 일수 (기본 15 → 총 31일). 음수 / 0 도 명시적으로
-                     허용한다 (half_window=0 이면 1일 그래프) — 호출자 검증을
-                     단순하게 유지.
+        session:   호출자 세션.
+        base_date: 기준일 (KST date) — 그래프 오른쪽 끝.
+        past_days: 과거로 펼치는 일수 (기본 30 → 총 31일). 음수 / 0 도 명시적
+                   으로 허용한다 (past_days=0 이면 1일 그래프) — 호출자 검증을
+                   단순하게 유지.
 
     Returns:
-        ``TrendChartData`` — 31개 일자 데이터.
+        ``TrendChartData`` — ``past_days + 1`` 개 일자 데이터.
     """
-    from_date = base_date - timedelta(days=half_window)
-    to_date = base_date + timedelta(days=half_window)
+    from_date = base_date - timedelta(days=past_days)
+    to_date = base_date
 
     snapshots_in_range = list_snapshots_in_inclusive_range(
         session,
@@ -164,7 +170,7 @@ def build_trend_chart(
         }
 
     days: list[TrendChartDayPoint] = []
-    total_days = 2 * half_window + 1
+    total_days = past_days + 1
     for day_offset in range(total_days):
         day = from_date + timedelta(days=day_offset)
         day_counts = counts_by_snapshot_date.get(day)
@@ -190,7 +196,7 @@ def build_trend_chart(
         base_date=base_date,
         from_date=from_date,
         to_date=to_date,
-        half_window=half_window,
+        past_days=past_days,
         days=days,
     )
 
@@ -213,7 +219,7 @@ def serialize_trend_chart_for_template(trend_chart: TrendChartData) -> dict:
         "base_date": trend_chart.base_date.isoformat(),
         "from_date": trend_chart.from_date.isoformat(),
         "to_date": trend_chart.to_date.isoformat(),
-        "half_window": trend_chart.half_window,
+        "past_days": trend_chart.past_days,
         "days": [
             {
                 "date_iso": point.date_iso,
@@ -228,7 +234,7 @@ def serialize_trend_chart_for_template(trend_chart: TrendChartData) -> dict:
 
 
 __all__ = [
-    "TREND_CHART_DEFAULT_HALF_WINDOW",
+    "TREND_CHART_DEFAULT_PAST_DAYS",
     "TrendChartData",
     "TrendChartDayPoint",
     "build_trend_chart",

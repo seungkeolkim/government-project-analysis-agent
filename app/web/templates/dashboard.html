@@ -342,21 +342,22 @@
     </section>
 
     {# ─────────────────────────────────────────────────────────
-       5. 추이 차트 — 기준일 ±15일 일별 카운트 (task 00042-6).
+       5. 추이 차트 — 기준일 기준 과거 30일 일별 카운트 (task 00043-3).
+       기존 ±15일 (양방향) 에서 단방향 \"기준일 ~ 기준일 - 30일\" 로 변경.
        Chart.js 4.x 로컬 vendor 번들 + 서버 사전 계산 후 JSON 임베드.
        ───────────────────────────────────────────────────────── #}
     <section class="dashboard-section dashboard-section--trend"
              data-dashboard-trend-chart
              aria-label="추이 차트">
         <h3 class="dashboard-section__title">
-            추이 (기준일 ±{{ trend_chart.half_window }}일,
+            추이 (기준일 기준 과거 {{ trend_chart.past_days }}일,
             <span class="dashboard-section__title-meta">{{ trend_chart.from_date.isoformat() }}
                 ~ {{ trend_chart.to_date.isoformat() }}</span>)
         </h3>
         <div class="dashboard-trend-chart__canvas-wrapper">
             {# Chart.js 가 그릴 캔버스. 사이즈는 CSS / wrapper 가 정한다. #}
             <canvas id="dashboardTrendChart" role="img"
-                    aria-label="기준일 ±{{ trend_chart.half_window }}일 일별 신규/내용 변경/전이 카운트"></canvas>
+                    aria-label="기준일 기준 과거 {{ trend_chart.past_days }}일 일별 신규/내용 변경/전이 카운트"></canvas>
         </div>
         <noscript>
             <p class="dashboard-section__placeholder">
