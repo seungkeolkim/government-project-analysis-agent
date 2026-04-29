@@ -21,10 +21,12 @@ from app.db.models import (
     User,
 )
 from app.db.repository import (
+    count_favorite_entries_by_folder_for_user,
     count_folder_delete_cascade,
     get_current_sibling_announcement_ids,
     get_favorite_announcement_id_set,
     get_favorite_entry_map,
+    get_folder_tree_for_user,
     get_siblings_by_canonical_id_map,
     list_favorites_with_announcements,
 )
@@ -514,3 +516,151 @@ def test_get_siblings_by_canonical_id_map_no_match(test_engine: Engine):
     with session_scope() as s:
         result = get_siblings_by_canonical_id_map(s, [999999])
     assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# task 00047 — count_favorite_entries_by_folder_for_user
+# 좌 사이드바 \"폴더명 (N)\" 표시용 N+1 방지 헬퍼.
+# ---------------------------------------------------------------------------
+
+
+def test_count_favorite_entries_by_folder_for_user_basic(test_engine: Engine):
+    """루트/자식 폴더 각각의 직속 entry 수가 dict 로 반환된다.
+
+    \"직속\" — 자기 폴더에 직접 등록된 FavoriteEntry 만 집계 (자식 합산 X).
+    """
+    uid = _make_user("fav_cnt_for_user_basic")
+    _, ann_ids_a = _make_canonical_with_current_announcements(
+        "official:test-cnt-fu-001",
+        source_types=("IRIS", "NTIS"),
+        title_prefix="A",
+    )
+    _, ann_ids_b = _make_canonical_with_current_announcements(
+        "official:test-cnt-fu-002",
+        source_types=("IRIS",),
+        title_prefix="B",
+    )
+    root_id = _make_folder(uid, "물리보안")
+    child_a = _make_folder(uid, "지원예정", parent_id=root_id)
+    child_b = _make_folder(uid, "지원완료", parent_id=root_id)
+
+    # 루트에는 entry 없음, child_a 에 2건, child_b 에 1건.
+    _add_entry(child_a, ann_ids_a[0])
+    _add_entry(child_a, ann_ids_a[1])
+    _add_entry(child_b, ann_ids_b[0])
+
+    with session_scope() as s:
+        result = count_favorite_entries_by_folder_for_user(s, user_id=uid)
+
+    # entry 가 0인 폴더(root)는 dict 에 키가 존재하지 않는다 — 호출부는 .get(id, 0).
+    assert root_id not in result
+    assert result[child_a] == 2
+    assert result[child_b] == 1
+
+
+def test_count_favorite_entries_by_folder_for_user_empty(test_engine: Engine):
+    """폴더가 하나도 없거나 entry 가 전무한 사용자는 빈 dict 를 받는다."""
+    uid = _make_user("fav_cnt_for_user_empty")
+    # 폴더 0개 시나리오.
+    with session_scope() as s:
+        result = count_favorite_entries_by_folder_for_user(s, user_id=uid)
+    assert result == {}
+
+    # 폴더는 있지만 entry 0건 시나리오.
+    _make_folder(uid, "빈 루트")
+    with session_scope() as s:
+        result = count_favorite_entries_by_folder_for_user(s, user_id=uid)
+    assert result == {}
+
+
+def test_count_favorite_entries_by_folder_for_user_isolation(test_engine: Engine):
+    """다른 사용자의 폴더/entry 는 절대 포함되지 않는다 (보안 경계).
+
+    user_a 와 user_b 가 동일 announcement 를 각자 즐겨찾기에 담아도, 헬퍼는
+    호출 시점의 user_id 의 폴더만 집계해야 한다.
+    """
+    uid_a = _make_user("fav_cnt_isolation_a")
+    uid_b = _make_user("fav_cnt_isolation_b")
+    _, ann_ids = _make_canonical_with_current_announcements(
+        "official:test-cnt-iso-001",
+        source_types=("IRIS",),
+    )
+    folder_a = _make_folder(uid_a, "A 폴더")
+    folder_b = _make_folder(uid_b, "B 폴더")
+    _add_entry(folder_a, ann_ids[0])
+    _add_entry(folder_b, ann_ids[0])
+
+    with session_scope() as s:
+        result_a = count_favorite_entries_by_folder_for_user(s, user_id=uid_a)
+        result_b = count_favorite_entries_by_folder_for_user(s, user_id=uid_b)
+
+    # A 결과에 B 폴더 키가 절대 보여서는 안 된다.
+    assert folder_a in result_a
+    assert folder_b not in result_a
+    assert result_a[folder_a] == 1
+
+    # B 결과에 A 폴더 키가 절대 보여서는 안 된다.
+    assert folder_b in result_b
+    assert folder_a not in result_b
+    assert result_b[folder_b] == 1
+
+
+# ---------------------------------------------------------------------------
+# task 00047 — get_folder_tree_for_user 의 entry_count 주입 검증
+# ---------------------------------------------------------------------------
+
+
+def test_get_folder_tree_for_user_entry_count_injected(test_engine: Engine):
+    """트리 노드 dict 에 entry_count 키가 주입되며, 루트/자식 모두 직속 수만 담긴다."""
+    uid = _make_user("fav_tree_entry_count")
+    _, ann_ids = _make_canonical_with_current_announcements(
+        "official:test-tree-cnt-001",
+        source_types=("IRIS", "NTIS"),
+        title_prefix="Tree",
+    )
+    root_id = _make_folder(uid, "물리보안")
+    child_a = _make_folder(uid, "지원예정", parent_id=root_id)
+    _make_folder(uid, "지원완료", parent_id=root_id)  # entry 0건 자식.
+
+    # 루트 entry 0건, child_a 에 2건, 다른 자식 0건 — 사용자 원문 예시(루트 0)와 동일 패턴.
+    _add_entry(child_a, ann_ids[0])
+    _add_entry(child_a, ann_ids[1])
+
+    with session_scope() as s:
+        tree = get_folder_tree_for_user(s, user_id=uid)
+
+    assert len(tree) == 1
+    root_node = tree[0]
+    assert root_node["id"] == root_id
+    # 루트는 직속 entry 가 없으므로 0 — 자식 합산을 하지 않는 것이 명세.
+    assert root_node["entry_count"] == 0
+
+    children_by_name = {c["name"]: c for c in root_node["children"]}
+    assert children_by_name["지원예정"]["entry_count"] == 2
+    assert children_by_name["지원완료"]["entry_count"] == 0
+
+
+def test_get_folder_tree_for_user_entry_count_other_user_invisible(test_engine: Engine):
+    """다른 사용자의 entry 는 트리 노드 entry_count 에 포함되지 않는다."""
+    uid_a = _make_user("fav_tree_iso_a")
+    uid_b = _make_user("fav_tree_iso_b")
+    _, ann_ids = _make_canonical_with_current_announcements(
+        "official:test-tree-iso-001"
+    )
+
+    # A 의 폴더에 1건.
+    folder_a = _make_folder(uid_a, "A 폴더")
+    _add_entry(folder_a, ann_ids[0])
+
+    # B 의 폴더에 동일 announcement 을 1건 더(B 트리에는 entry_count=1, A 에 누설 X).
+    folder_b = _make_folder(uid_b, "B 폴더")
+    _add_entry(folder_b, ann_ids[0])
+
+    with session_scope() as s:
+        tree_a = get_folder_tree_for_user(s, user_id=uid_a)
+
+    assert len(tree_a) == 1
+    assert tree_a[0]["id"] == folder_a
+    assert tree_a[0]["entry_count"] == 1
+    # A 트리에 B 의 폴더가 보이지 않음을 확인.
+    assert all(node["id"] != folder_b for node in tree_a)
