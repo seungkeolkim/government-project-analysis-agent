@@ -3876,3 +3876,194 @@ def list_soon_to_close_announcements(
         .order_by(Announcement.deadline_at.asc(), Announcement.id.asc())
     ).scalars().all()
     return list(rows)
+
+
+# ──────────────────────────────────────────────────────────────
+# Phase 5b — 사용자 라벨링 위젯 4종 카운트 헬퍼 (task 00042-5)
+# ──────────────────────────────────────────────────────────────
+
+
+def count_unread_announcements_for_user(
+    session: Session,
+    *,
+    user_id: int,
+) -> int:
+    """(전체) 미확인 활성 공고 수를 단일 COUNT 쿼리로 반환한다.
+
+    위젯 1 \"전체 미확인 공고: N건\" — 날짜 무관, announcement 단위.
+
+    조건 (사용자 원문 / ``docs/dashboard_design.md §8.2``):
+        - ``is_current=True`` 인 ``announcements`` 만 대상.
+        - ``NOT EXISTS (SELECT 1 FROM announcement_user_states
+          WHERE announcement_id = announcements.id AND user_id = :user_id
+                AND is_read = TRUE)`` — 사용자가 한 번도 읽지 않았거나
+          내용 변경으로 ``is_read=False`` 로 리셋된 공고 (Phase 1b 정책 그대로).
+
+    구현은 outer ``announcements`` 와 inner ``announcement_user_states`` 를
+    correlated subquery 로 묶어 단일 SELECT 안에서 처리하므로 N+1 가 일어나지
+    않는다 (사용자 원문 검증 15 회귀 가드).
+
+    호출 규약:
+        - 비로그인 경로는 본 함수를 호출하지 않는다 — 라우트가 ``current_user is
+          None`` 분기에서 4종 헬퍼 호출 자체를 skip 한다 (검증 16).
+
+    Args:
+        session: 호출자 세션.
+        user_id: 인증된 사용자 PK.
+
+    Returns:
+        조건을 만족하는 announcement 의 개수.
+    """
+    read_state_subquery = (
+        select(AnnouncementUserState.id)
+        .where(AnnouncementUserState.announcement_id == Announcement.id)
+        .where(AnnouncementUserState.user_id == user_id)
+        .where(AnnouncementUserState.is_read.is_(True))
+        .correlate(Announcement)
+    )
+    statement = (
+        select(func.count())
+        .select_from(Announcement)
+        .where(Announcement.is_current.is_(True))
+        .where(~read_state_subquery.exists())
+    )
+    return int(session.execute(statement).scalar_one())
+
+
+def count_unjudged_canonical_for_user(
+    session: Session,
+    *,
+    user_id: int,
+) -> int:
+    """(전체) 미판정 canonical 수를 단일 COUNT 쿼리로 반환한다.
+
+    위젯 2 \"전체 미판정 관련성: M건\" — 날짜 무관, canonical 단위.
+
+    조건 (사용자 원문 / ``docs/dashboard_design.md §8.2``):
+        - ``canonical_projects`` 전체 row 가 대상 (guidance 의 \"활성 canonical
+          정의가 모호하면 PROJECT_NOTES 결정사항 — 전수 행 기준\").
+        - ``NOT EXISTS (SELECT 1 FROM relevance_judgments WHERE
+          canonical_project_id = canonical_projects.id AND user_id = :user_id)``.
+        - ``relevance_judgments`` 만 본다. ``announcements`` 는 보지 않는다 —
+          §8.4 의 \"canonical(관련성) vs announcement(읽음) 단위 혼용 금지\".
+
+    Args:
+        session: 호출자 세션.
+        user_id: 인증된 사용자 PK.
+
+    Returns:
+        조건을 만족하는 canonical 의 개수.
+    """
+    judgment_subquery = (
+        select(RelevanceJudgment.id)
+        .where(RelevanceJudgment.canonical_project_id == CanonicalProject.id)
+        .where(RelevanceJudgment.user_id == user_id)
+        .correlate(CanonicalProject)
+    )
+    statement = (
+        select(func.count())
+        .select_from(CanonicalProject)
+        .where(~judgment_subquery.exists())
+    )
+    return int(session.execute(statement).scalar_one())
+
+
+def count_unread_in_announcement_ids(
+    session: Session,
+    *,
+    user_id: int,
+    announcement_ids: Iterable[int],
+) -> int:
+    """주어진 ``announcement_ids`` 중 사용자가 미확인인 개수 (단일 IN 쿼리).
+
+    위젯 3 \"기준일 변경 공고 중 내 미확인: K건\" — A 섹션 누적 머지 결과의
+    announcement_id union 을 그대로 받아 사용자 단위 미확인 카운트를 산출한다.
+
+    조건 (``docs/dashboard_design.md §8.2``):
+        - ``announcement_ids`` 안에 들어 있는 announcement 만 대상.
+        - 위젯 1 과 같이 ``NOT EXISTS`` 로 ``is_read=True`` row 가 없는 것 카운트.
+        - 위젯 1 과 달리 ``is_current=True`` 추가 필터는 두지 않는다 — 입력
+          ``announcement_ids`` 자체가 A 섹션 머지 결과의 announcement.id 들이며
+          해당 ID 의 announcement.is_current 상태와 무관하게 \"기준일 구간에 변화가
+          있었던 공고\" 라는 의미이기 때문이다 (사용자 원문 \"기준일 변경 공고 중
+          내 미확인\").
+
+    회귀 가드:
+        - 빈 리스트 / None-only → 쿼리 없이 0 반환.
+
+    Args:
+        session:          호출자 세션.
+        user_id:          인증된 사용자 PK.
+        announcement_ids: A 섹션 머지 결과의 announcement_id 들.
+
+    Returns:
+        조건을 만족하는 announcement 의 개수 (0 이상).
+    """
+    deduped_ids = sorted({aid for aid in announcement_ids if aid is not None})
+    if not deduped_ids:
+        return 0
+
+    read_state_subquery = (
+        select(AnnouncementUserState.id)
+        .where(AnnouncementUserState.announcement_id == Announcement.id)
+        .where(AnnouncementUserState.user_id == user_id)
+        .where(AnnouncementUserState.is_read.is_(True))
+        .correlate(Announcement)
+    )
+    statement = (
+        select(func.count())
+        .select_from(Announcement)
+        .where(Announcement.id.in_(deduped_ids))
+        .where(~read_state_subquery.exists())
+    )
+    return int(session.execute(statement).scalar_one())
+
+
+def count_unjudged_in_canonical_ids(
+    session: Session,
+    *,
+    user_id: int,
+    canonical_ids: Iterable[int],
+) -> int:
+    """주어진 ``canonical_ids`` 중 사용자가 관련성 미판정인 개수 (단일 IN 쿼리).
+
+    위젯 4 \"기준일 변경 공고 중 내 미판정: L건\" — A 섹션 머지 결과의
+    announcement.canonical_group_id (NOT NULL only) set 을 그대로 받아 카운트
+    한다.
+
+    조건 (``docs/dashboard_design.md §8.2 / §8.4``):
+        - ``canonical_ids`` 는 ``Announcement.canonical_group_id`` 의 None 제외
+          set. ``RelevanceJudgment.canonical_project_id`` 와 같은 PK
+          (``canonical_projects.id``) 를 가리킨다 — 컬럼 이름만 다를 뿐.
+        - ``canonical_projects`` 안에 같은 ID 가 실제로 존재하고, 그 ID 에 대해
+          ``relevance_judgments`` 의 (canonical_project_id, user_id) row 가 없으면
+          \"미판정\" 으로 카운트.
+
+    회귀 가드:
+        - 빈 리스트 / None-only → 쿼리 없이 0 반환.
+
+    Args:
+        session:       호출자 세션.
+        user_id:       인증된 사용자 PK.
+        canonical_ids: A 섹션 머지 결과 announcement 의 ``canonical_group_id`` set.
+
+    Returns:
+        조건을 만족하는 canonical 의 개수 (0 이상).
+    """
+    deduped_ids = sorted({cid for cid in canonical_ids if cid is not None})
+    if not deduped_ids:
+        return 0
+
+    judgment_subquery = (
+        select(RelevanceJudgment.id)
+        .where(RelevanceJudgment.canonical_project_id == CanonicalProject.id)
+        .where(RelevanceJudgment.user_id == user_id)
+        .correlate(CanonicalProject)
+    )
+    statement = (
+        select(func.count())
+        .select_from(CanonicalProject)
+        .where(CanonicalProject.id.in_(deduped_ids))
+        .where(~judgment_subquery.exists())
+    )
+    return int(session.execute(statement).scalar_one())

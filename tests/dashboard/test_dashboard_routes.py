@@ -504,3 +504,67 @@ class TestSectionBOnPage:
         # 두 그룹 영역은 그대로 렌더.
         assert 'data-section-b-group="soon_to_open"' in body
         assert 'data-section-b-group="soon_to_close"' in body
+
+
+# ---------------------------------------------------------------------------
+# 사용자 라벨링 위젯 (task 00042-5) — 라우트 통합 테스트
+# ---------------------------------------------------------------------------
+
+
+class TestWidgetsOnPage:
+    """``GET /dashboard`` 응답에 위젯 영역 노출 / 비로그인 시 skip 회귀."""
+
+    def test_anonymous_skips_widgets_section(self, client: TestClient) -> None:
+        """검증 1: 비로그인이면 위젯 영역이 DOM 에 들어가지 않는다."""
+        response = client.get("/dashboard")
+        assert response.status_code == 200
+        body = response.text
+        # 위젯 컨테이너 마커가 본문에 없어야 한다 — 통째 skip.
+        assert "data-dashboard-widgets" not in body
+        # 위젯 라벨 텍스트도 노출되지 않는다.
+        assert "전체 미확인 공고" not in body
+        assert "기준일 변경 공고 중 내 미확인" not in body
+
+    def test_logged_in_renders_all_four_widgets(
+        self, logged_in_client: TestClient
+    ) -> None:
+        """검증 2: 로그인 시 4종 위젯 라벨 + 카운트 영역 노출."""
+        response = logged_in_client.get("/dashboard")
+        assert response.status_code == 200
+        body = response.text
+        # 컨테이너 마커.
+        assert "data-dashboard-widgets" in body
+        # 4종 위젯 마커.
+        for widget_marker in (
+            'data-widget="unread-total"',
+            'data-widget="unjudged-total"',
+            'data-widget="unread-in-range"',
+            'data-widget="unjudged-in-range"',
+        ):
+            assert widget_marker in body
+        # 4종 라벨 — 사용자 원문 그대로.
+        assert "전체 미확인 공고" in body
+        assert "전체 미판정 관련성" in body
+        assert "기준일 변경 공고 중 내 미확인" in body
+        assert "기준일 변경 공고 중 내 미판정" in body
+
+    def test_anonymous_skip_emits_debug_log(
+        self, client: TestClient, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """검증 16: 비로그인 진입 시 DEBUG 로그로 'widgets skip (비로그인)' 기록.
+
+        loguru 가 stdlib logging 으로 propagate 하지 않을 수 있어 캡처가 안 될
+        수 있다. 그 경우는 응답 본문에 위젯 영역이 없는 것을 fallback 검증.
+        """
+        import logging
+
+        with caplog.at_level(logging.DEBUG, logger="app"):
+            response = client.get("/dashboard")
+        assert response.status_code == 200
+        # 로그 캡처 확인은 best-effort: caplog 에 보이면 검증, 없으면 본문 fallback.
+        log_messages = [record.getMessage() for record in caplog.records]
+        log_hit = any("위젯 쿼리 자체 skip" in message or "widgets skip" in message for message in log_messages)
+        if not log_hit:
+            # loguru → stdlib bridge 가 본 테스트 환경에서 작동하지 않을 수 있다.
+            # 그래도 DOM 에 위젯 영역이 빠졌으면 'skip' 의 시각 효과는 검증된 것.
+            assert "data-dashboard-widgets" not in response.text

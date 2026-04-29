@@ -2701,3 +2701,65 @@ button.canonical-count-badge.siblings-toggle--open {
     font-size: 13px;
     font-style: italic;
 }
+
+/* ──────────────────────────────────────────────────────────────
+ * Phase 5b 대시보드 사용자 라벨링 위젯 (task 00042-5).
+ * 4종 카드 (전체 미확인 / 전체 미판정 / 기준일 미확인 / 기준일 미판정) 를 2x2
+ * grid 로 배치한다. 비로그인 시는 라우트가 widgets=None 으로 둬서 본 영역 자체
+ * 가 DOM 에 들어가지 않으므로 별도 hidden 클래스 불필요.
+ * ────────────────────────────────────────────────────────────── */
+
+.dashboard-widgets {
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 14px 16px 16px;
+    margin-bottom: 20px;
+}
+
+.dashboard-widgets__row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.dashboard-widgets__row:last-child {
+    margin-bottom: 0;
+}
+
+@media (max-width: 720px) {
+    /* 좁은 화면에서는 한 줄에 1개씩. */
+    .dashboard-widgets__row {
+        grid-template-columns: 1fr;
+    }
+}
+
+.dashboard-widget {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 12px;
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    background: #fafbfc;
+}
+
+.dashboard-widget__label {
+    color: #4b5563;
+    font-size: 13px;
+}
+
+.dashboard-widget__count {
+    color: #111827;
+    font-size: 18px;
+    font-weight: 700;
+    /* 0 일 때도 시각적 안정감 유지 — 기본 톤 그대로. */
+}
+
+/* 기준일 한정 위젯(3·4) 은 약하게 강조해 '범위 한정' 임을 시사 */
+.dashboard-widgets__row[data-widgets-row="in-range"] .dashboard-widget {
+    background: #f0f9ff;
+    border-color: #bae6fd;
+}

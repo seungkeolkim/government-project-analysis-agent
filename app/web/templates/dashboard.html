@@ -104,16 +104,35 @@
     </form>
 
     {# ─────────────────────────────────────────────────────────
-       2. 사용자 라벨링 위젯 — 로그인 시만 표시. 본 subtask 는 placeholder.
+       2. 사용자 라벨링 위젯 — 로그인 시만 표시 (task 00042-5).
+       라우트에서 current_user is None 이면 widgets=None 으로 두므로
+       {% if widgets %} 한 번으로 영역 자체 skip — DOM 에도 들어가지 않음.
        ───────────────────────────────────────────────────────── #}
-    {% if current_user %}
-        {% if widgets %}
-            {# 후속 subtask (00042-5) 가 widgets 컨텍스트를 채우면 그 dict 를
-               기준으로 4종 카드를 렌더한다. 본 subtask 의 widgets 는 항상 None. #}
-            <section class="dashboard-widgets" aria-label="사용자 라벨링 위젯">
-                {# 00042-5 placeholder. #}
-            </section>
-        {% endif %}
+    {% if widgets %}
+        <section class="dashboard-widgets"
+                 data-dashboard-widgets
+                 aria-label="사용자 라벨링 위젯">
+            <div class="dashboard-widgets__row" data-widgets-row="totals">
+                <div class="dashboard-widget" data-widget="unread-total">
+                    <span class="dashboard-widget__label">{{ widgets.unread_total_label }}</span>
+                    <strong class="dashboard-widget__count">{{ widgets.unread_total_count }}건</strong>
+                </div>
+                <div class="dashboard-widget" data-widget="unjudged-total">
+                    <span class="dashboard-widget__label">{{ widgets.unjudged_total_label }}</span>
+                    <strong class="dashboard-widget__count">{{ widgets.unjudged_total_count }}건</strong>
+                </div>
+            </div>
+            <div class="dashboard-widgets__row" data-widgets-row="in-range">
+                <div class="dashboard-widget" data-widget="unread-in-range">
+                    <span class="dashboard-widget__label">{{ widgets.unread_in_range_label }}</span>
+                    <strong class="dashboard-widget__count">{{ widgets.unread_in_range_count }}건</strong>
+                </div>
+                <div class="dashboard-widget" data-widget="unjudged-in-range">
+                    <span class="dashboard-widget__label">{{ widgets.unjudged_in_range_label }}</span>
+                    <strong class="dashboard-widget__count">{{ widgets.unjudged_in_range_count }}건</strong>
+                </div>
+            </div>
+        </section>
     {% endif %}
 
     {# ─────────────────────────────────────────────────────────

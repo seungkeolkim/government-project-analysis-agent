@@ -49,6 +49,7 @@ from app.web.dashboard_compare import (
 )
 from app.web.dashboard_section_a import build_section_a
 from app.web.dashboard_section_b import build_section_b
+from app.web.dashboard_widgets import build_user_label_widgets
 from app.web.template_filters import register_kst_filters
 
 # ──────────────────────────────────────────────────────────────
@@ -306,6 +307,35 @@ def dashboard_page(
     # is_current=True 활성 공고만 검색하고 안내문으로 처리한다.
     section_b_data = build_section_b(session, to_date=base_date)
 
+    # ── (5d) 사용자 라벨링 위젯 4종 (로그인 시만) ────────────────────────
+    # task 00042-5. 검증 1·2·15·16 의 핵심 분기:
+    #   - 비로그인: build_user_label_widgets 자체를 호출하지 않는다 (쿼리 skip).
+    #             템플릿도 widgets is None 으로 영역 통째 skip.
+    #   - 로그인: 4 카운트 단일 SELECT 4개 (총 4 query). N+1 아님.
+    # 위젯 3·4 의 입력은 A 섹션 머지 결과의 ID list 를 그대로 재사용해 추가
+    # announcement fetch 가 없도록 한다 (사용자 원문 검증 15).
+    if current_user is not None:
+        widgets_data = build_user_label_widgets(
+            session,
+            user_id=current_user.id,
+            announcement_ids=section_a_data.merged_announcement_ids,
+            canonical_ids=section_a_data.merged_canonical_group_ids,
+        )
+        logger.debug(
+            "dashboard widgets 산출: user_id={} unread_total={} unjudged_total={} "
+            "unread_in_range={} unjudged_in_range={}",
+            current_user.id,
+            widgets_data.unread_total_count,
+            widgets_data.unjudged_total_count,
+            widgets_data.unread_in_range_count,
+            widgets_data.unjudged_in_range_count,
+        )
+    else:
+        # 비로그인 — 위젯 쿼리 자체 skip (검증 16). 템플릿에서 widgets 가 None 이면
+        # 영역을 통째로 렌더하지 않는다 (DOM 에 위젯 영역 div 가 들어가지 않음).
+        widgets_data = None
+        logger.debug("dashboard widgets skip (비로그인) — 4종 카운트 쿼리 실행 안 함")
+
     # ── (6) 디버그 로그 ──────────────────────────────────────────────────
     # 사용자 원문 검증 16 ('비로그인 시 위젯 쿼리 자체 skip') 회귀를 후속
     # subtask 에서 가시화하려고 본 라우트 입구에 한 줄 DEBUG 로그를 둔다.
@@ -340,9 +370,9 @@ def dashboard_page(
             "available_snapshot_date_iso": available_snapshot_date_iso,
             # base.html 의 네비 분기에 필요 — 다른 페이지 라우트 동일 컨벤션.
             "current_user": current_user,
-            # 후속 subtask 들이 채울 자리 — placeholder None 으로 미리 둔다.
-            # 템플릿에서는 {% if widgets %} 같은 truthy 체크로 통째 skip.
-            "widgets": None,             # 00042-5 가 채움
+            # task 00042-5 — 사용자 라벨링 위젯 컨텍스트 (None 또는 dataclass).
+            # 비로그인이면 None — 템플릿이 {% if widgets %} 로 영역 통째 skip.
+            "widgets": widgets_data,
             # task 00042-3 — A 섹션 컨텍스트.
             "section_a": section_a_data,
             # task 00042-4 — B 섹션 컨텍스트.
