@@ -146,11 +146,12 @@ class TestBuildSectionA:
     ) -> None:
         """(c-NEW) baseline 부재 + 기준일 snapshot 1건 → 카드에 누적 변화 표시.
 
-        사용자 원문 시나리오 — 비교일(2026-04-28) snapshot 도, 그 이전
-        snapshot 도 없으나 기준일(2026-04-29) snapshot 은 존재. 이전 동작은
-        is_no_data=True 로 0건을 표시했지만, 본 회귀는 (from, to] 구간 안의
-        2026-04-29 snapshot 을 활용해 누적 결과 + compare_count=None (\"비교일
-        — \") 으로 노출되는지 검증한다.
+        사용자 원문 시나리오 (task 00048 회귀) — 비교일(2026-04-28) snapshot 도,
+        그 이전 snapshot 도 없으나 기준일(2026-04-29) snapshot 은 존재.
+        (from, to] = (2026-04-28, 2026-04-29] 구간의 4/29 snapshot 을 누적
+        머지해 카드/expand 를 정상 표시하면서, baseline 부재 자체는 데이터
+        무결성에 영향이 없으므로 노란 안내문은 띄우지 않는다 (compare_count=None
+        으로 카드의 \"비교일 — \" 표기만 발동).
         """
         # 사용자 원문 payload 의 announcement id 들을 1:1 로 INSERT (메타 fetch 가
         # expand items 까지 채울 수 있도록) — id 40, 55-64, 58.
@@ -188,12 +189,13 @@ class TestBuildSectionA:
             requested_compare_date=date(2026, 4, 28),
         )
 
-        # baseline 부재 분기 — fallback.applied=True (\"baseline 없이 누적만\"
-        # 안내문) + is_no_data=False.
+        # baseline 부재 분기 — fallback.applied=False / message='' (task 00048).
+        # is_no_data 도 False (구간 안 snapshot 1건 존재).
         assert result.fallback.is_no_data is False
-        assert result.fallback.applied is True
+        assert result.fallback.applied is False
+        assert result.fallback.message == ""
         assert result.fallback.effective_compare_date is None
-        assert "baseline 없이" in result.fallback.message
+        assert result.fallback.requested_compare_date == date(2026, 4, 28)
 
         # 카운트는 사용자 원문 payload 와 정확히 일치해야 한다 (counts 기준).
         cards_by_key = {card.category_key: card for card in result.cards}
