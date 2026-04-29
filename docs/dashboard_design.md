@@ -322,13 +322,17 @@ requested_snapshot_date 두 필드로 동봉한다 (검증용).
 | --- | --- | --- |
 | `prev_day` | `base_date - 1일` | `base_date` |
 | `prev_week` | `base_date - 7일` | `base_date` |
-| `prev_month` | `base_date - relativedelta(months=1)` | `base_date` |
-| `prev_year` | `base_date - relativedelta(years=1)` | `base_date` |
+| `prev_month` | `base_date - 1개월` (마지막 일 clamp) | `base_date` |
+| `prev_year` | `base_date - 1년` (윤년 clamp) | `base_date` |
 | `custom` | `compare_date` | `base_date` |
 
-`relativedelta` 는 `dateutil.relativedelta` 를 사용한다 (Phase 4 의 KST 컨벤션
-범위 안 — date 산술이지 datetime tz 변환이 아니라 timezone 모듈은 거치지 않는
-다). `base_date` / `compare_date` 는 `datetime.date` (KST date) 다.
+month / year 산술은 `dateutil.relativedelta(months=N)` / `years=N` 와 동일 시맨틱
+이지만 — 같은 day 로 평행 이동하되 결과 month 의 마지막 일을 넘으면 마지막
+일로 내림 clamp (예: 5월 31일 → 4월 30일, 2024-02-29 → 2023-02-28) — 본
+프로젝트의 `pyproject.toml` 의존성에 `python-dateutil` 이 없어 표준 라이브러리
+`calendar.monthrange` 만으로 같은 동작을 구현한다 (`app/web/dashboard_compare.py`
+의 `_subtract_months` / `_subtract_years` 참조). `base_date` / `compare_date` 는
+`datetime.date` (KST date) 다.
 
 ### §5.2 머지 reduce 의사 코드 — `merge_snapshot_payload` 재사용
 

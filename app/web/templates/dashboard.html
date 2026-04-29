@@ -1,0 +1,175 @@
+{#
+  Phase 5b 대시보드 페이지 (task 00042-2 — 골격).
+
+  본 템플릿은 사용자 원문의 5 영역 페이지 구조를 미리 잡아 두되, 본 subtask
+  (00042-2) 는 컨트롤 영역(1)만 실제 렌더한다. 나머지 영역(2 위젯 / 3 A 섹션 /
+  4 B 섹션 / 5 추이 차트) 은 후속 subtask (00042-3 ~ 00042-6) 에서 같은 컨텍스트
+  변수를 받아 placeholder 자리를 본문으로 교체한다.
+
+  컨텍스트 (routes/dashboard.py 의 dashboard_page 가 주입):
+    - base_date / base_date_iso             : 기준일 (date / 'YYYY-MM-DD')
+    - compare_mode / compare_mode_values    : 선택된 모드 / 허용 5종 tuple
+    - compare_date / compare_date_iso       : 비교일 (custom 모드일 때만)
+    - from_date / from_date_iso             : (from, to] 의 from
+    - to_date / to_date_iso                 : (from, to] 의 to (= base_date)
+    - available_snapshot_date_iso           : 가용 snapshot_date ISO list (캘린더 활성)
+    - current_user                          : 로그인된 User 또는 None
+    - widgets / section_a / section_b / trend_chart : 후속 subtask placeholder
+#}
+{% extends "base.html" %}
+
+{% block page_title %}대시보드 · 사업공고 열람{% endblock %}
+
+{% block content %}
+<section class="dashboard-page">
+    <h2 class="dashboard-page__title">대시보드</h2>
+
+    {# ─────────────────────────────────────────────────────────
+       1. 컨트롤 영역 — 기준일 캘린더 + 비교 대상 드롭다운 + 비교일 캘린더(custom)
+       사용자 원문 페이지 구조 1번. form GET 으로 새로고침 정책 (사용자 원문
+       §12) 을 단순 구현한다 — 컨트롤 변경 시 즉시 페이지 reload.
+       ───────────────────────────────────────────────────────── #}
+    <form class="dashboard-controls" method="get" action="/dashboard"
+          data-dashboard-controls
+          data-base-date="{{ base_date_iso }}"
+          data-compare-date="{{ compare_date_iso or '' }}">
+
+        <div class="dashboard-controls__row">
+            <fieldset class="dashboard-controls__field">
+                <legend class="dashboard-controls__label">기준일</legend>
+                <input type="hidden" name="base_date" value="{{ base_date_iso }}"
+                       data-dashboard-base-date-input>
+                <div class="dashboard-calendar"
+                     data-dashboard-calendar="base"
+                     data-selected-date="{{ base_date_iso }}"
+                     aria-label="기준일 캘린더">
+                    {# 자체 구현 캘린더 (dashboard_calendar.js) 가 이 div 안에
+                       월별 그리드를 렌더한다. 가용 날짜는
+                       data-available-dates 속성에서 set 으로 변환된다. #}
+                </div>
+            </fieldset>
+
+            <fieldset class="dashboard-controls__field">
+                <legend class="dashboard-controls__label">비교 대상</legend>
+                <select name="compare_mode" class="dashboard-controls__select"
+                        data-dashboard-compare-mode>
+                    <option value="prev_day"   {% if compare_mode == 'prev_day'   %}selected{% endif %}>전날</option>
+                    <option value="prev_week"  {% if compare_mode == 'prev_week'  %}selected{% endif %}>전주</option>
+                    <option value="prev_month" {% if compare_mode == 'prev_month' %}selected{% endif %}>전월</option>
+                    <option value="prev_year"  {% if compare_mode == 'prev_year'  %}selected{% endif %}>전년</option>
+                    <option value="custom"     {% if compare_mode == 'custom'     %}selected{% endif %}>직접 선택</option>
+                </select>
+            </fieldset>
+
+            {# 비교일 캘린더 — compare_mode == 'custom' 일 때만 활성. 그 외 모드
+               에서는 hidden input 의 값을 비워 두어 라우트가 무시하도록 한다. #}
+            <fieldset class="dashboard-controls__field
+                            {% if compare_mode != 'custom' %}is-hidden{% endif %}"
+                      data-dashboard-compare-fieldset>
+                <legend class="dashboard-controls__label">비교일</legend>
+                <input type="hidden" name="compare_date" value="{{ compare_date_iso or '' }}"
+                       data-dashboard-compare-date-input>
+                <div class="dashboard-calendar"
+                     data-dashboard-calendar="compare"
+                     data-selected-date="{{ compare_date_iso or '' }}"
+                     aria-label="비교일 캘린더">
+                </div>
+            </fieldset>
+        </div>
+
+        <noscript>
+            {# JS 비활성 환경 대비 — 직접 입력 필드와 적용 버튼만 노출. #}
+            <p class="dashboard-controls__noscript-hint">
+                JavaScript 가 비활성화된 환경에서는 캘린더 대신 아래 입력 필드를
+                사용하세요.
+            </p>
+            <label>기준일 <input type="date" name="base_date" value="{{ base_date_iso }}"></label>
+            <label>비교일 <input type="date" name="compare_date" value="{{ compare_date_iso or '' }}"></label>
+            <button type="submit">적용</button>
+        </noscript>
+
+        {# 컨트롤 변경 시 form 을 자동 submit 하기 위해 JS 가 사용 — 본 subtask
+           의 골격에서는 submit 버튼이 동작하도록 두고, JS 가 캘린더 클릭 시
+           submit() 을 직접 호출한다. #}
+        <button type="submit" class="dashboard-controls__submit"
+                data-dashboard-submit>적용</button>
+
+        <p class="dashboard-controls__summary" aria-live="polite">
+            <span class="dashboard-controls__summary-label">현재 비교 구간:</span>
+            <strong>{{ from_date_iso }}</strong>
+            <span aria-hidden="true">→</span>
+            <strong>{{ to_date_iso }}</strong>
+            <span class="dashboard-controls__summary-mode">({{ compare_mode }})</span>
+        </p>
+    </form>
+
+    {# ─────────────────────────────────────────────────────────
+       2. 사용자 라벨링 위젯 — 로그인 시만 표시. 본 subtask 는 placeholder.
+       ───────────────────────────────────────────────────────── #}
+    {% if current_user %}
+        {% if widgets %}
+            {# 후속 subtask (00042-5) 가 widgets 컨텍스트를 채우면 그 dict 를
+               기준으로 4종 카드를 렌더한다. 본 subtask 의 widgets 는 항상 None. #}
+            <section class="dashboard-widgets" aria-label="사용자 라벨링 위젯">
+                {# 00042-5 placeholder. #}
+            </section>
+        {% endif %}
+    {% endif %}
+
+    {# ─────────────────────────────────────────────────────────
+       3. A 섹션 — 공고의 변화 (diff 누적). 후속 subtask 00042-3.
+       ───────────────────────────────────────────────────────── #}
+    <section class="dashboard-section dashboard-section--a"
+             aria-label="공고의 변화 (diff 누적)">
+        <h3 class="dashboard-section__title">A. 공고의 변화</h3>
+        {% if section_a %}
+            {# 00042-3 가 채움. #}
+        {% else %}
+            <p class="dashboard-section__placeholder">
+                A 섹션은 후속 subtask 에서 채워집니다 (5종 카테고리 카드 + expand).
+            </p>
+        {% endif %}
+    </section>
+
+    {# ─────────────────────────────────────────────────────────
+       4. B 섹션 — 조만간 변화 예정. 후속 subtask 00042-4.
+       ───────────────────────────────────────────────────────── #}
+    <section class="dashboard-section dashboard-section--b"
+             aria-label="조만간 변화 예정 (1개월 이내)">
+        <h3 class="dashboard-section__title">B. 조만간 변화 예정</h3>
+        {% if section_b %}
+            {# 00042-4 가 채움. #}
+        {% else %}
+            <p class="dashboard-section__placeholder">
+                B 섹션은 후속 subtask 에서 채워집니다 (조만간 접수/마감 공고).
+            </p>
+        {% endif %}
+    </section>
+
+    {# ─────────────────────────────────────────────────────────
+       5. 추이 차트 — 후속 subtask 00042-6.
+       ───────────────────────────────────────────────────────── #}
+    <section class="dashboard-section dashboard-section--trend"
+             aria-label="추이 차트">
+        <h3 class="dashboard-section__title">추이 (기준일 ±15일)</h3>
+        {% if trend_chart %}
+            {# 00042-6 가 채움 — Chart.js 로컬 vendor + JSON 임베드. #}
+        {% else %}
+            <p class="dashboard-section__placeholder">
+                추이 차트는 후속 subtask 에서 채워집니다 (Chart.js 일별 카운트).
+            </p>
+        {% endif %}
+    </section>
+</section>
+
+{# 캘린더 컴포넌트가 사용할 가용 날짜 set 을 페이지에 임베드한다. JS 는 이
+   <script type="application/json"> 의 textContent 를 JSON.parse 로 읽어 set 을
+   만든다. #}
+<script id="dashboardSnapshotDates" type="application/json">
+    {{ available_snapshot_date_iso | tojson | safe }}
+</script>
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="/static/js/dashboard_calendar.js"></script>
+{% endblock %}

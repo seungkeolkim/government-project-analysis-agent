@@ -2120,3 +2120,242 @@ button.canonical-count-badge.siblings-toggle--open {
     border-color: #93c5fd;
     color: #1d4ed8;
 }
+
+/* ──────────────────────────────────────────────────────────────
+ * Phase 5b 대시보드 페이지 스타일 (task 00042-2 — 골격).
+ * 자체 구현 캘린더 (dashboard_calendar.js) 와 컨트롤 영역 / 섹션 placeholder
+ * 만 다룬다. A 섹션 카드 / B 섹션 / 추이 차트 스타일은 후속 subtask 에서 추가.
+ * ────────────────────────────────────────────────────────────── */
+
+.dashboard-page {
+    padding: 16px 0 32px;
+}
+
+.dashboard-page__title {
+    margin: 0 0 16px;
+    font-size: 22px;
+    font-weight: 700;
+    color: #111827;
+}
+
+/* ── 컨트롤 영역 ───────────────────────────────────────────── */
+
+.dashboard-controls {
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 16px;
+    margin-bottom: 20px;
+}
+
+.dashboard-controls__row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    align-items: flex-start;
+}
+
+.dashboard-controls__field {
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    padding: 10px 12px 12px;
+    margin: 0;
+    min-width: 220px;
+}
+
+.dashboard-controls__field.is-hidden {
+    display: none;
+}
+
+.dashboard-controls__label {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    color: #6b7280;
+    padding: 0 4px;
+    margin-bottom: 4px;
+}
+
+.dashboard-controls__select {
+    font-size: 14px;
+    padding: 6px 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    background: #ffffff;
+    min-width: 160px;
+}
+
+.dashboard-controls__submit {
+    margin-top: 12px;
+    padding: 6px 14px;
+    font-size: 13px;
+    background: #1d4ed8;
+    color: #ffffff;
+    border: 1px solid #1d4ed8;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.dashboard-controls__submit:hover {
+    background: #1e40af;
+}
+
+.dashboard-controls__noscript-hint {
+    color: #b45309;
+    font-size: 13px;
+    margin: 8px 0;
+}
+
+.dashboard-controls__summary {
+    margin: 12px 0 0;
+    font-size: 13px;
+    color: #374151;
+}
+
+.dashboard-controls__summary-label {
+    color: #6b7280;
+    margin-right: 4px;
+}
+
+.dashboard-controls__summary-mode {
+    color: #6b7280;
+    margin-left: 6px;
+    font-size: 12px;
+}
+
+/* ── 캘린더 그리드 (자체 구현) ───────────────────────────── */
+
+.dashboard-calendar {
+    width: 220px;
+    user-select: none;
+}
+
+.dashboard-calendar__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 0;
+}
+
+.dashboard-calendar__nav {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    padding: 2px 8px;
+    cursor: pointer;
+    font-size: 14px;
+    color: #374151;
+}
+
+.dashboard-calendar__nav:hover {
+    background: #f3f4f6;
+    border-color: #d1d5db;
+}
+
+.dashboard-calendar__month {
+    font-size: 14px;
+    font-weight: 600;
+    color: #111827;
+}
+
+.dashboard-calendar__weekday-row {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    margin-top: 4px;
+    border-bottom: 1px solid #f3f4f6;
+    padding-bottom: 2px;
+}
+
+.dashboard-calendar__weekday {
+    text-align: center;
+    font-size: 11px;
+    color: #6b7280;
+    font-weight: 600;
+}
+
+.dashboard-calendar__grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 2px;
+    margin-top: 4px;
+}
+
+.dashboard-calendar__day {
+    text-align: center;
+    padding: 4px 0;
+    border: 1px solid transparent;
+    border-radius: 50%;
+    background: transparent;
+    color: #6b7280;
+    font-size: 12px;
+    cursor: not-allowed;
+    aspect-ratio: 1 / 1;
+}
+
+.dashboard-calendar__day--blank {
+    visibility: hidden;
+}
+
+/* 가용 날짜 — 색 배경 + 동그라미 강조 (사용자 원문 §10.3 그대로). */
+.dashboard-calendar__day--available {
+    background: #dbeafe;
+    color: #1d4ed8;
+    border-color: #bfdbfe;
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.dashboard-calendar__day--available:hover {
+    background: #bfdbfe;
+    border-color: #1d4ed8;
+}
+
+/* 비가용 날짜 — 흐리게 + click disabled. */
+.dashboard-calendar__day--disabled {
+    color: #d1d5db;
+    background: transparent;
+    cursor: not-allowed;
+}
+
+/* 선택된 일자 — 진한 배경. 가용 + 선택 중복 적용 시 본 규칙이 우선. */
+.dashboard-calendar__day--selected {
+    background: #1d4ed8;
+    color: #ffffff;
+    border-color: #1d4ed8;
+}
+
+.dashboard-calendar__day--selected:hover {
+    background: #1e40af;
+    border-color: #1e40af;
+}
+
+/* ── 섹션 placeholder ─────────────────────────────────────── */
+
+.dashboard-section {
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 14px 16px 18px;
+    margin-bottom: 16px;
+}
+
+.dashboard-section__title {
+    margin: 0 0 8px;
+    font-size: 16px;
+    font-weight: 700;
+    color: #111827;
+}
+
+.dashboard-section__placeholder {
+    margin: 6px 0 0;
+    color: #9ca3af;
+    font-size: 13px;
+    font-style: italic;
+}
+
+/* ── 네비 탭 (대시보드) ──────────────────────────────────── */
+
+.site-nav__link--dashboard {
+    /* 다른 네비 링크와 동일한 톤 — 별도 색을 두지 않는다 (관리자 링크와는 달리
+       대시보드는 비로그인도 접근 가능한 일반 페이지이므로 강조하지 않는다). */
+}

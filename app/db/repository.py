@@ -3632,3 +3632,31 @@ def get_scrape_snapshot_by_date(
     return session.execute(
         select(ScrapeSnapshot).where(ScrapeSnapshot.snapshot_date == snapshot_date)
     ).scalar_one_or_none()
+
+
+def list_available_snapshot_dates(session: Session) -> list[date]:
+    """``scrape_snapshots`` 의 ``snapshot_date`` 전체를 오름차순으로 반환한다.
+
+    Phase 5b (task 00042-2) 의 캘린더 컴포넌트와 ``GET
+    /dashboard/api/snapshot-dates`` JSON API 가 공유하는 단일 헬퍼다. UNIQUE
+    제약상 한 KST 날짜당 0 또는 1 건이라 결과 list 는 자연스럽게 중복이
+    없으며, 정렬은 SQL ``ORDER BY snapshot_date ASC`` 로 처리한다.
+
+    캘린더 가용 날짜 판정 정책 (``docs/dashboard_design.md §4.1``):
+        본 함수가 반환하는 날짜 == \"캘린더에서 활성 (클릭 가능)\" 이다.
+        Phase 5a 의 ``upsert_scrape_snapshot`` 이 ScrapeRun completed/partial
+        종료 시 변화 0건이어도 row 를 INSERT 하므로, \"수집은 됐지만 변화 0건\"
+        인 날도 본 함수의 결과에 포함되어 캘린더에서 활성으로 보인다 (디자인
+        의도). 반대로 그날 ScrapeRun 이 모두 failed/cancelled 였거나 실행 자체
+        가 없었던 날만 비활성으로 표시된다.
+
+    Args:
+        session: 호출자 세션.
+
+    Returns:
+        snapshot_date(KST date) 들의 오름차순 list. 비어 있으면 빈 list.
+    """
+    rows = session.execute(
+        select(ScrapeSnapshot.snapshot_date).order_by(ScrapeSnapshot.snapshot_date.asc())
+    ).all()
+    return [row[0] for row in rows]
