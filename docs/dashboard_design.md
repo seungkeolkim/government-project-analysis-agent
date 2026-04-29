@@ -417,15 +417,19 @@ ID 리스트를 그대로 재사용해 추가 쿼리 없이 카운트한다.
 기준일 신규 N건  ↑/↓ X (비교일 M건 대비)
 ```
 
-- N: 기준일 (`to`) snapshot 의 카운트 (단일 snapshot.payload.counts[*]).
-- M: 비교일 (`from` 의 effective snapshot — fallback 적용 후) 의 카운트.
-  비교일 snapshot 이 없으면 (§4.2 (b)) 카드 자체에 "—" 로 표기.
+- N: `(from, to]` 구간 누적 머지 후 `payload.counts[category_key]` (= 기준일까지
+  누적된 변화 카운트). guidance 의 "비교일 단일 snapshot 의 counts vs 누적 머지
+  후 counts 의 차이로 계산" 규칙을 따른다 — task 00042-3 에서 v1 의 "단일 기준일
+  snapshot.counts" 해석을 누적 머지 결과로 수정.
+- M: 비교일 effective snapshot 의 단일 `payload.counts[category_key]` (fallback
+  적용 후의 일자). 비교일 effective snapshot 이 아예 없는 "데이터 없음" 분기
+  (§4.2 (c)) 에서는 카드 5종 모두 base_count=0 + compare_count=None 으로 노출.
 - X: `N - M` 의 절대값. 부호에 따라 ↑ / ↓ / "변동 없음" 선택.
 
-기준일 카운트 N 은 `(from, to]` 누적 머지 결과의 counts 가 아니라 **단일
-기준일 snapshot 의 counts** 를 표시한다 — 사용자 원문 "기준일 신규 N건" 표현
-의 자연스러운 해석은 "기준일에 새로 잡힌 변화" 다. expand 리스트는 누적 머지
-결과 전체를 보여준다는 점이 다르다 (§6.2 도입부 참조).
+expand 리스트의 행 list 는 `(from, to]` 누적 머지 결과의 카테고리 ID 전체 — 즉
+카드의 base_count 와 expand items 의 양은 항상 일치한다 (메타 fetch 누락분이
+있으면 expand items 는 그만큼 줄지만 카드 카운트는 payload.counts 기준이라
+유지된다 — §5.3 정합성 규칙).
 
 ### §6.2 expand 표시 형식 (사용자 원문 그대로)
 

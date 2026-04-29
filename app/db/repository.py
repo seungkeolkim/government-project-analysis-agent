@@ -3660,3 +3660,121 @@ def list_available_snapshot_dates(session: Session) -> list[date]:
         select(ScrapeSnapshot.snapshot_date).order_by(ScrapeSnapshot.snapshot_date.asc())
     ).all()
     return [row[0] for row in rows]
+
+
+def list_snapshots_in_range(
+    session: Session,
+    *,
+    from_exclusive: date,
+    to_inclusive: date,
+) -> list[ScrapeSnapshot]:
+    """``(from_exclusive, to_inclusive]`` KST 날짜 구간의 ScrapeSnapshot list.
+
+    Phase 5b (task 00042-3) 의 A 섹션 누적 머지가 사용하는 헬퍼. 사용자 원문
+    \"(from, to] 구간 안의 모든 snapshot 을 시간순 누적 머지\" 의 SELECT 단계.
+    구간은 \"from 배타 / to 포함\" 의 반-open 구간으로, ``from`` 일자의 snapshot
+    은 비교 baseline 이라 누적 대상에서 제외된다 (사용자 원문 그대로).
+
+    SQL: ``WHERE snapshot_date > :from_exclusive AND snapshot_date <= :to_inclusive``
+         ``ORDER BY snapshot_date ASC``
+
+    누적 머지의 정확성을 위해 ``snapshot_date ASC`` 정렬은 필수다 — 시간순으로
+    ``merge_snapshot_payload`` 를 reduce 해야 \"first from 유지 + last to 갱신\"
+    transition 머지 규칙이 의도대로 작동한다.
+
+    Args:
+        session:        호출자 세션.
+        from_exclusive: 시작 경계 (배타). 보통 비교일 (effective compare_date).
+        to_inclusive:   끝 경계 (포함). 보통 기준일 (base_date).
+
+    Returns:
+        ``ScrapeSnapshot`` 의 list, ``snapshot_date`` 오름차순. 구간이 비면
+        빈 list. ``from_exclusive >= to_inclusive`` 도 그대로 빈 list.
+    """
+    rows = session.execute(
+        select(ScrapeSnapshot)
+        .where(ScrapeSnapshot.snapshot_date > from_exclusive)
+        .where(ScrapeSnapshot.snapshot_date <= to_inclusive)
+        .order_by(ScrapeSnapshot.snapshot_date.asc())
+    ).scalars().all()
+    return list(rows)
+
+
+def find_nearest_previous_snapshot_date(
+    session: Session,
+    *,
+    target_date: date,
+) -> date | None:
+    """``target_date`` 보다 이전인 snapshot_date 중 가장 가까운 일자를 반환한다.
+
+    Phase 5b (task 00042-3) 의 비교일 fallback 용 헬퍼 — 사용자 원문 \"비교일이
+    가용 날짜가 아닐 때 가장 가까운 이전 snapshot_date 검색\" 을 단일 쿼리로
+    구현한다.
+
+    SQL: ``SELECT MAX(snapshot_date) FROM scrape_snapshots WHERE snapshot_date < :target_date``
+
+    호출 규약:
+        - 기준일은 캘린더에서 가용 날짜만 클릭 가능 → 기준일 fallback 은 호출
+          하지 않는다 (사용자 원문 \"기준일 fallback 불필요\").
+        - 비교일이 가용 set 에 없을 때만 호출한다. 즉 호출 전에
+          ``get_scrape_snapshot_by_date(target_date) is None`` 이 보장된다.
+
+    Args:
+        session:     호출자 세션.
+        target_date: 기준 일자 (배타 — 본 일자 자체는 결과에 포함되지 않는다).
+
+    Returns:
+        ``target_date`` 직전의 ``snapshot_date`` (또는 None — 이 경우 사용자
+        원문 \"비교일 이전 snapshot 전무 → A 섹션 '데이터 없음'\" 분기로 진입).
+    """
+    row = session.execute(
+        select(func.max(ScrapeSnapshot.snapshot_date)).where(
+            ScrapeSnapshot.snapshot_date < target_date
+        )
+    ).scalar_one_or_none()
+    # SQLAlchemy 의 ``func.max`` 가 매칭 없으면 ``None`` 을 그대로 반환한다.
+    return row
+
+
+def list_announcements_by_ids(
+    session: Session,
+    *,
+    announcement_ids: Iterable[int],
+) -> list[Announcement]:
+    """주어진 announcement_id 들을 한 번의 IN 쿼리로 fetch 한다.
+
+    Phase 5b (task 00042-3) 의 A 섹션 카드 expand + 위젯 3·4 (task 00042-5) 가
+    공유하는 N+1 회피 헬퍼다. ``docs/dashboard_design.md §5.4`` 의 헬퍼 패턴을
+    그대로 옮긴 것 — Phase 1b/3a/3b 의 ``get_X_id_set`` / ``get_X_map``
+    컨벤션과 동일.
+
+    표시에 필요한 컬럼 (사용자 원문 \"announcements JOIN 으로 표시 메타\"):
+        - id, source_type, source_announcement_id, status, title, agency,
+          deadline_at, canonical_group_id (위젯 4번 쿼리 활용용).
+
+    실제 SELECT 는 ORM Announcement 전체 컬럼이지만, 호출자가 사용하는 컬럼만
+    위 목록에 한정된다 — 추가 컬럼이 필요해지면 호출자 docstring 에 언급한다.
+
+    호출 규약:
+        - ``announcement_ids`` 가 비어 있거나 None-only 면 쿼리 없이 빈 list 를
+          반환 (회귀 가드).
+        - 결과 정렬은 ``announcement_id`` 오름차순. 호출자가 카테고리별 분배는
+          별도 처리한다.
+
+    Args:
+        session:          호출자 세션.
+        announcement_ids: fetch 할 announcement_id Iterable.
+
+    Returns:
+        해당 ID 들의 ``Announcement`` ORM 인스턴스 list. 비어 있는 입력 →
+        빈 list. 일부 ID 가 DB 에 없으면 그 ID 는 결과에서 누락된다 (조용히).
+    """
+    deduped_ids = sorted({aid for aid in announcement_ids if aid is not None})
+    if not deduped_ids:
+        return []
+    rows = session.execute(
+        select(Announcement)
+        .where(Announcement.id.in_(deduped_ids))
+        .order_by(Announcement.id.asc())
+    ).scalars().all()
+    return list(rows)

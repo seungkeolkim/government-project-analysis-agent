@@ -2359,3 +2359,244 @@ button.canonical-count-badge.siblings-toggle--open {
     /* 다른 네비 링크와 동일한 톤 — 별도 색을 두지 않는다 (관리자 링크와는 달리
        대시보드는 비로그인도 접근 가능한 일반 페이지이므로 강조하지 않는다). */
 }
+
+/* ──────────────────────────────────────────────────────────────
+ * Phase 5b 대시보드 A 섹션 — 5종 카테고리 카드 + expand 리스트 (task 00042-3).
+ * <details>/<summary> native expand 를 사용해 JS 의존을 최소화한다.
+ * ────────────────────────────────────────────────────────────── */
+
+/* fallback 안내문 */
+.dashboard-section__notice {
+    margin: 4px 0 12px;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.dashboard-section__notice--fallback {
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    color: #92400e;
+}
+
+.dashboard-section__notice--no-data {
+    background: #f3f4f6;
+    border: 1px solid #d1d5db;
+    color: #6b7280;
+    font-style: italic;
+}
+
+/* 카드 컨테이너 (5종을 세로 스택) */
+.dashboard-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.dashboard-card {
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    background: #fafbfc;
+    /* <details> 의 기본 marker 위치 / 색상 톤다운. */
+}
+
+.dashboard-card[open] {
+    background: #ffffff;
+    border-color: #cbd5e1;
+}
+
+.dashboard-card__summary {
+    cursor: pointer;
+    list-style: none;
+    padding: 10px 12px;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    user-select: none;
+}
+
+/* details/summary 기본 ▶ marker 제거 (Chrome / Firefox / Safari 공통 셀렉터) */
+.dashboard-card__summary::-webkit-details-marker {
+    display: none;
+}
+
+.dashboard-card__summary::marker {
+    content: "";
+}
+
+/* 자체 marker — open 시 ▼, 닫혔을 때 ▶ */
+.dashboard-card__summary::before {
+    content: "▶";
+    font-size: 10px;
+    color: #6b7280;
+    margin-right: 4px;
+    transition: transform 0.15s ease-out;
+}
+
+.dashboard-card[open] > .dashboard-card__summary::before {
+    transform: rotate(90deg);
+    display: inline-block;
+}
+
+.dashboard-card__label {
+    font-weight: 700;
+    color: #111827;
+    font-size: 14px;
+}
+
+.dashboard-card__counts {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 13px;
+    color: #374151;
+}
+
+.dashboard-card__base-count {
+    color: #111827;
+}
+
+.dashboard-card__delta {
+    font-weight: 600;
+    font-size: 12px;
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+
+.dashboard-card__delta--up {
+    background: #fee2e2;
+    color: #b91c1c;
+}
+
+.dashboard-card__delta--down {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.dashboard-card__delta--flat {
+    background: #f3f4f6;
+    color: #6b7280;
+}
+
+.dashboard-card__delta--missing {
+    color: #9ca3af;
+    font-style: italic;
+}
+
+.dashboard-card__compare {
+    color: #6b7280;
+}
+
+.dashboard-card__expand {
+    border-top: 1px solid #e5e7eb;
+    padding: 8px 12px 12px;
+    /* CSS transition 은 native <details> 에서 height 변환에 부드럽게 적용 안 되지만,
+       opacity 만 가볍게 fade-in 으로 둬서 깜빡임을 줄인다. */
+    animation: dashboardCardExpandFadeIn 0.12s ease-out;
+}
+
+@keyframes dashboardCardExpandFadeIn {
+    from { opacity: 0; transform: translateY(-2px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+.dashboard-card__expand-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    max-height: 360px;
+    overflow-y: auto;
+    /* 스크롤 영역 시각화 — 사용자 원문 \"전체 표시 + 스크롤\". */
+}
+
+.dashboard-card__expand-row {
+    border-bottom: 1px solid #f3f4f6;
+}
+
+.dashboard-card__expand-row:last-child {
+    border-bottom: none;
+}
+
+.dashboard-card__expand-link {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 4px;
+    color: inherit;
+    text-decoration: none;
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.dashboard-card__expand-link:hover {
+    background: #eff6ff;
+}
+
+.dashboard-card__expand-title {
+    flex: 1 1 220px;
+    min-width: 200px;
+    color: #111827;
+}
+
+.dashboard-card__expand-link:hover .dashboard-card__expand-title {
+    color: #1d4ed8;
+    text-decoration: underline;
+}
+
+.dashboard-card__transition-from {
+    color: #6b7280;
+    font-size: 12px;
+}
+
+.dashboard-card__duplicate-badge {
+    background: #f3e8ff;
+    color: #6b21a8;
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+
+.dashboard-card__deadline {
+    color: #6b7280;
+    font-size: 12px;
+    margin-left: auto;
+    white-space: nowrap;
+}
+
+.dashboard-card__deadline--unknown {
+    color: #9ca3af;
+    font-style: italic;
+}
+
+.dashboard-card__expand-empty {
+    margin: 4px 0 0;
+    padding: 6px 4px;
+    color: #9ca3af;
+    font-size: 13px;
+    font-style: italic;
+}
+
+/* 소스/상태 배지 — 기존 list 페이지 톤과 비슷하게 */
+.dashboard-source-badge {
+    display: inline-block;
+    background: #e5e7eb;
+    color: #1f2937;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+
+.dashboard-status-badge {
+    display: inline-block;
+    background: #dbeafe;
+    color: #1d4ed8;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 3px;
+}

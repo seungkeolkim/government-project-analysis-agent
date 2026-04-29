@@ -234,3 +234,159 @@ class TestSnapshotDatesApi:
         assert response.status_code == 200
         # JSON 응답이 dict 구조를 가지는지.
         assert "dates" in response.json()
+
+
+# ---------------------------------------------------------------------------
+# A 섹션 (task 00042-3) — 라우트 통합 테스트
+# ---------------------------------------------------------------------------
+
+
+def _insert_announcement(
+    *,
+    announcement_id: int | None = None,
+    canonical_key: str,
+    title: str,
+    source_announcement_id: str,
+    source_type: str = "IRIS",
+    status: str = "접수중",
+) -> int:
+    """canonical + announcement 1개 INSERT — 라우트 테스트용 헬퍼.
+
+    Returns:
+        INSERT 된 announcement.id (autoincrement 결과).
+    """
+    from datetime import UTC, datetime as _datetime
+
+    from app.db.models import (
+        Announcement,
+        AnnouncementStatus,
+        CanonicalProject,
+    )
+
+    status_enum = next(s for s in AnnouncementStatus if s.value == status)
+    with session_scope() as session:
+        canonical = CanonicalProject(
+            canonical_key=canonical_key,
+            key_scheme="official",
+            representative_title=title,
+        )
+        session.add(canonical)
+        session.flush()
+        announcement = Announcement(
+            source_type=source_type,
+            source_announcement_id=source_announcement_id,
+            title=title,
+            agency="테스트기관",
+            status=status_enum,
+            received_at=None,
+            deadline_at=None,
+            scraped_at=_datetime(2026, 4, 1, 0, 0, tzinfo=UTC),
+            canonical_group_id=canonical.id,
+            canonical_key=canonical_key,
+        )
+        if announcement_id is not None:
+            announcement.id = announcement_id
+        session.add(announcement)
+        session.flush()
+        return announcement.id
+
+
+def _insert_snapshot_with_payload(snapshot_date_iso: str, payload: dict) -> None:
+    """payload 를 정규형으로 INSERT — 라우트 테스트용 헬퍼."""
+    from app.db.snapshot import normalize_payload
+
+    with session_scope() as session:
+        snapshot = ScrapeSnapshot(
+            snapshot_date=date.fromisoformat(snapshot_date_iso),
+            payload=normalize_payload(payload),
+        )
+        session.add(snapshot)
+        session.flush()
+
+
+class TestSectionAOnPage:
+    """``GET /dashboard`` 응답에 A 섹션 카드 + expand + fallback 안내문 회귀."""
+
+    def test_no_data_section_renders_notice(self, client: TestClient) -> None:
+        """검증 8: 비교일 이전 snapshot 전무 → A 섹션 '데이터 없음' 안내."""
+        response = client.get(
+            "/dashboard",
+            params={
+                "base_date": "2026-04-29",
+                "compare_mode": "custom",
+                "compare_date": "2026-04-22",
+            },
+        )
+        assert response.status_code == 200
+        body = response.text
+        # 안내문 텍스트 + data-* 마커.
+        assert "데이터 없음" in body
+        assert "data-section-a-no-data" in body
+
+    def test_fallback_notice_renders_when_compare_unavailable(
+        self, client: TestClient
+    ) -> None:
+        """검증 7: 비교일 가용 안 됨 → 가장 가까운 이전 snapshot + 안내문."""
+        announcement_id = _insert_announcement(
+            canonical_key="key-c1",
+            title="신규 공고 X",
+            source_announcement_id="X-001",
+        )
+        # 비교일 = 2026-04-22 가용 안 됨, 가장 가까운 이전 = 2026-04-20.
+        _insert_snapshot_with_payload("2026-04-20", {"new": []})
+        _insert_snapshot_with_payload("2026-04-29", {"new": [announcement_id]})
+
+        response = client.get(
+            "/dashboard",
+            params={
+                "base_date": "2026-04-29",
+                "compare_mode": "custom",
+                "compare_date": "2026-04-22",
+            },
+        )
+        assert response.status_code == 200
+        body = response.text
+        assert "data-section-a-fallback" in body
+        # 안내문에 요청된 비교일과 effective 일자가 모두 들어 있어야 한다.
+        assert "2026-04-22" in body
+        assert "2026-04-20" in body
+        # 카드의 신규 카운트가 1 — payload.counts 기준.
+        assert "기준일 1건" in body
+
+    def test_section_a_cards_render_with_expand_links(
+        self, client: TestClient
+    ) -> None:
+        """검증 9·10: 카드 5종 + expand 행 + 상세 링크 (<a href>)."""
+        announcement_id = _insert_announcement(
+            canonical_key="key-c2",
+            title="A 섹션 검증 공고",
+            source_announcement_id="X-100",
+        )
+        _insert_snapshot_with_payload("2026-04-28", {"new": []})
+        _insert_snapshot_with_payload(
+            "2026-04-29", {"new": [announcement_id]}
+        )
+
+        response = client.get(
+            "/dashboard",
+            params={
+                "base_date": "2026-04-29",
+                "compare_mode": "prev_day",
+            },
+        )
+        assert response.status_code == 200
+        body = response.text
+        # 5종 카드 모두 노출.
+        for category_key in (
+            "new",
+            "content_changed",
+            "transitioned_to_접수예정",
+            "transitioned_to_접수중",
+            "transitioned_to_마감",
+        ):
+            assert f'data-section-a-card="{category_key}"' in body
+        # expand 행이 표준 <a href> 로 렌더 — 상세 페이지 링크.
+        assert f'href="/announcements/{announcement_id}"' in body
+        # 카드 라벨도 보여 줘야 한다.
+        assert "신규" in body
+        assert "내용 변경" in body

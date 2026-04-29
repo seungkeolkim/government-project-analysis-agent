@@ -117,16 +117,103 @@
     {% endif %}
 
     {# ─────────────────────────────────────────────────────────
-       3. A 섹션 — 공고의 변화 (diff 누적). 후속 subtask 00042-3.
+       3. A 섹션 — 공고의 변화 (diff 누적). task 00042-3.
+       카드: 5종 카테고리 (신규 / 내용 변경 / 전이 → 접수예정 / 접수중 / 마감).
+       expand: 카드 클릭 시 아래로 펼쳐지는 행 리스트 (CSS transition).
+       fallback: 비교일 가용 안 됨 / 비교일 이전 snapshot 전무 안내문.
        ───────────────────────────────────────────────────────── #}
     <section class="dashboard-section dashboard-section--a"
              aria-label="공고의 변화 (diff 누적)">
         <h3 class="dashboard-section__title">A. 공고의 변화</h3>
+
         {% if section_a %}
-            {# 00042-3 가 채움. #}
+            {# fallback 안내문 — applied 또는 is_no_data 일 때 노란/회색 박스 #}
+            {% if section_a.fallback.is_no_data %}
+                <p class="dashboard-section__notice dashboard-section__notice--no-data"
+                   data-section-a-no-data>
+                    데이터 없음
+                </p>
+            {% elif section_a.fallback.applied %}
+                <p class="dashboard-section__notice dashboard-section__notice--fallback"
+                   data-section-a-fallback>
+                    {{ section_a.fallback.message }}
+                </p>
+            {% endif %}
+
+            {# 5종 카테고리 카드 — 정렬 순서는 빌더가 보장.
+               각 카드는 <details> 로 expand 를 구현해 키보드/접근성 친화적이며
+               JS 의존이 최소화된다 (사용자 원문 'CSS transition' 의 가벼운 형태). #}
+            <div class="dashboard-cards">
+                {% for card in section_a.cards %}
+                    <details class="dashboard-card"
+                             data-section-a-card="{{ card.category_key }}">
+                        <summary class="dashboard-card__summary">
+                            <span class="dashboard-card__label">{{ card.category_label }}</span>
+                            <span class="dashboard-card__counts">
+                                <strong class="dashboard-card__base-count">기준일 {{ card.base_count }}건</strong>
+                                {% if card.compare_count is not none %}
+                                    {% if card.delta_direction == 'up' %}
+                                        <span class="dashboard-card__delta dashboard-card__delta--up"
+                                              aria-label="증가 {{ card.delta }}">↑ {{ card.delta }}</span>
+                                    {% elif card.delta_direction == 'down' %}
+                                        <span class="dashboard-card__delta dashboard-card__delta--down"
+                                              aria-label="감소 {{ -card.delta }}">↓ {{ -card.delta }}</span>
+                                    {% else %}
+                                        <span class="dashboard-card__delta dashboard-card__delta--flat"
+                                              aria-label="변동 없음">변동 없음</span>
+                                    {% endif %}
+                                    <span class="dashboard-card__compare">
+                                        (비교일 {{ card.compare_count }}건 대비)
+                                    </span>
+                                {% else %}
+                                    <span class="dashboard-card__delta dashboard-card__delta--missing">
+                                        (비교일 — )
+                                    </span>
+                                {% endif %}
+                            </span>
+                        </summary>
+                        <div class="dashboard-card__expand">
+                            {% if card.items %}
+                                <ul class="dashboard-card__expand-list">
+                                    {% for item in card.items %}
+                                        <li class="dashboard-card__expand-row">
+                                            {# 행 전체가 클릭 영역 (<a href>). 가운데 클릭 시 새 창 표준 동작. #}
+                                            <a class="dashboard-card__expand-link"
+                                               href="/announcements/{{ item.announcement_id }}">
+                                                <span class="dashboard-source-badge">{{ item.source_type }}</span>
+                                                <span class="dashboard-status-badge">{{ item.status_label }}</span>
+                                                <span class="dashboard-card__expand-title">{{ item.title }}</span>
+                                                {% if item.transition_from %}
+                                                    <span class="dashboard-card__transition-from">
+                                                        ({{ item.transition_from }}에서)
+                                                    </span>
+                                                {% endif %}
+                                                {% for badge_text in item.duplicate_badges %}
+                                                    <span class="dashboard-card__duplicate-badge">{{ badge_text }}</span>
+                                                {% endfor %}
+                                                {% if item.deadline_at %}
+                                                    <span class="dashboard-card__deadline">
+                                                        마감 {{ item.deadline_at | kst_date }}
+                                                    </span>
+                                                {% else %}
+                                                    <span class="dashboard-card__deadline dashboard-card__deadline--unknown">
+                                                        마감 미정
+                                                    </span>
+                                                {% endif %}
+                                            </a>
+                                        </li>
+                                    {% endfor %}
+                                </ul>
+                            {% else %}
+                                <p class="dashboard-card__expand-empty">표시할 공고가 없습니다.</p>
+                            {% endif %}
+                        </div>
+                    </details>
+                {% endfor %}
+            </div>
         {% else %}
             <p class="dashboard-section__placeholder">
-                A 섹션은 후속 subtask 에서 채워집니다 (5종 카테고리 카드 + expand).
+                A 섹션 데이터가 없습니다.
             </p>
         {% endif %}
     </section>

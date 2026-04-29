@@ -47,6 +47,7 @@ from app.web.dashboard_compare import (
     CompareMode,
     resolve_compare_range,
 )
+from app.web.dashboard_section_a import build_section_a
 from app.web.template_filters import register_kst_filters
 
 # ──────────────────────────────────────────────────────────────
@@ -290,6 +291,15 @@ def dashboard_page(
     available_snapshot_dates = list_available_snapshot_dates(session)
     available_snapshot_date_iso = [d.isoformat() for d in available_snapshot_dates]
 
+    # ── (5b) A 섹션 — (from, to] 누적 머지 + 5종 카드 + expand + fallback ──
+    # task 00042-3. compare_range.from_date 가 비교일 (사용자가 캘린더에서 고른
+    # 날짜 또는 드롭다운 산출 결과) — fallback 정책은 build_section_a 가 처리.
+    section_a_data = build_section_a(
+        session,
+        base_date=base_date,
+        requested_compare_date=compare_range.from_date,
+    )
+
     # ── (6) 디버그 로그 ──────────────────────────────────────────────────
     # 사용자 원문 검증 16 ('비로그인 시 위젯 쿼리 자체 skip') 회귀를 후속
     # subtask 에서 가시화하려고 본 라우트 입구에 한 줄 DEBUG 로그를 둔다.
@@ -327,7 +337,8 @@ def dashboard_page(
             # 후속 subtask 들이 채울 자리 — placeholder None 으로 미리 둔다.
             # 템플릿에서는 {% if widgets %} 같은 truthy 체크로 통째 skip.
             "widgets": None,             # 00042-5 가 채움
-            "section_a": None,           # 00042-3 가 채움
+            # task 00042-3 — A 섹션 컨텍스트.
+            "section_a": section_a_data,
             "section_b": None,           # 00042-4 가 채움
             "trend_chart": None,         # 00042-6 가 채움
         },
