@@ -2813,3 +2813,30 @@ button.canonical-count-badge.siblings-toggle--open {
         height: 220px;
     }
 }
+
+/* ──────────────────────────────────────────────────────────────
+ * task 00047 — 즐겨찾기 좌 사이드바 폴더명 옆 직속 공고 수 표시.
+ * count span 은 .fav-sidebar-item__link (a 태그) 내부에 위치해
+ * 폴더명 바로 옆에 inline 으로 따라붙는다. 색·크기는 부드럽게 낮춰
+ * 메인 텍스트(폴더명) 의 시인성을 해치지 않도록 한다.
+ * ────────────────────────────────────────────────────────────── */
+
+.fav-sidebar-item__count {
+    margin-left: 4px;
+    font-size: 12px;
+    font-weight: 400;
+    color: #6b7280;
+}
+
+/* 자식 폴더는 link 가 13px 보다 작은 컨텍스트라 count 도 미세하게 더 작게. */
+.fav-sidebar-item--child .fav-sidebar-item__count {
+    font-size: 11px;
+}
+
+/* 활성 폴더(현재 선택)에서는 link 가 진한 파랑(font-weight:600)이 되므로,
+   count 는 그 안에서도 보조 정보로 보이도록 색만 동일 톤으로 유지한다. */
+.fav-sidebar-item--active > .fav-sidebar-item__row > .fav-sidebar-item__link
+    > .fav-sidebar-item__count {
+    color: #6b7280;
+    font-weight: 400;
+}

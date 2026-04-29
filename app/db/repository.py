@@ -2639,10 +2639,50 @@ __all__ = [
     "get_favorite_entry_map",
     "get_current_sibling_announcement_ids",
     "count_folder_delete_cascade",
+    "count_favorite_entries_by_folder_for_user",
     "get_folder_tree_for_user",
     "list_favorites_with_announcements",
     "get_siblings_by_canonical_id_map",
 ]
+
+
+def count_favorite_entries_by_folder_for_user(
+    session: Session,
+    *,
+    user_id: int,
+) -> dict[int, int]:
+    """사용자의 모든 폴더별 직속 FavoriteEntry 수를 1회 쿼리로 집계해 반환한다.
+
+    task 00047 — 즐겨찾기 좌 사이드바의 \"폴더명 (N)\" 표기를 위한 N+1 방지 헬퍼.
+    PROJECT_NOTES.md '컨벤션 — N+1 제거 패턴' 의 ``get_X_map(ids)`` 스타일을 따르되,
+    단일 user_id 입력이라 IN 절은 불필요하다. JOIN(FavoriteEntry → FavoriteFolder)
+    + WHERE user_id + GROUP BY folder_id 단일 쿼리로 모든 폴더의 카운트를 집계한다.
+
+    \"직속\" 의 의미는 자기 폴더에 직접 등록된 FavoriteEntry 만 — 자식 서브폴더의
+    합산을 포함하지 않는다(사용자 원문 예시의 루트=0, 자식 합=4 비일치 케이스를
+    고려한 plan_position.strategy_note 결정).
+
+    보안 경계: WHERE 는 FavoriteFolder.user_id 로 걸려 다른 user 의 폴더는 절대
+    포함되지 않는다.
+
+    Args:
+        session: 호출자 세션.
+        user_id: 폴더 소유자 사용자 PK.
+
+    Returns:
+        ``{folder_id: entry_count}`` — entry 수 0인 폴더는 키가 존재하지 않는다.
+        호출부는 ``.get(folder_id, 0)`` 으로 안전하게 조회한다.
+    """
+    rows = session.execute(
+        select(
+            FavoriteEntry.folder_id,
+            func.count(FavoriteEntry.id),
+        )
+        .join(FavoriteFolder, FavoriteEntry.folder_id == FavoriteFolder.id)
+        .where(FavoriteFolder.user_id == user_id)
+        .group_by(FavoriteEntry.folder_id)
+    ).all()
+    return {folder_id: count for folder_id, count in rows}
 
 
 def get_folder_tree_for_user(
@@ -2655,12 +2695,17 @@ def get_folder_tree_for_user(
     루트(depth=0) → 자식(depth=1) 순으로 정렬된다.
     favorites.html 좌 사이드바 SSR 에 사용한다.
 
+    각 노드 dict 에는 task 00047 부터 ``entry_count`` 키가 포함된다 — 자기 폴더에
+    직접 등록된 FavoriteEntry 수(자식 합산 제외). 별도 쿼리는 한 번만 발생하며
+    ``count_favorite_entries_by_folder_for_user`` 가 GROUP BY 단일 쿼리로 처리한다.
+
     Args:
         session: 호출자 세션.
         user_id: 폴더 소유자 사용자 PK.
 
     Returns:
-        [{"id": int, "name": str, "depth": int, "children": [...]}, ...]
+        ``[{"id": int, "name": str, "depth": int, "entry_count": int,
+            "children": [...]}, ...]``
     """
     rows = session.execute(
         select(FavoriteFolder)
@@ -2668,8 +2713,19 @@ def get_folder_tree_for_user(
         .order_by(FavoriteFolder.depth, FavoriteFolder.created_at)
     ).scalars().all()
 
+    # 폴더별 직속 entry 수를 한 번에 가져와 노드 dict 에 매핑한다 (N+1 방지).
+    entry_count_map = count_favorite_entries_by_folder_for_user(
+        session, user_id=user_id
+    )
+
     nodes: dict[int, dict] = {
-        f.id: {"id": f.id, "name": f.name, "depth": f.depth, "children": []}
+        f.id: {
+            "id": f.id,
+            "name": f.name,
+            "depth": f.depth,
+            "entry_count": entry_count_map.get(f.id, 0),
+            "children": [],
+        }
         for f in rows
     }
     roots: list[dict] = []

@@ -58,8 +58,14 @@
                     {% else %}
                     <span class="fav-sidebar-item__caret-spacer" aria-hidden="true"></span>
                     {% endif %}
+                    {# task 00047 — 폴더명 우측에 \"직속 공고 수 (N)\" 을 폴더명 바로
+                       옆에 표시. 자기 폴더에 직접 등록된 FavoriteEntry 수만(자식 합산
+                       X). 기존 .fav-sidebar-item__link 의 flex-grow:1 + ellipsis 동작에
+                       자연스럽게 얹기 위해 count span 을 link 내부에 배치한다. #}
                     <a class="fav-sidebar-item__link" href="/favorites?folder_id={{ folder.id }}">
                         {{ folder.name }}
+                        <span class="fav-sidebar-item__count"
+                              title="이 폴더의 즐겨찾기 공고 수">({{ folder.entry_count }})</span>
                     </a>
                     <span class="fav-sidebar-item__actions">
                         <button type="button"
@@ -83,8 +89,12 @@
                         data-folder-name="{{ child.name | e }}">
                         <span class="fav-sidebar-item__row">
                             <span class="fav-sidebar-item__caret-spacer" aria-hidden="true"></span>
+                            {# task 00047 — 자식 폴더도 동일한 \"(N)\" 표기. 루트와
+                               동일하게 link 내부에 count span 을 둔다. #}
                             <a class="fav-sidebar-item__link" href="/favorites?folder_id={{ child.id }}">
                                 {{ child.name }}
+                                <span class="fav-sidebar-item__count"
+                                      title="이 폴더의 즐겨찾기 공고 수">({{ child.entry_count }})</span>
                             </a>
                             <span class="fav-sidebar-item__actions">
                                 <button type="button"
