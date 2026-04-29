@@ -32,6 +32,10 @@
                 <p class="site-subtitle">수집된 사업공고를 소스별로 조회한다.</p>
             </div>
             <nav class="site-nav" aria-label="사용자 메뉴">
+                {# Phase 5b (task 00042-2) — 대시보드 탭. 비로그인 사용자도
+                   접근 가능하므로 로그인 분기 바깥에 둔다 (사용자 원문
+                   "비로그인 가능, current_user_optional Depends"). #}
+                <a class="site-nav__link site-nav__link--dashboard" href="/dashboard">대시보드</a>
                 {% if current_user %}
                     {# 로그인 상태: (관리자면 '관리자' 링크) + 사용자명 + 로그아웃 버튼 #}
                     {% if current_user.is_admin %}

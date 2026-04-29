@@ -1,0 +1,368 @@
+{#
+  Phase 5b 대시보드 페이지 (task 00042-2 — 골격).
+
+  본 템플릿은 사용자 원문의 5 영역 페이지 구조를 미리 잡아 두되, 본 subtask
+  (00042-2) 는 컨트롤 영역(1)만 실제 렌더한다. 나머지 영역(2 위젯 / 3 A 섹션 /
+  4 B 섹션 / 5 추이 차트) 은 후속 subtask (00042-3 ~ 00042-6) 에서 같은 컨텍스트
+  변수를 받아 placeholder 자리를 본문으로 교체한다.
+
+  컨텍스트 (routes/dashboard.py 의 dashboard_page 가 주입):
+    - base_date / base_date_iso             : 기준일 (date / 'YYYY-MM-DD')
+    - compare_mode / compare_mode_values    : 선택된 모드 / 허용 5종 tuple
+    - compare_date / compare_date_iso       : 비교일 (custom 모드일 때만)
+    - from_date / from_date_iso             : (from, to] 의 from
+    - to_date / to_date_iso                 : (from, to] 의 to (= base_date)
+    - available_snapshot_date_iso           : 가용 snapshot_date ISO list (캘린더 활성)
+    - current_user                          : 로그인된 User 또는 None
+    - widgets / section_a / section_b / trend_chart : 후속 subtask placeholder
+#}
+{% extends "base.html" %}
+
+{% block page_title %}대시보드 · 사업공고 열람{% endblock %}
+
+{% block content %}
+<section class="dashboard-page">
+    <h2 class="dashboard-page__title">대시보드</h2>
+
+    {# ─────────────────────────────────────────────────────────
+       1. 컨트롤 영역 — 기준일 캘린더 + 비교 대상 드롭다운 + 비교일 캘린더(custom)
+       사용자 원문 페이지 구조 1번. form GET 으로 새로고침 정책 (사용자 원문
+       §12) 을 단순 구현한다 — 컨트롤 변경 시 즉시 페이지 reload.
+       ───────────────────────────────────────────────────────── #}
+    <form class="dashboard-controls" method="get" action="/dashboard"
+          data-dashboard-controls
+          data-base-date="{{ base_date_iso }}"
+          data-compare-date="{{ compare_date_iso or '' }}">
+
+        <div class="dashboard-controls__row">
+            <fieldset class="dashboard-controls__field">
+                <legend class="dashboard-controls__label">기준일</legend>
+                <input type="hidden" name="base_date" value="{{ base_date_iso }}"
+                       data-dashboard-base-date-input>
+                <div class="dashboard-calendar"
+                     data-dashboard-calendar="base"
+                     data-selected-date="{{ base_date_iso }}"
+                     aria-label="기준일 캘린더">
+                    {# 자체 구현 캘린더 (dashboard_calendar.js) 가 이 div 안에
+                       월별 그리드를 렌더한다. 가용 날짜는
+                       data-available-dates 속성에서 set 으로 변환된다. #}
+                </div>
+            </fieldset>
+
+            <fieldset class="dashboard-controls__field">
+                <legend class="dashboard-controls__label">비교 대상</legend>
+                <select name="compare_mode" class="dashboard-controls__select"
+                        data-dashboard-compare-mode>
+                    <option value="prev_day"   {% if compare_mode == 'prev_day'   %}selected{% endif %}>전날</option>
+                    <option value="prev_week"  {% if compare_mode == 'prev_week'  %}selected{% endif %}>전주</option>
+                    <option value="prev_month" {% if compare_mode == 'prev_month' %}selected{% endif %}>전월</option>
+                    <option value="prev_year"  {% if compare_mode == 'prev_year'  %}selected{% endif %}>전년</option>
+                    <option value="custom"     {% if compare_mode == 'custom'     %}selected{% endif %}>직접 선택</option>
+                </select>
+            </fieldset>
+
+            {# 비교일 캘린더 — compare_mode == 'custom' 일 때만 활성. 그 외 모드
+               에서는 hidden input 의 값을 비워 두어 라우트가 무시하도록 한다. #}
+            <fieldset class="dashboard-controls__field
+                            {% if compare_mode != 'custom' %}is-hidden{% endif %}"
+                      data-dashboard-compare-fieldset>
+                <legend class="dashboard-controls__label">비교일</legend>
+                <input type="hidden" name="compare_date" value="{{ compare_date_iso or '' }}"
+                       data-dashboard-compare-date-input>
+                <div class="dashboard-calendar"
+                     data-dashboard-calendar="compare"
+                     data-selected-date="{{ compare_date_iso or '' }}"
+                     aria-label="비교일 캘린더">
+                </div>
+            </fieldset>
+        </div>
+
+        <noscript>
+            {# JS 비활성 환경 대비 — 직접 입력 필드와 적용 버튼만 노출. #}
+            <p class="dashboard-controls__noscript-hint">
+                JavaScript 가 비활성화된 환경에서는 캘린더 대신 아래 입력 필드를
+                사용하세요.
+            </p>
+            <label>기준일 <input type="date" name="base_date" value="{{ base_date_iso }}"></label>
+            <label>비교일 <input type="date" name="compare_date" value="{{ compare_date_iso or '' }}"></label>
+            <button type="submit">적용</button>
+        </noscript>
+
+        {# 컨트롤 변경 시 form 을 자동 submit 하기 위해 JS 가 사용 — 본 subtask
+           의 골격에서는 submit 버튼이 동작하도록 두고, JS 가 캘린더 클릭 시
+           submit() 을 직접 호출한다. #}
+        <button type="submit" class="dashboard-controls__submit"
+                data-dashboard-submit>적용</button>
+
+        <p class="dashboard-controls__summary" aria-live="polite">
+            <span class="dashboard-controls__summary-label">현재 비교 구간:</span>
+            <strong>{{ from_date_iso }}</strong>
+            <span aria-hidden="true">→</span>
+            <strong>{{ to_date_iso }}</strong>
+            <span class="dashboard-controls__summary-mode">({{ compare_mode }})</span>
+        </p>
+    </form>
+
+    {# ─────────────────────────────────────────────────────────
+       2. 사용자 라벨링 위젯 — 로그인 시만 표시 (task 00042-5).
+       라우트에서 current_user is None 이면 widgets=None 으로 두므로
+       {% if widgets %} 한 번으로 영역 자체 skip — DOM 에도 들어가지 않음.
+       ───────────────────────────────────────────────────────── #}
+    {% if widgets %}
+        <section class="dashboard-widgets"
+                 data-dashboard-widgets
+                 aria-label="사용자 라벨링 위젯">
+            <div class="dashboard-widgets__row" data-widgets-row="totals">
+                <div class="dashboard-widget" data-widget="unread-total">
+                    <span class="dashboard-widget__label">{{ widgets.unread_total_label }}</span>
+                    <strong class="dashboard-widget__count">{{ widgets.unread_total_count }}건</strong>
+                </div>
+                <div class="dashboard-widget" data-widget="unjudged-total">
+                    <span class="dashboard-widget__label">{{ widgets.unjudged_total_label }}</span>
+                    <strong class="dashboard-widget__count">{{ widgets.unjudged_total_count }}건</strong>
+                </div>
+            </div>
+            <div class="dashboard-widgets__row" data-widgets-row="in-range">
+                <div class="dashboard-widget" data-widget="unread-in-range">
+                    <span class="dashboard-widget__label">{{ widgets.unread_in_range_label }}</span>
+                    <strong class="dashboard-widget__count">{{ widgets.unread_in_range_count }}건</strong>
+                </div>
+                <div class="dashboard-widget" data-widget="unjudged-in-range">
+                    <span class="dashboard-widget__label">{{ widgets.unjudged_in_range_label }}</span>
+                    <strong class="dashboard-widget__count">{{ widgets.unjudged_in_range_count }}건</strong>
+                </div>
+            </div>
+        </section>
+    {% endif %}
+
+    {# ─────────────────────────────────────────────────────────
+       3. A 섹션 — 공고의 변화 (diff 누적). task 00042-3.
+       카드: 5종 카테고리 (신규 / 내용 변경 / 전이 → 접수예정 / 접수중 / 마감).
+       expand: 카드 클릭 시 아래로 펼쳐지는 행 리스트 (CSS transition).
+       fallback: 비교일 가용 안 됨 / 비교일 이전 snapshot 전무 안내문.
+       ───────────────────────────────────────────────────────── #}
+    <section class="dashboard-section dashboard-section--a"
+             aria-label="공고의 변화 (diff 누적)">
+        <h3 class="dashboard-section__title">A. 공고의 변화</h3>
+
+        {% if section_a %}
+            {# fallback 안내문 — applied 또는 is_no_data 일 때 노란/회색 박스 #}
+            {% if section_a.fallback.is_no_data %}
+                <p class="dashboard-section__notice dashboard-section__notice--no-data"
+                   data-section-a-no-data>
+                    데이터 없음
+                </p>
+            {% elif section_a.fallback.applied %}
+                <p class="dashboard-section__notice dashboard-section__notice--fallback"
+                   data-section-a-fallback>
+                    {{ section_a.fallback.message }}
+                </p>
+            {% endif %}
+
+            {# 5종 카테고리 카드 — 정렬 순서는 빌더가 보장.
+               각 카드는 <details> 로 expand 를 구현해 키보드/접근성 친화적이며
+               JS 의존이 최소화된다 (사용자 원문 'CSS transition' 의 가벼운 형태). #}
+            <div class="dashboard-cards">
+                {% for card in section_a.cards %}
+                    <details class="dashboard-card"
+                             data-section-a-card="{{ card.category_key }}">
+                        <summary class="dashboard-card__summary">
+                            <span class="dashboard-card__label">{{ card.category_label }}</span>
+                            <span class="dashboard-card__counts">
+                                <strong class="dashboard-card__base-count">기준일 {{ card.base_count }}건</strong>
+                                {% if card.compare_count is not none %}
+                                    {% if card.delta_direction == 'up' %}
+                                        <span class="dashboard-card__delta dashboard-card__delta--up"
+                                              aria-label="증가 {{ card.delta }}">↑ {{ card.delta }}</span>
+                                    {% elif card.delta_direction == 'down' %}
+                                        <span class="dashboard-card__delta dashboard-card__delta--down"
+                                              aria-label="감소 {{ -card.delta }}">↓ {{ -card.delta }}</span>
+                                    {% else %}
+                                        <span class="dashboard-card__delta dashboard-card__delta--flat"
+                                              aria-label="변동 없음">변동 없음</span>
+                                    {% endif %}
+                                    <span class="dashboard-card__compare">
+                                        (비교일 {{ card.compare_count }}건 대비)
+                                    </span>
+                                {% else %}
+                                    <span class="dashboard-card__delta dashboard-card__delta--missing">
+                                        (비교일 — )
+                                    </span>
+                                {% endif %}
+                            </span>
+                        </summary>
+                        <div class="dashboard-card__expand">
+                            {% if card.items %}
+                                <ul class="dashboard-card__expand-list">
+                                    {% for item in card.items %}
+                                        <li class="dashboard-card__expand-row">
+                                            {# 행 전체가 클릭 영역 (<a href>). 가운데 클릭 시 새 창 표준 동작. #}
+                                            <a class="dashboard-card__expand-link"
+                                               href="/announcements/{{ item.announcement_id }}">
+                                                <span class="dashboard-source-badge">{{ item.source_type }}</span>
+                                                <span class="dashboard-status-badge">{{ item.status_label }}</span>
+                                                <span class="dashboard-card__expand-title">{{ item.title }}</span>
+                                                {% if item.transition_from %}
+                                                    <span class="dashboard-card__transition-from">
+                                                        ({{ item.transition_from }}에서)
+                                                    </span>
+                                                {% endif %}
+                                                {% for badge_text in item.duplicate_badges %}
+                                                    <span class="dashboard-card__duplicate-badge">{{ badge_text }}</span>
+                                                {% endfor %}
+                                                {% if item.deadline_at %}
+                                                    <span class="dashboard-card__deadline">
+                                                        마감 {{ item.deadline_at | kst_date }}
+                                                    </span>
+                                                {% else %}
+                                                    <span class="dashboard-card__deadline dashboard-card__deadline--unknown">
+                                                        마감 미정
+                                                    </span>
+                                                {% endif %}
+                                            </a>
+                                        </li>
+                                    {% endfor %}
+                                </ul>
+                            {% else %}
+                                <p class="dashboard-card__expand-empty">표시할 공고가 없습니다.</p>
+                            {% endif %}
+                        </div>
+                    </details>
+                {% endfor %}
+            </div>
+        {% else %}
+            <p class="dashboard-section__placeholder">
+                A 섹션 데이터가 없습니다.
+            </p>
+        {% endif %}
+    </section>
+
+    {# ─────────────────────────────────────────────────────────
+       4. B 섹션 — 조만간 변화 예정 (to 기준 1개월 이내). task 00042-4.
+       두 그룹: '조만간 접수될 공고' (status=접수예정 + received_at) /
+                '조만간 마감될 공고' (status=접수중 + deadline_at).
+       to 가 과거이면 회색 안내문 + 정상 표시 (DB select 는 is_current=True).
+       ───────────────────────────────────────────────────────── #}
+    <section class="dashboard-section dashboard-section--b"
+             aria-label="조만간 변화 예정 ({{ section_b.days_window }}일 이내)">
+        <h3 class="dashboard-section__title">
+            B. 조만간 변화 예정 (향후 {{ section_b.days_window }}일)
+        </h3>
+
+        {% if section_b.is_to_in_past %}
+            <p class="dashboard-section__notice dashboard-section__notice--past-base"
+               data-section-b-past-notice>
+                {{ section_b.past_notice_message }}
+            </p>
+        {% endif %}
+
+        <div class="dashboard-section-b__columns">
+            {# 4-1. 조만간 접수될 공고 (status=접수예정, 임박순) #}
+            <div class="dashboard-section-b__column"
+                 data-section-b-group="soon_to_open"
+                 aria-label="조만간 접수될 공고">
+                <h4 class="dashboard-section-b__group-title">조만간 접수될 공고</h4>
+                {% if section_b.soon_to_open %}
+                    <ul class="dashboard-section-b__list">
+                        {% for row in section_b.soon_to_open %}
+                            <li class="dashboard-section-b__row">
+                                <a class="dashboard-section-b__link"
+                                   href="/announcements/{{ row.announcement_id }}">
+                                    <span class="dashboard-source-badge">{{ row.source_type }}</span>
+                                    <span class="dashboard-section-b__title">{{ row.title }}</span>
+                                    {% if row.received_at %}
+                                        <span class="dashboard-section-b__date">
+                                            접수 {{ row.received_at | kst_date }}
+                                        </span>
+                                    {% endif %}
+                                    {% if row.deadline_at %}
+                                        <span class="dashboard-section-b__date dashboard-section-b__date--deadline">
+                                            마감 {{ row.deadline_at | kst_date }}
+                                        </span>
+                                    {% endif %}
+                                </a>
+                            </li>
+                        {% endfor %}
+                    </ul>
+                {% else %}
+                    <p class="dashboard-section-b__empty">
+                        예정된 접수 공고가 없습니다.
+                    </p>
+                {% endif %}
+            </div>
+
+            {# 4-2. 조만간 마감될 공고 (status=접수중, 임박순) #}
+            <div class="dashboard-section-b__column"
+                 data-section-b-group="soon_to_close"
+                 aria-label="조만간 마감될 공고">
+                <h4 class="dashboard-section-b__group-title">조만간 마감될 공고</h4>
+                {% if section_b.soon_to_close %}
+                    <ul class="dashboard-section-b__list">
+                        {% for row in section_b.soon_to_close %}
+                            <li class="dashboard-section-b__row">
+                                <a class="dashboard-section-b__link"
+                                   href="/announcements/{{ row.announcement_id }}">
+                                    <span class="dashboard-source-badge">{{ row.source_type }}</span>
+                                    <span class="dashboard-section-b__title">{{ row.title }}</span>
+                                    {% if row.deadline_at %}
+                                        <span class="dashboard-section-b__date dashboard-section-b__date--deadline">
+                                            마감 {{ row.deadline_at | kst_date }}
+                                        </span>
+                                    {% endif %}
+                                </a>
+                            </li>
+                        {% endfor %}
+                    </ul>
+                {% else %}
+                    <p class="dashboard-section-b__empty">
+                        임박한 마감 공고가 없습니다.
+                    </p>
+                {% endif %}
+            </div>
+        </div>
+    </section>
+
+    {# ─────────────────────────────────────────────────────────
+       5. 추이 차트 — 기준일 ±15일 일별 카운트 (task 00042-6).
+       Chart.js 4.x 로컬 vendor 번들 + 서버 사전 계산 후 JSON 임베드.
+       ───────────────────────────────────────────────────────── #}
+    <section class="dashboard-section dashboard-section--trend"
+             data-dashboard-trend-chart
+             aria-label="추이 차트">
+        <h3 class="dashboard-section__title">
+            추이 (기준일 ±{{ trend_chart.half_window }}일,
+            <span class="dashboard-section__title-meta">{{ trend_chart.from_date.isoformat() }}
+                ~ {{ trend_chart.to_date.isoformat() }}</span>)
+        </h3>
+        <div class="dashboard-trend-chart__canvas-wrapper">
+            {# Chart.js 가 그릴 캔버스. 사이즈는 CSS / wrapper 가 정한다. #}
+            <canvas id="dashboardTrendChart" role="img"
+                    aria-label="기준일 ±{{ trend_chart.half_window }}일 일별 신규/내용 변경/전이 카운트"></canvas>
+        </div>
+        <noscript>
+            <p class="dashboard-section__placeholder">
+                JavaScript 가 비활성화된 환경에서는 추이 차트가 표시되지 않습니다.
+            </p>
+        </noscript>
+
+        {# 서버 사전 계산된 JSON 데이터를 임베드 (별도 API fetch 없음 — 사용자 원문 §12). #}
+        <script id="dashboardTrendChartData" type="application/json">
+            {{ trend_chart_json | tojson | safe }}
+        </script>
+    </section>
+</section>
+
+{# 캘린더 컴포넌트가 사용할 가용 날짜 set 을 페이지에 임베드한다. JS 는 이
+   <script type="application/json"> 의 textContent 를 JSON.parse 로 읽어 set 을
+   만든다. #}
+<script id="dashboardSnapshotDates" type="application/json">
+    {{ available_snapshot_date_iso | tojson | safe }}
+</script>
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="/static/js/dashboard_calendar.js"></script>
+{# Chart.js 4.x 로컬 vendor 번들 (외부 CDN 의존 없음 컨벤션). 라이선스는 NOTICE 참조. #}
+<script src="/static/vendor/chart.min.js"></script>
+<script src="/static/js/dashboard_trend_chart.js"></script>
+{% endblock %}

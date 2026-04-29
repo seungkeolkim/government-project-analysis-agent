@@ -2120,3 +2120,673 @@ button.canonical-count-badge.siblings-toggle--open {
     border-color: #93c5fd;
     color: #1d4ed8;
 }
+
+/* ──────────────────────────────────────────────────────────────
+ * Phase 5b 대시보드 페이지 스타일 (task 00042-2 — 골격).
+ * 자체 구현 캘린더 (dashboard_calendar.js) 와 컨트롤 영역 / 섹션 placeholder
+ * 만 다룬다. A 섹션 카드 / B 섹션 / 추이 차트 스타일은 후속 subtask 에서 추가.
+ * ────────────────────────────────────────────────────────────── */
+
+.dashboard-page {
+    padding: 16px 0 32px;
+}
+
+.dashboard-page__title {
+    margin: 0 0 16px;
+    font-size: 22px;
+    font-weight: 700;
+    color: #111827;
+}
+
+/* ── 컨트롤 영역 ───────────────────────────────────────────── */
+
+.dashboard-controls {
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 16px;
+    margin-bottom: 20px;
+}
+
+.dashboard-controls__row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    align-items: flex-start;
+}
+
+.dashboard-controls__field {
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    padding: 10px 12px 12px;
+    margin: 0;
+    min-width: 220px;
+}
+
+.dashboard-controls__field.is-hidden {
+    display: none;
+}
+
+.dashboard-controls__label {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    color: #6b7280;
+    padding: 0 4px;
+    margin-bottom: 4px;
+}
+
+.dashboard-controls__select {
+    font-size: 14px;
+    padding: 6px 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    background: #ffffff;
+    min-width: 160px;
+}
+
+.dashboard-controls__submit {
+    margin-top: 12px;
+    padding: 6px 14px;
+    font-size: 13px;
+    background: #1d4ed8;
+    color: #ffffff;
+    border: 1px solid #1d4ed8;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.dashboard-controls__submit:hover {
+    background: #1e40af;
+}
+
+.dashboard-controls__noscript-hint {
+    color: #b45309;
+    font-size: 13px;
+    margin: 8px 0;
+}
+
+.dashboard-controls__summary {
+    margin: 12px 0 0;
+    font-size: 13px;
+    color: #374151;
+}
+
+.dashboard-controls__summary-label {
+    color: #6b7280;
+    margin-right: 4px;
+}
+
+.dashboard-controls__summary-mode {
+    color: #6b7280;
+    margin-left: 6px;
+    font-size: 12px;
+}
+
+/* ── 캘린더 그리드 (자체 구현) ───────────────────────────── */
+
+.dashboard-calendar {
+    width: 220px;
+    user-select: none;
+}
+
+.dashboard-calendar__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 0;
+}
+
+.dashboard-calendar__nav {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    padding: 2px 8px;
+    cursor: pointer;
+    font-size: 14px;
+    color: #374151;
+}
+
+.dashboard-calendar__nav:hover {
+    background: #f3f4f6;
+    border-color: #d1d5db;
+}
+
+.dashboard-calendar__month {
+    font-size: 14px;
+    font-weight: 600;
+    color: #111827;
+}
+
+.dashboard-calendar__weekday-row {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    margin-top: 4px;
+    border-bottom: 1px solid #f3f4f6;
+    padding-bottom: 2px;
+}
+
+.dashboard-calendar__weekday {
+    text-align: center;
+    font-size: 11px;
+    color: #6b7280;
+    font-weight: 600;
+}
+
+.dashboard-calendar__grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 2px;
+    margin-top: 4px;
+}
+
+.dashboard-calendar__day {
+    text-align: center;
+    padding: 4px 0;
+    border: 1px solid transparent;
+    border-radius: 50%;
+    background: transparent;
+    color: #6b7280;
+    font-size: 12px;
+    cursor: not-allowed;
+    aspect-ratio: 1 / 1;
+}
+
+.dashboard-calendar__day--blank {
+    visibility: hidden;
+}
+
+/* 가용 날짜 — 색 배경 + 동그라미 강조 (사용자 원문 §10.3 그대로). */
+.dashboard-calendar__day--available {
+    background: #dbeafe;
+    color: #1d4ed8;
+    border-color: #bfdbfe;
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.dashboard-calendar__day--available:hover {
+    background: #bfdbfe;
+    border-color: #1d4ed8;
+}
+
+/* 비가용 날짜 — 흐리게 + click disabled. */
+.dashboard-calendar__day--disabled {
+    color: #d1d5db;
+    background: transparent;
+    cursor: not-allowed;
+}
+
+/* 선택된 일자 — 진한 배경. 가용 + 선택 중복 적용 시 본 규칙이 우선. */
+.dashboard-calendar__day--selected {
+    background: #1d4ed8;
+    color: #ffffff;
+    border-color: #1d4ed8;
+}
+
+.dashboard-calendar__day--selected:hover {
+    background: #1e40af;
+    border-color: #1e40af;
+}
+
+/* ── 섹션 placeholder ─────────────────────────────────────── */
+
+.dashboard-section {
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 14px 16px 18px;
+    margin-bottom: 16px;
+}
+
+.dashboard-section__title {
+    margin: 0 0 8px;
+    font-size: 16px;
+    font-weight: 700;
+    color: #111827;
+}
+
+.dashboard-section__placeholder {
+    margin: 6px 0 0;
+    color: #9ca3af;
+    font-size: 13px;
+    font-style: italic;
+}
+
+/* ── 네비 탭 (대시보드) ──────────────────────────────────── */
+
+.site-nav__link--dashboard {
+    /* 다른 네비 링크와 동일한 톤 — 별도 색을 두지 않는다 (관리자 링크와는 달리
+       대시보드는 비로그인도 접근 가능한 일반 페이지이므로 강조하지 않는다). */
+}
+
+/* ──────────────────────────────────────────────────────────────
+ * Phase 5b 대시보드 A 섹션 — 5종 카테고리 카드 + expand 리스트 (task 00042-3).
+ * <details>/<summary> native expand 를 사용해 JS 의존을 최소화한다.
+ * ────────────────────────────────────────────────────────────── */
+
+/* fallback 안내문 */
+.dashboard-section__notice {
+    margin: 4px 0 12px;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.dashboard-section__notice--fallback {
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    color: #92400e;
+}
+
+.dashboard-section__notice--no-data {
+    background: #f3f4f6;
+    border: 1px solid #d1d5db;
+    color: #6b7280;
+    font-style: italic;
+}
+
+/* 카드 컨테이너 (5종을 세로 스택) */
+.dashboard-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.dashboard-card {
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    background: #fafbfc;
+    /* <details> 의 기본 marker 위치 / 색상 톤다운. */
+}
+
+.dashboard-card[open] {
+    background: #ffffff;
+    border-color: #cbd5e1;
+}
+
+.dashboard-card__summary {
+    cursor: pointer;
+    list-style: none;
+    padding: 10px 12px;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    user-select: none;
+}
+
+/* details/summary 기본 ▶ marker 제거 (Chrome / Firefox / Safari 공통 셀렉터) */
+.dashboard-card__summary::-webkit-details-marker {
+    display: none;
+}
+
+.dashboard-card__summary::marker {
+    content: "";
+}
+
+/* 자체 marker — open 시 ▼, 닫혔을 때 ▶ */
+.dashboard-card__summary::before {
+    content: "▶";
+    font-size: 10px;
+    color: #6b7280;
+    margin-right: 4px;
+    transition: transform 0.15s ease-out;
+}
+
+.dashboard-card[open] > .dashboard-card__summary::before {
+    transform: rotate(90deg);
+    display: inline-block;
+}
+
+.dashboard-card__label {
+    font-weight: 700;
+    color: #111827;
+    font-size: 14px;
+}
+
+.dashboard-card__counts {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 13px;
+    color: #374151;
+}
+
+.dashboard-card__base-count {
+    color: #111827;
+}
+
+.dashboard-card__delta {
+    font-weight: 600;
+    font-size: 12px;
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+
+.dashboard-card__delta--up {
+    background: #fee2e2;
+    color: #b91c1c;
+}
+
+.dashboard-card__delta--down {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.dashboard-card__delta--flat {
+    background: #f3f4f6;
+    color: #6b7280;
+}
+
+.dashboard-card__delta--missing {
+    color: #9ca3af;
+    font-style: italic;
+}
+
+.dashboard-card__compare {
+    color: #6b7280;
+}
+
+.dashboard-card__expand {
+    border-top: 1px solid #e5e7eb;
+    padding: 8px 12px 12px;
+    /* CSS transition 은 native <details> 에서 height 변환에 부드럽게 적용 안 되지만,
+       opacity 만 가볍게 fade-in 으로 둬서 깜빡임을 줄인다. */
+    animation: dashboardCardExpandFadeIn 0.12s ease-out;
+}
+
+@keyframes dashboardCardExpandFadeIn {
+    from { opacity: 0; transform: translateY(-2px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+.dashboard-card__expand-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    max-height: 360px;
+    overflow-y: auto;
+    /* 스크롤 영역 시각화 — 사용자 원문 \"전체 표시 + 스크롤\". */
+}
+
+.dashboard-card__expand-row {
+    border-bottom: 1px solid #f3f4f6;
+}
+
+.dashboard-card__expand-row:last-child {
+    border-bottom: none;
+}
+
+.dashboard-card__expand-link {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 4px;
+    color: inherit;
+    text-decoration: none;
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.dashboard-card__expand-link:hover {
+    background: #eff6ff;
+}
+
+.dashboard-card__expand-title {
+    flex: 1 1 220px;
+    min-width: 200px;
+    color: #111827;
+}
+
+.dashboard-card__expand-link:hover .dashboard-card__expand-title {
+    color: #1d4ed8;
+    text-decoration: underline;
+}
+
+.dashboard-card__transition-from {
+    color: #6b7280;
+    font-size: 12px;
+}
+
+.dashboard-card__duplicate-badge {
+    background: #f3e8ff;
+    color: #6b21a8;
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+
+.dashboard-card__deadline {
+    color: #6b7280;
+    font-size: 12px;
+    margin-left: auto;
+    white-space: nowrap;
+}
+
+.dashboard-card__deadline--unknown {
+    color: #9ca3af;
+    font-style: italic;
+}
+
+.dashboard-card__expand-empty {
+    margin: 4px 0 0;
+    padding: 6px 4px;
+    color: #9ca3af;
+    font-size: 13px;
+    font-style: italic;
+}
+
+/* 소스/상태 배지 — 기존 list 페이지 톤과 비슷하게 */
+.dashboard-source-badge {
+    display: inline-block;
+    background: #e5e7eb;
+    color: #1f2937;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+
+.dashboard-status-badge {
+    display: inline-block;
+    background: #dbeafe;
+    color: #1d4ed8;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+
+/* ──────────────────────────────────────────────────────────────
+ * Phase 5b 대시보드 B 섹션 — 조만간 변화 예정 (task 00042-4).
+ * 두 그룹(접수예정 / 마감예정) 을 가로 2열로 배치.
+ * ────────────────────────────────────────────────────────────── */
+
+.dashboard-section__notice--past-base {
+    background: #f3f4f6;
+    border: 1px solid #d1d5db;
+    color: #4b5563;
+}
+
+.dashboard-section-b__columns {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+
+@media (max-width: 720px) {
+    /* 좁은 화면에서는 세로로 스택. */
+    .dashboard-section-b__columns {
+        grid-template-columns: 1fr;
+    }
+}
+
+.dashboard-section-b__column {
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    background: #fafbfc;
+    padding: 10px 12px 12px;
+}
+
+.dashboard-section-b__group-title {
+    margin: 0 0 8px;
+    font-size: 14px;
+    font-weight: 700;
+    color: #111827;
+}
+
+.dashboard-section-b__list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    max-height: 360px;
+    overflow-y: auto;
+}
+
+.dashboard-section-b__row {
+    border-bottom: 1px solid #f3f4f6;
+}
+
+.dashboard-section-b__row:last-child {
+    border-bottom: none;
+}
+
+.dashboard-section-b__link {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 4px;
+    color: inherit;
+    text-decoration: none;
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.dashboard-section-b__link:hover {
+    background: #eff6ff;
+}
+
+.dashboard-section-b__title {
+    flex: 1 1 200px;
+    min-width: 180px;
+    color: #111827;
+}
+
+.dashboard-section-b__link:hover .dashboard-section-b__title {
+    color: #1d4ed8;
+    text-decoration: underline;
+}
+
+.dashboard-section-b__date {
+    color: #6b7280;
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.dashboard-section-b__date--deadline {
+    margin-left: auto;
+    color: #b91c1c;
+    font-weight: 600;
+}
+
+.dashboard-section-b__empty {
+    margin: 4px 0 0;
+    padding: 6px 4px;
+    color: #9ca3af;
+    font-size: 13px;
+    font-style: italic;
+}
+
+/* ──────────────────────────────────────────────────────────────
+ * Phase 5b 대시보드 사용자 라벨링 위젯 (task 00042-5).
+ * 4종 카드 (전체 미확인 / 전체 미판정 / 기준일 미확인 / 기준일 미판정) 를 2x2
+ * grid 로 배치한다. 비로그인 시는 라우트가 widgets=None 으로 둬서 본 영역 자체
+ * 가 DOM 에 들어가지 않으므로 별도 hidden 클래스 불필요.
+ * ────────────────────────────────────────────────────────────── */
+
+.dashboard-widgets {
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 14px 16px 16px;
+    margin-bottom: 20px;
+}
+
+.dashboard-widgets__row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.dashboard-widgets__row:last-child {
+    margin-bottom: 0;
+}
+
+@media (max-width: 720px) {
+    /* 좁은 화면에서는 한 줄에 1개씩. */
+    .dashboard-widgets__row {
+        grid-template-columns: 1fr;
+    }
+}
+
+.dashboard-widget {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 12px;
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    background: #fafbfc;
+}
+
+.dashboard-widget__label {
+    color: #4b5563;
+    font-size: 13px;
+}
+
+.dashboard-widget__count {
+    color: #111827;
+    font-size: 18px;
+    font-weight: 700;
+    /* 0 일 때도 시각적 안정감 유지 — 기본 톤 그대로. */
+}
+
+/* 기준일 한정 위젯(3·4) 은 약하게 강조해 '범위 한정' 임을 시사 */
+.dashboard-widgets__row[data-widgets-row="in-range"] .dashboard-widget {
+    background: #f0f9ff;
+    border-color: #bae6fd;
+}
+
+/* ──────────────────────────────────────────────────────────────
+ * Phase 5b 대시보드 추이 차트 (task 00042-6).
+ * Chart.js 4.x 가 캔버스에 그릴 영역의 크기를 wrapper 에서 결정한다 (responsive
+ * + maintainAspectRatio:false 와 결합).
+ * ────────────────────────────────────────────────────────────── */
+
+.dashboard-section--trend .dashboard-section__title-meta {
+    color: #6b7280;
+    font-size: 13px;
+    font-weight: 400;
+    margin-left: 8px;
+}
+
+.dashboard-trend-chart__canvas-wrapper {
+    /* Chart.js responsive 옵션은 canvas 의 부모 height 를 기준으로 잡힌다. */
+    position: relative;
+    width: 100%;
+    height: 280px;
+    margin-top: 8px;
+}
+
+@media (max-width: 720px) {
+    .dashboard-trend-chart__canvas-wrapper {
+        height: 220px;
+    }
+}

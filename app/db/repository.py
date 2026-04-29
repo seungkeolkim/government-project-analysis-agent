@@ -69,7 +69,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 
 from loguru import logger
@@ -102,6 +102,7 @@ from app.db.snapshot import (
     normalize_payload,
 )
 from app.sources.config_schema import load_sources_config
+from app.timezone import kst_date_boundaries
 
 # RelevanceJudgmentHistory.archive_reason 의 허용값(app-level 상수).
 # DB CHECK 대신 여기서 관리 — 향후 관리자 이관·admin override 추가 시 확장한다.
@@ -3632,3 +3633,474 @@ def get_scrape_snapshot_by_date(
     return session.execute(
         select(ScrapeSnapshot).where(ScrapeSnapshot.snapshot_date == snapshot_date)
     ).scalar_one_or_none()
+
+
+def list_available_snapshot_dates(session: Session) -> list[date]:
+    """``scrape_snapshots`` 의 ``snapshot_date`` 전체를 오름차순으로 반환한다.
+
+    Phase 5b (task 00042-2) 의 캘린더 컴포넌트와 ``GET
+    /dashboard/api/snapshot-dates`` JSON API 가 공유하는 단일 헬퍼다. UNIQUE
+    제약상 한 KST 날짜당 0 또는 1 건이라 결과 list 는 자연스럽게 중복이
+    없으며, 정렬은 SQL ``ORDER BY snapshot_date ASC`` 로 처리한다.
+
+    캘린더 가용 날짜 판정 정책 (``docs/dashboard_design.md §4.1``):
+        본 함수가 반환하는 날짜 == \"캘린더에서 활성 (클릭 가능)\" 이다.
+        Phase 5a 의 ``upsert_scrape_snapshot`` 이 ScrapeRun completed/partial
+        종료 시 변화 0건이어도 row 를 INSERT 하므로, \"수집은 됐지만 변화 0건\"
+        인 날도 본 함수의 결과에 포함되어 캘린더에서 활성으로 보인다 (디자인
+        의도). 반대로 그날 ScrapeRun 이 모두 failed/cancelled 였거나 실행 자체
+        가 없었던 날만 비활성으로 표시된다.
+
+    Args:
+        session: 호출자 세션.
+
+    Returns:
+        snapshot_date(KST date) 들의 오름차순 list. 비어 있으면 빈 list.
+    """
+    rows = session.execute(
+        select(ScrapeSnapshot.snapshot_date).order_by(ScrapeSnapshot.snapshot_date.asc())
+    ).all()
+    return [row[0] for row in rows]
+
+
+def list_snapshots_in_range(
+    session: Session,
+    *,
+    from_exclusive: date,
+    to_inclusive: date,
+) -> list[ScrapeSnapshot]:
+    """``(from_exclusive, to_inclusive]`` KST 날짜 구간의 ScrapeSnapshot list.
+
+    Phase 5b (task 00042-3) 의 A 섹션 누적 머지가 사용하는 헬퍼. 사용자 원문
+    \"(from, to] 구간 안의 모든 snapshot 을 시간순 누적 머지\" 의 SELECT 단계.
+    구간은 \"from 배타 / to 포함\" 의 반-open 구간으로, ``from`` 일자의 snapshot
+    은 비교 baseline 이라 누적 대상에서 제외된다 (사용자 원문 그대로).
+
+    SQL: ``WHERE snapshot_date > :from_exclusive AND snapshot_date <= :to_inclusive``
+         ``ORDER BY snapshot_date ASC``
+
+    누적 머지의 정확성을 위해 ``snapshot_date ASC`` 정렬은 필수다 — 시간순으로
+    ``merge_snapshot_payload`` 를 reduce 해야 \"first from 유지 + last to 갱신\"
+    transition 머지 규칙이 의도대로 작동한다.
+
+    Args:
+        session:        호출자 세션.
+        from_exclusive: 시작 경계 (배타). 보통 비교일 (effective compare_date).
+        to_inclusive:   끝 경계 (포함). 보통 기준일 (base_date).
+
+    Returns:
+        ``ScrapeSnapshot`` 의 list, ``snapshot_date`` 오름차순. 구간이 비면
+        빈 list. ``from_exclusive >= to_inclusive`` 도 그대로 빈 list.
+    """
+    rows = session.execute(
+        select(ScrapeSnapshot)
+        .where(ScrapeSnapshot.snapshot_date > from_exclusive)
+        .where(ScrapeSnapshot.snapshot_date <= to_inclusive)
+        .order_by(ScrapeSnapshot.snapshot_date.asc())
+    ).scalars().all()
+    return list(rows)
+
+
+def list_snapshots_in_inclusive_range(
+    session: Session,
+    *,
+    from_inclusive: date,
+    to_inclusive: date,
+) -> list[ScrapeSnapshot]:
+    """``[from_inclusive, to_inclusive]`` 양끝 포함 구간의 ScrapeSnapshot list.
+
+    Phase 5b (task 00042-6) 의 추이 차트 (±15일) 가 사용한다.
+    ``list_snapshots_in_range`` (반-open ``(from, to]``) 와 시맨틱이 다르므로
+    별도 헬퍼로 둔다 — 호출자가 둘을 헷갈릴 위험을 줄인다.
+
+    SQL: ``WHERE snapshot_date >= :from_inclusive AND snapshot_date <= :to_inclusive``
+         ``ORDER BY snapshot_date ASC``
+
+    호출 의도:
+        추이 차트의 ±15일 = 31일 (양끝 포함, design doc §9.1) 데이터 fetch 를
+        단일 IN/BETWEEN 쿼리 1회로 끝낸다. snapshot 가 없는 날짜는 결과에서
+        자연스럽게 빠지고, 빌더가 0 으로 채워 그래프에 골짜기를 만든다.
+
+    Args:
+        session:        호출자 세션.
+        from_inclusive: 시작 경계 (포함). 보통 ``base_date - timedelta(days=15)``.
+        to_inclusive:   끝 경계 (포함). 보통 ``base_date + timedelta(days=15)``.
+
+    Returns:
+        ``ScrapeSnapshot`` list, ``snapshot_date`` 오름차순. 매칭 0건은 빈 list.
+    """
+    rows = session.execute(
+        select(ScrapeSnapshot)
+        .where(ScrapeSnapshot.snapshot_date >= from_inclusive)
+        .where(ScrapeSnapshot.snapshot_date <= to_inclusive)
+        .order_by(ScrapeSnapshot.snapshot_date.asc())
+    ).scalars().all()
+    return list(rows)
+
+
+def find_nearest_previous_snapshot_date(
+    session: Session,
+    *,
+    target_date: date,
+) -> date | None:
+    """``target_date`` 보다 이전인 snapshot_date 중 가장 가까운 일자를 반환한다.
+
+    Phase 5b (task 00042-3) 의 비교일 fallback 용 헬퍼 — 사용자 원문 \"비교일이
+    가용 날짜가 아닐 때 가장 가까운 이전 snapshot_date 검색\" 을 단일 쿼리로
+    구현한다.
+
+    SQL: ``SELECT MAX(snapshot_date) FROM scrape_snapshots WHERE snapshot_date < :target_date``
+
+    호출 규약:
+        - 기준일은 캘린더에서 가용 날짜만 클릭 가능 → 기준일 fallback 은 호출
+          하지 않는다 (사용자 원문 \"기준일 fallback 불필요\").
+        - 비교일이 가용 set 에 없을 때만 호출한다. 즉 호출 전에
+          ``get_scrape_snapshot_by_date(target_date) is None`` 이 보장된다.
+
+    Args:
+        session:     호출자 세션.
+        target_date: 기준 일자 (배타 — 본 일자 자체는 결과에 포함되지 않는다).
+
+    Returns:
+        ``target_date`` 직전의 ``snapshot_date`` (또는 None — 이 경우 사용자
+        원문 \"비교일 이전 snapshot 전무 → A 섹션 '데이터 없음'\" 분기로 진입).
+    """
+    row = session.execute(
+        select(func.max(ScrapeSnapshot.snapshot_date)).where(
+            ScrapeSnapshot.snapshot_date < target_date
+        )
+    ).scalar_one_or_none()
+    # SQLAlchemy 의 ``func.max`` 가 매칭 없으면 ``None`` 을 그대로 반환한다.
+    return row
+
+
+def list_announcements_by_ids(
+    session: Session,
+    *,
+    announcement_ids: Iterable[int],
+) -> list[Announcement]:
+    """주어진 announcement_id 들을 한 번의 IN 쿼리로 fetch 한다.
+
+    Phase 5b (task 00042-3) 의 A 섹션 카드 expand + 위젯 3·4 (task 00042-5) 가
+    공유하는 N+1 회피 헬퍼다. ``docs/dashboard_design.md §5.4`` 의 헬퍼 패턴을
+    그대로 옮긴 것 — Phase 1b/3a/3b 의 ``get_X_id_set`` / ``get_X_map``
+    컨벤션과 동일.
+
+    표시에 필요한 컬럼 (사용자 원문 \"announcements JOIN 으로 표시 메타\"):
+        - id, source_type, source_announcement_id, status, title, agency,
+          deadline_at, canonical_group_id (위젯 4번 쿼리 활용용).
+
+    실제 SELECT 는 ORM Announcement 전체 컬럼이지만, 호출자가 사용하는 컬럼만
+    위 목록에 한정된다 — 추가 컬럼이 필요해지면 호출자 docstring 에 언급한다.
+
+    호출 규약:
+        - ``announcement_ids`` 가 비어 있거나 None-only 면 쿼리 없이 빈 list 를
+          반환 (회귀 가드).
+        - 결과 정렬은 ``announcement_id`` 오름차순. 호출자가 카테고리별 분배는
+          별도 처리한다.
+
+    Args:
+        session:          호출자 세션.
+        announcement_ids: fetch 할 announcement_id Iterable.
+
+    Returns:
+        해당 ID 들의 ``Announcement`` ORM 인스턴스 list. 비어 있는 입력 →
+        빈 list. 일부 ID 가 DB 에 없으면 그 ID 는 결과에서 누락된다 (조용히).
+    """
+    deduped_ids = sorted({aid for aid in announcement_ids if aid is not None})
+    if not deduped_ids:
+        return []
+    rows = session.execute(
+        select(Announcement)
+        .where(Announcement.id.in_(deduped_ids))
+        .order_by(Announcement.id.asc())
+    ).scalars().all()
+    return list(rows)
+
+
+# ──────────────────────────────────────────────────────────────
+# Phase 5b — B 섹션 (조만간 변화 예정 공고) 쿼리 헬퍼 (task 00042-4)
+# ──────────────────────────────────────────────────────────────
+
+
+def list_soon_to_open_announcements(
+    session: Session,
+    *,
+    to_kst_date: date,
+    days: int = 30,
+) -> list[Announcement]:
+    """``to`` 시점 기준 향후 ``days`` 일 이내 접수 시작 예정 공고를 반환한다.
+
+    Phase 5b (task 00042-4) 의 B 섹션 \"조만간 접수될 공고\" 그룹에 사용한다.
+    사용자 원문 \"조만간 접수될 공고: is_current=True AND status='접수예정' AND
+    received_at BETWEEN to AND to+30days\".
+
+    BETWEEN 경계 (KST 일자 → UTC tz-aware datetime 변환):
+        - 시작 = ``kst_date_boundaries(to_kst_date)[0]`` (KST 자정 → UTC).
+          기준일이 \"오늘\" 이면 정확히 오늘 KST 0시부터.
+        - 끝   = ``kst_date_boundaries(to_kst_date + timedelta(days=days))[0]``
+          (KST 자정 → UTC). 반-open 구간 ``[start_utc, end_utc)`` 그대로 사용.
+
+    호출 규약 / 정렬:
+        - ``is_current=True`` 활성 공고만 (사용자 원문 주의사항).
+        - ``announcement`` 단위 — canonical 묶기 없음.
+        - 정렬: ``received_at ASC`` (임박 순). NULL 은 끝으로 — SQLite 기본
+          NULLS FIRST 와 다르므로 정렬 키에 ``IS NULL`` 보조를 둔다.
+
+    Args:
+        session:     호출자 세션.
+        to_kst_date: 기준일 (KST date) — B 섹션의 ``to``.
+        days:        구간 길이. 기본 30 (사용자 원문 \"1개월 이내\").
+
+    Returns:
+        ``Announcement`` ORM 인스턴스 list — 임박순. 매칭 0건은 빈 list.
+    """
+    start_utc, _start_end_unused = kst_date_boundaries(to_kst_date)
+    end_utc, _end_end_unused = kst_date_boundaries(to_kst_date + timedelta(days=days))
+
+    rows = session.execute(
+        select(Announcement)
+        .where(Announcement.is_current.is_(True))
+        .where(Announcement.status == AnnouncementStatus.SCHEDULED)
+        .where(Announcement.received_at.is_not(None))
+        .where(Announcement.received_at >= start_utc)
+        .where(Announcement.received_at < end_utc)
+        .order_by(Announcement.received_at.asc(), Announcement.id.asc())
+    ).scalars().all()
+    return list(rows)
+
+
+def list_soon_to_close_announcements(
+    session: Session,
+    *,
+    to_kst_date: date,
+    days: int = 30,
+) -> list[Announcement]:
+    """``to`` 시점 기준 향후 ``days`` 일 이내 마감 예정 공고를 반환한다.
+
+    Phase 5b (task 00042-4) 의 B 섹션 \"조만간 마감될 공고\" 그룹. 사용자 원문
+    \"조만간 마감될 공고: is_current=True AND status='접수중' AND deadline_at
+    BETWEEN to AND to+30days\".
+
+    BETWEEN 경계는 :func:`list_soon_to_open_announcements` 와 동일한 KST 자정
+    → UTC 반-open 구간 ``[start_utc, end_utc)`` 를 사용한다.
+
+    호출 규약 / 정렬:
+        - ``is_current=True`` 활성 공고만 (사용자 원문 주의사항 — 이력 row 활용
+          은 범위 밖).
+        - announcement 단위.
+        - 정렬: ``deadline_at ASC`` (임박 순) + tie-breaker ``id ASC``.
+        - 마감일이 NULL 인 공고는 BETWEEN 비교에서 자연스럽게 제외된다.
+
+    Args:
+        session:     호출자 세션.
+        to_kst_date: 기준일 (KST date) — B 섹션의 ``to``.
+        days:        구간 길이. 기본 30.
+
+    Returns:
+        ``Announcement`` ORM 인스턴스 list — 임박순. 매칭 0건은 빈 list.
+    """
+    start_utc, _start_end_unused = kst_date_boundaries(to_kst_date)
+    end_utc, _end_end_unused = kst_date_boundaries(to_kst_date + timedelta(days=days))
+
+    rows = session.execute(
+        select(Announcement)
+        .where(Announcement.is_current.is_(True))
+        .where(Announcement.status == AnnouncementStatus.RECEIVING)
+        .where(Announcement.deadline_at.is_not(None))
+        .where(Announcement.deadline_at >= start_utc)
+        .where(Announcement.deadline_at < end_utc)
+        .order_by(Announcement.deadline_at.asc(), Announcement.id.asc())
+    ).scalars().all()
+    return list(rows)
+
+
+# ──────────────────────────────────────────────────────────────
+# Phase 5b — 사용자 라벨링 위젯 4종 카운트 헬퍼 (task 00042-5)
+# ──────────────────────────────────────────────────────────────
+
+
+def count_unread_announcements_for_user(
+    session: Session,
+    *,
+    user_id: int,
+) -> int:
+    """(전체) 미확인 활성 공고 수를 단일 COUNT 쿼리로 반환한다.
+
+    위젯 1 \"전체 미확인 공고: N건\" — 날짜 무관, announcement 단위.
+
+    조건 (사용자 원문 / ``docs/dashboard_design.md §8.2``):
+        - ``is_current=True`` 인 ``announcements`` 만 대상.
+        - ``NOT EXISTS (SELECT 1 FROM announcement_user_states
+          WHERE announcement_id = announcements.id AND user_id = :user_id
+                AND is_read = TRUE)`` — 사용자가 한 번도 읽지 않았거나
+          내용 변경으로 ``is_read=False`` 로 리셋된 공고 (Phase 1b 정책 그대로).
+
+    구현은 outer ``announcements`` 와 inner ``announcement_user_states`` 를
+    correlated subquery 로 묶어 단일 SELECT 안에서 처리하므로 N+1 가 일어나지
+    않는다 (사용자 원문 검증 15 회귀 가드).
+
+    호출 규약:
+        - 비로그인 경로는 본 함수를 호출하지 않는다 — 라우트가 ``current_user is
+          None`` 분기에서 4종 헬퍼 호출 자체를 skip 한다 (검증 16).
+
+    Args:
+        session: 호출자 세션.
+        user_id: 인증된 사용자 PK.
+
+    Returns:
+        조건을 만족하는 announcement 의 개수.
+    """
+    read_state_subquery = (
+        select(AnnouncementUserState.id)
+        .where(AnnouncementUserState.announcement_id == Announcement.id)
+        .where(AnnouncementUserState.user_id == user_id)
+        .where(AnnouncementUserState.is_read.is_(True))
+        .correlate(Announcement)
+    )
+    statement = (
+        select(func.count())
+        .select_from(Announcement)
+        .where(Announcement.is_current.is_(True))
+        .where(~read_state_subquery.exists())
+    )
+    return int(session.execute(statement).scalar_one())
+
+
+def count_unjudged_canonical_for_user(
+    session: Session,
+    *,
+    user_id: int,
+) -> int:
+    """(전체) 미판정 canonical 수를 단일 COUNT 쿼리로 반환한다.
+
+    위젯 2 \"전체 미판정 관련성: M건\" — 날짜 무관, canonical 단위.
+
+    조건 (사용자 원문 / ``docs/dashboard_design.md §8.2``):
+        - ``canonical_projects`` 전체 row 가 대상 (guidance 의 \"활성 canonical
+          정의가 모호하면 PROJECT_NOTES 결정사항 — 전수 행 기준\").
+        - ``NOT EXISTS (SELECT 1 FROM relevance_judgments WHERE
+          canonical_project_id = canonical_projects.id AND user_id = :user_id)``.
+        - ``relevance_judgments`` 만 본다. ``announcements`` 는 보지 않는다 —
+          §8.4 의 \"canonical(관련성) vs announcement(읽음) 단위 혼용 금지\".
+
+    Args:
+        session: 호출자 세션.
+        user_id: 인증된 사용자 PK.
+
+    Returns:
+        조건을 만족하는 canonical 의 개수.
+    """
+    judgment_subquery = (
+        select(RelevanceJudgment.id)
+        .where(RelevanceJudgment.canonical_project_id == CanonicalProject.id)
+        .where(RelevanceJudgment.user_id == user_id)
+        .correlate(CanonicalProject)
+    )
+    statement = (
+        select(func.count())
+        .select_from(CanonicalProject)
+        .where(~judgment_subquery.exists())
+    )
+    return int(session.execute(statement).scalar_one())
+
+
+def count_unread_in_announcement_ids(
+    session: Session,
+    *,
+    user_id: int,
+    announcement_ids: Iterable[int],
+) -> int:
+    """주어진 ``announcement_ids`` 중 사용자가 미확인인 개수 (단일 IN 쿼리).
+
+    위젯 3 \"기준일 변경 공고 중 내 미확인: K건\" — A 섹션 누적 머지 결과의
+    announcement_id union 을 그대로 받아 사용자 단위 미확인 카운트를 산출한다.
+
+    조건 (``docs/dashboard_design.md §8.2``):
+        - ``announcement_ids`` 안에 들어 있는 announcement 만 대상.
+        - 위젯 1 과 같이 ``NOT EXISTS`` 로 ``is_read=True`` row 가 없는 것 카운트.
+        - 위젯 1 과 달리 ``is_current=True`` 추가 필터는 두지 않는다 — 입력
+          ``announcement_ids`` 자체가 A 섹션 머지 결과의 announcement.id 들이며
+          해당 ID 의 announcement.is_current 상태와 무관하게 \"기준일 구간에 변화가
+          있었던 공고\" 라는 의미이기 때문이다 (사용자 원문 \"기준일 변경 공고 중
+          내 미확인\").
+
+    회귀 가드:
+        - 빈 리스트 / None-only → 쿼리 없이 0 반환.
+
+    Args:
+        session:          호출자 세션.
+        user_id:          인증된 사용자 PK.
+        announcement_ids: A 섹션 머지 결과의 announcement_id 들.
+
+    Returns:
+        조건을 만족하는 announcement 의 개수 (0 이상).
+    """
+    deduped_ids = sorted({aid for aid in announcement_ids if aid is not None})
+    if not deduped_ids:
+        return 0
+
+    read_state_subquery = (
+        select(AnnouncementUserState.id)
+        .where(AnnouncementUserState.announcement_id == Announcement.id)
+        .where(AnnouncementUserState.user_id == user_id)
+        .where(AnnouncementUserState.is_read.is_(True))
+        .correlate(Announcement)
+    )
+    statement = (
+        select(func.count())
+        .select_from(Announcement)
+        .where(Announcement.id.in_(deduped_ids))
+        .where(~read_state_subquery.exists())
+    )
+    return int(session.execute(statement).scalar_one())
+
+
+def count_unjudged_in_canonical_ids(
+    session: Session,
+    *,
+    user_id: int,
+    canonical_ids: Iterable[int],
+) -> int:
+    """주어진 ``canonical_ids`` 중 사용자가 관련성 미판정인 개수 (단일 IN 쿼리).
+
+    위젯 4 \"기준일 변경 공고 중 내 미판정: L건\" — A 섹션 머지 결과의
+    announcement.canonical_group_id (NOT NULL only) set 을 그대로 받아 카운트
+    한다.
+
+    조건 (``docs/dashboard_design.md §8.2 / §8.4``):
+        - ``canonical_ids`` 는 ``Announcement.canonical_group_id`` 의 None 제외
+          set. ``RelevanceJudgment.canonical_project_id`` 와 같은 PK
+          (``canonical_projects.id``) 를 가리킨다 — 컬럼 이름만 다를 뿐.
+        - ``canonical_projects`` 안에 같은 ID 가 실제로 존재하고, 그 ID 에 대해
+          ``relevance_judgments`` 의 (canonical_project_id, user_id) row 가 없으면
+          \"미판정\" 으로 카운트.
+
+    회귀 가드:
+        - 빈 리스트 / None-only → 쿼리 없이 0 반환.
+
+    Args:
+        session:       호출자 세션.
+        user_id:       인증된 사용자 PK.
+        canonical_ids: A 섹션 머지 결과 announcement 의 ``canonical_group_id`` set.
+
+    Returns:
+        조건을 만족하는 canonical 의 개수 (0 이상).
+    """
+    deduped_ids = sorted({cid for cid in canonical_ids if cid is not None})
+    if not deduped_ids:
+        return 0
+
+    judgment_subquery = (
+        select(RelevanceJudgment.id)
+        .where(RelevanceJudgment.canonical_project_id == CanonicalProject.id)
+        .where(RelevanceJudgment.user_id == user_id)
+        .correlate(CanonicalProject)
+    )
+    statement = (
+        select(func.count())
+        .select_from(CanonicalProject)
+        .where(CanonicalProject.id.in_(deduped_ids))
+        .where(~judgment_subquery.exists())
+    )
+    return int(session.execute(statement).scalar_one())
