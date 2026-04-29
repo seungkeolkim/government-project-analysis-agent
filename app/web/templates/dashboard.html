@@ -256,12 +256,19 @@
             </p>
         {% endif %}
 
-        <div class="dashboard-section-b__columns">
-            {# 4-1. 조만간 접수될 공고 (status=접수예정, 임박순) #}
+        <div class="dashboard-section-b__rows">
+            {# 4-1. 조만간 접수될 공고 (status=접수예정, 임박순)
+               task 00043-2: 2컬럼 → 2행 stack 으로 폭을 넓게 사용. 제목 옆에
+               건수 표시. 각 row 우측에 D-Day 배지. ``received_at`` 을 bold+color
+               으로 강조하고 같은 row 의 ``deadline_at`` 은 강조 해제 (회색). #}
             <div class="dashboard-section-b__column"
                  data-section-b-group="soon_to_open"
                  aria-label="조만간 접수될 공고">
-                <h4 class="dashboard-section-b__group-title">조만간 접수될 공고</h4>
+                <h4 class="dashboard-section-b__group-title">
+                    조만간 접수될 공고
+                    <span class="dashboard-section-b__group-count"
+                          data-section-b-count="soon_to_open">({{ section_b.soon_to_open_count }}건)</span>
+                </h4>
                 {% if section_b.soon_to_open %}
                     <ul class="dashboard-section-b__list">
                         {% for row in section_b.soon_to_open %}
@@ -271,15 +278,20 @@
                                     <span class="dashboard-source-badge">{{ row.source_type }}</span>
                                     <span class="dashboard-section-b__title">{{ row.title }}</span>
                                     {% if row.received_at %}
-                                        <span class="dashboard-section-b__date">
+                                        {# 접수예정 그룹은 \"접수\" 일자를 bold+color 으로 강조. #}
+                                        <span class="dashboard-section-b__date dashboard-section-b__date--received">
                                             접수 {{ row.received_at | kst_date }}
                                         </span>
                                     {% endif %}
                                     {% if row.deadline_at %}
-                                        <span class="dashboard-section-b__date dashboard-section-b__date--deadline">
+                                        {# 같은 row 의 \"마감\" 은 강조 해제 — 회색 일반 톤. #}
+                                        <span class="dashboard-section-b__date dashboard-section-b__date--muted">
                                             마감 {{ row.deadline_at | kst_date }}
                                         </span>
                                     {% endif %}
+                                    {# 우측 D-Day 배지 (margin-left: auto 로 우측 정렬). #}
+                                    <span class="dashboard-section-b__d-day"
+                                          data-section-b-d-day>{{ row.d_day_label }}</span>
                                 </a>
                             </li>
                         {% endfor %}
@@ -295,7 +307,11 @@
             <div class="dashboard-section-b__column"
                  data-section-b-group="soon_to_close"
                  aria-label="조만간 마감될 공고">
-                <h4 class="dashboard-section-b__group-title">조만간 마감될 공고</h4>
+                <h4 class="dashboard-section-b__group-title">
+                    조만간 마감될 공고
+                    <span class="dashboard-section-b__group-count"
+                          data-section-b-count="soon_to_close">({{ section_b.soon_to_close_count }}건)</span>
+                </h4>
                 {% if section_b.soon_to_close %}
                     <ul class="dashboard-section-b__list">
                         {% for row in section_b.soon_to_close %}
@@ -309,6 +325,9 @@
                                             마감 {{ row.deadline_at | kst_date }}
                                         </span>
                                     {% endif %}
+                                    {# 우측 D-Day 배지. #}
+                                    <span class="dashboard-section-b__d-day"
+                                          data-section-b-d-day>{{ row.d_day_label }}</span>
                                 </a>
                             </li>
                         {% endfor %}
@@ -323,21 +342,22 @@
     </section>
 
     {# ─────────────────────────────────────────────────────────
-       5. 추이 차트 — 기준일 ±15일 일별 카운트 (task 00042-6).
+       5. 추이 차트 — 기준일 기준 과거 30일 일별 카운트 (task 00043-3).
+       기존 ±15일 (양방향) 에서 단방향 \"기준일 ~ 기준일 - 30일\" 로 변경.
        Chart.js 4.x 로컬 vendor 번들 + 서버 사전 계산 후 JSON 임베드.
        ───────────────────────────────────────────────────────── #}
     <section class="dashboard-section dashboard-section--trend"
              data-dashboard-trend-chart
              aria-label="추이 차트">
         <h3 class="dashboard-section__title">
-            추이 (기준일 ±{{ trend_chart.half_window }}일,
+            추이 (기준일 기준 과거 {{ trend_chart.past_days }}일,
             <span class="dashboard-section__title-meta">{{ trend_chart.from_date.isoformat() }}
                 ~ {{ trend_chart.to_date.isoformat() }}</span>)
         </h3>
         <div class="dashboard-trend-chart__canvas-wrapper">
             {# Chart.js 가 그릴 캔버스. 사이즈는 CSS / wrapper 가 정한다. #}
             <canvas id="dashboardTrendChart" role="img"
-                    aria-label="기준일 ±{{ trend_chart.half_window }}일 일별 신규/내용 변경/전이 카운트"></canvas>
+                    aria-label="기준일 기준 과거 {{ trend_chart.past_days }}일 일별 신규/내용 변경/전이 카운트"></canvas>
         </div>
         <noscript>
             <p class="dashboard-section__placeholder">

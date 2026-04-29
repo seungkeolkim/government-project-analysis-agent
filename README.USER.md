@@ -25,7 +25,8 @@
 14. [웹 로그 레벨 제어와 원인 추적 (00030)](#웹-로그-레벨-제어와-원인-추적-00030)
 15. [DB 관리](#db-관리)
 16. [트러블슈팅](#트러블슈팅)
-17. [정기 운영 체크리스트](#정기-운영-체크리스트)
+17. [E2E (Playwright) 테스트 실행 (task 00043-4)](#e2e-playwright-테스트-실행-task-00043-4)
+18. [정기 운영 체크리스트](#정기-운영-체크리스트)
 
 ---
 
@@ -1472,6 +1473,40 @@ chmod -R 755 ./data/
 SELECT id, original_filename, stored_path FROM attachments
 WHERE announcement_id = {공고_id};
 ```
+
+---
+
+## E2E (Playwright) 테스트 실행 (task 00043-4)
+
+대시보드 변경 회귀를 라이브 페이지에서 한 번 더 확인하려면 ``tests/e2e/`` 의
+Playwright 테스트를 사용한다. 본 E2E 는 운영 서비스 (8000 포트) 와 충돌하지 않도록
+**8001 포트** 에 격리된 uvicorn 서브프로세스를 띄운다.
+
+```bash
+# 1) Playwright chromium 브라우저 캐시 다운로드 (최초 1회)
+.venv/bin/playwright install chromium
+
+# 2) Linux 호스트의 시스템 라이브러리 설치 (libgbm/libnss3 등 없으면 chromium 기동 실패)
+sudo .venv/bin/playwright install-deps chromium
+# 또는: sudo apt-get install libgbm1 libasound2 libnss3 libxkbcommon0 libatk1.0-0 \
+#                            libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 \
+#                            libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2
+
+# 3) 단위 테스트만 (E2E 는 마커 제외)
+pytest -m "not e2e"
+
+# 4) E2E 만 실행
+pytest -m e2e
+
+# 5) 단위 + E2E 모두 (기본 — 마커 미지정)
+pytest tests/
+```
+
+호스트에 chromium 의존 라이브러리 또는 Playwright 브라우저 캐시가 없는 경우, 
+``tests/e2e/conftest.py`` 가 자동으로 ``pytest.skip`` 을 호출해 단위 테스트 흐름은
+계속 진행된다 — CI 환경별 차이를 흡수하는 안전망. Docker 컨테이너에서 실행하면
+``Dockerfile`` 의 ``playwright install chromium --with-deps`` 한 줄로 양쪽이
+모두 충족된다.
 
 ---
 

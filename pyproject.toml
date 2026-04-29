@@ -84,6 +84,14 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Custom markers — 등록 안 된 마커는 pytest 8.x 가 PytestUnknownMarkWarning 을
+# 발생시켜 strict 환경에서 실패할 수 있으므로 명시 등록한다.
+# 사용법:
+#   pytest -m e2e          # E2E 테스트만 실행 (Playwright + uvicorn 8001 필요)
+#   pytest -m "not e2e"    # 단위 테스트만 실행 (운영 의존성 없음, 빠름)
+markers = [
+    "e2e: Playwright + uvicorn 서브프로세스 (포트 8001) 기반 라이브 페이지 E2E 테스트. 'playwright install chromium' 사전 실행 필요.",
+]
 
 [dependency-groups]
 dev = [

@@ -373,3 +373,225 @@ class TestBuildSectionB:
         """``days`` 인자는 SectionBData.days_window 에 그대로 들어간다."""
         result = build_section_b(session, to_date=date(2026, 4, 29), days=14)
         assert result.days_window == 14
+
+
+# ---------------------------------------------------------------------------
+# task 00043-2 — 건수 필드 + D-Day 라벨 + 강조 클래스 확장 회귀
+# ---------------------------------------------------------------------------
+
+
+class TestSectionBCountFields:
+    """``SectionBData.soon_to_open_count`` / ``soon_to_close_count`` 명시 필드 회귀.
+
+    사용자 원문 \"각각 몇건인지 표시해줘\" — 템플릿이 ``|length`` 가 아닌 명시
+    필드를 직접 표시하도록 빌더가 두 그룹의 건수를 dataclass 에 노출한다.
+    """
+
+    def test_count_fields_match_list_lengths_when_empty(
+        self, session: Session
+    ) -> None:
+        """매칭 0건이면 두 count 필드 모두 0."""
+        result = build_section_b(session, to_date=date(2026, 4, 29))
+        assert result.soon_to_open_count == 0
+        assert result.soon_to_close_count == 0
+        assert result.soon_to_open_count == len(result.soon_to_open)
+        assert result.soon_to_close_count == len(result.soon_to_close)
+
+    def test_count_fields_match_list_lengths_when_populated(
+        self, session: Session
+    ) -> None:
+        """매칭이 채워지면 ``count == len(list)``."""
+        # 접수예정 2건.
+        _make_announcement(
+            session,
+            canonical_key="cb-cnt-001",
+            title="접수예정 1",
+            source_announcement_id="O-001",
+            status=AnnouncementStatus.SCHEDULED,
+            received_at=_utc(2026, 5, 5, 0),
+        )
+        _make_announcement(
+            session,
+            canonical_key="cb-cnt-002",
+            title="접수예정 2",
+            source_announcement_id="O-002",
+            status=AnnouncementStatus.SCHEDULED,
+            received_at=_utc(2026, 5, 7, 0),
+        )
+        # 마감예정 3건.
+        for index in range(1, 4):
+            _make_announcement(
+                session,
+                canonical_key=f"cb-cnt-1{index:02d}",
+                title=f"마감예정 {index}",
+                source_announcement_id=f"C-{index:03d}",
+                status=AnnouncementStatus.RECEIVING,
+                deadline_at=_utc(2026, 5, 5 + index, 0),
+            )
+
+        result = build_section_b(session, to_date=date(2026, 4, 29))
+
+        assert result.soon_to_open_count == 2
+        assert result.soon_to_close_count == 3
+        assert result.soon_to_open_count == len(result.soon_to_open)
+        assert result.soon_to_close_count == len(result.soon_to_close)
+
+
+def _patch_now_kst(monkeypatch: pytest.MonkeyPatch, *, fake_now: datetime) -> None:
+    """``app.timezone.now_kst`` 와 ``dashboard_section_b`` 모듈의 바인딩을 둘 다 패치.
+
+    ``app.web.dashboard_section_b`` 는 모듈 import 시점에 ``from app.timezone
+    import now_kst`` 로 함수를 자기 모듈 globals 에 바인딩한다. 따라서
+    ``app.timezone.now_kst`` 한 곳만 패치하면 빌더 코드 경로에서는 패치가 적용
+    되지 않는다. 호출 측 모듈의 심볼도 같이 갈아끼워야 결정론적 ``now_kst``
+    가 보장된다.
+
+    Args:
+        monkeypatch: pytest fixture.
+        fake_now:    가짜 \"현재 시각\" (tz-aware).
+    """
+    from app import timezone as project_timezone
+    from app.web import dashboard_section_b as section_b_module
+
+    monkeypatch.setattr(project_timezone, "now_kst", lambda: fake_now)
+    monkeypatch.setattr(section_b_module, "now_kst", lambda: fake_now)
+
+
+class TestSectionBDDayLabel:
+    """``SectionBRow.d_day_label`` 회귀 (task 00043-2 §2-2).
+
+    한국식 D-Day 표기:
+        - target 이 reference 보다 미래 N 일 → ``\"D-N\"``
+        - target 이 reference 와 같은 날 → ``\"D-Day\"``
+        - target 이 reference 보다 과거 N 일 → ``\"D+N\"`` (방어적 분기)
+
+    기준 일자 정책 (guidance):
+        - 기본은 ``now_kst().date()``.
+        - ``to_date`` 가 KST 오늘보다 과거 (``is_to_in_past``) 인 경우 ``to_date``
+          를 기준으로 둔다.
+
+    결정론적 실행을 위해 모든 테스트가 ``now_kst`` 를 monkeypatch 로 고정한다.
+    """
+
+    def test_d_day_label_uses_to_date_when_to_is_in_past(
+        self,
+        session: Session,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``to_date`` 가 과거이면 D-Day 기준이 ``to_date`` 가 된다.
+
+        가짜 today = 2026-06-01 KST 로 고정 → to_date = 2026-04-29 는 과거.
+        is_to_in_past=True → reference = to_date = 2026-04-29.
+        ``received_at`` 의 KST 일자가 2026-04-30 → diff 1 → ``\"D-1\"``.
+        """
+        from app.timezone import KST
+
+        fake_now_kst = datetime(2026, 6, 1, 12, 0, tzinfo=KST)
+        _patch_now_kst(monkeypatch, fake_now=fake_now_kst)
+
+        # 4/30 KST 자정 = 4/29 15:00 UTC. (KST 자정 15시간 차).
+        _make_announcement(
+            session,
+            canonical_key="cb-dday-001",
+            title="D-1 row",
+            source_announcement_id="DDAY-001",
+            status=AnnouncementStatus.SCHEDULED,
+            received_at=_utc(2026, 4, 29, 15),  # KST 2026-04-30 00:00.
+        )
+
+        result = build_section_b(session, to_date=date(2026, 4, 29))
+
+        assert result.is_to_in_past is True
+        assert len(result.soon_to_open) == 1
+        assert result.soon_to_open[0].d_day_label == "D-1"
+
+    def test_d_day_label_d_day_for_same_date(
+        self,
+        session: Session,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """target_kst_date == reference_date 인 경우 ``\"D-Day\"`` 그대로.
+
+        가짜 today 가 미래 (2026-06-01) 로 to_date=2026-04-29 가 과거 →
+        reference = to_date = 2026-04-29. ``received_at`` 의 KST 일자도
+        2026-04-29 → ``\"D-Day\"``.
+        """
+        from app.timezone import KST
+
+        fake_now_kst = datetime(2026, 6, 1, 12, 0, tzinfo=KST)
+        _patch_now_kst(monkeypatch, fake_now=fake_now_kst)
+
+        # 4/29 KST 자정 = 4/28 15:00 UTC.
+        _make_announcement(
+            session,
+            canonical_key="cb-dday-002",
+            title="D-Day row",
+            source_announcement_id="DDAY-002",
+            status=AnnouncementStatus.SCHEDULED,
+            received_at=_utc(2026, 4, 28, 15),  # KST 2026-04-29 00:00.
+        )
+
+        result = build_section_b(session, to_date=date(2026, 4, 29))
+
+        assert len(result.soon_to_open) == 1
+        assert result.soon_to_open[0].d_day_label == "D-Day"
+
+    def test_d_day_label_for_close_group_uses_deadline_at(
+        self,
+        session: Session,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """마감예정 그룹의 D-Day 는 ``deadline_at`` 으로 산출."""
+        from app.timezone import KST
+
+        # 가짜 today 가 미래 → reference = to_date = 2026-04-29.
+        fake_now_kst = datetime(2026, 6, 1, 12, 0, tzinfo=KST)
+        _patch_now_kst(monkeypatch, fake_now=fake_now_kst)
+
+        # to_date = 2026-04-29. deadline_at KST 2026-05-04 → 5일 차이 → \"D-5\".
+        _make_announcement(
+            session,
+            canonical_key="cb-dday-101",
+            title="마감 D-5",
+            source_announcement_id="DDAY-101",
+            status=AnnouncementStatus.RECEIVING,
+            deadline_at=_utc(2026, 5, 3, 15),  # KST 2026-05-04 00:00.
+        )
+
+        result = build_section_b(session, to_date=date(2026, 4, 29))
+
+        assert len(result.soon_to_close) == 1
+        assert result.soon_to_close[0].d_day_label == "D-5"
+
+    def test_d_day_label_uses_today_when_to_is_today_or_future(
+        self,
+        session: Session,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``to_date`` 가 KST 오늘이면 D-Day 기준이 ``today`` (= ``to_date``).
+
+        ``now_kst()`` 를 monkeypatch 로 고정해 결정론적 실행. to_date == today
+        이므로 is_to_in_past=False. received_at 의 KST 일자가 today + 3일 →
+        \"D-3\".
+        """
+        from app.timezone import KST
+
+        # 가짜 \"오늘\" — KST 2026-04-29 12:00.
+        fake_now_kst = datetime(2026, 4, 29, 12, 0, tzinfo=KST)
+        _patch_now_kst(monkeypatch, fake_now=fake_now_kst)
+
+        # received_at KST 2026-05-02 → today (4/29) 기준 3일 → \"D-3\".
+        _make_announcement(
+            session,
+            canonical_key="cb-dday-201",
+            title="D-3 row",
+            source_announcement_id="DDAY-201",
+            status=AnnouncementStatus.SCHEDULED,
+            received_at=_utc(2026, 5, 1, 15),  # KST 2026-05-02 00:00.
+        )
+
+        result = build_section_b(session, to_date=date(2026, 4, 29))
+
+        assert result.is_to_in_past is False
+        assert len(result.soon_to_open) == 1
+        assert result.soon_to_open[0].d_day_label == "D-3"

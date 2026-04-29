@@ -123,7 +123,9 @@ USER_VERIFICATION_COVERAGE: dict[int, dict[str, object]] = {
         ],
     },
     12: {
-        "scenario": "추이 차트가 기준일 ±15일 일별 카운트 line chart",
+        # task 00043-3 갱신: 기존 \"기준일 ±15일 (양방향 31일)\" 에서 \"기준일 기준
+        # 과거 30일 (단방향 31일)\" 로 시맨틱 이동.
+        "scenario": "추이 차트가 기준일 기준 과거 30일 일별 카운트 line chart",
         "covered_by": [
             "tests/dashboard/test_dashboard_routes.py::TestTrendChartOnPage::test_trend_chart_section_renders",
             "tests/dashboard/test_dashboard_routes.py::TestTrendChartOnPage::test_trend_chart_embeds_31_day_json",

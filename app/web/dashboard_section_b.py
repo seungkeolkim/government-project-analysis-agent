@@ -29,7 +29,7 @@ from app.db.repository import (
     list_soon_to_close_announcements,
     list_soon_to_open_announcements,
 )
-from app.timezone import now_kst
+from app.timezone import now_kst, to_kst
 
 
 # ──────────────────────────────────────────────────────────────
@@ -60,6 +60,12 @@ class SectionBRow:
                          필터로 표시. 본 dataclass 자체는 tz 변환을 하지 않는다.
         received_at:     접수 시작 시각 UTC. 접수예정 그룹 표시 보조용 (템플릿이
                          ``kst_date`` 필터로 표시 — 미사용시 무시).
+        d_day_label:     기준일 ``to_date`` (또는 ``to`` 가 과거가 아니면 KST 오늘)
+                         시점에서 본 행의 핵심 일자 (접수예정은 ``received_at``,
+                         마감예정은 ``deadline_at``) 까지 남은 일수 라벨. 형식
+                         예시: ``\"D-1\"`` / ``\"D-Day\"`` / ``\"D+3\"``. 핵심 일자가
+                         None 이면 빈 문자열 (정상 흐름에선 발생하지 않음 —
+                         repository 가 None 인 row 를 걸러서 fetch 하므로).
     """
 
     announcement_id: int
@@ -68,6 +74,7 @@ class SectionBRow:
     agency: str | None
     deadline_at: datetime | None
     received_at: datetime | None
+    d_day_label: str
 
 
 @dataclass(frozen=True)
@@ -81,6 +88,10 @@ class SectionBData:
         is_to_in_past:       ``to`` 가 KST 오늘보다 과거인지 — 안내문 분기.
         past_notice_message: ``is_to_in_past`` 일 때 노출할 안내문. 그 외엔 빈
                              문자열.
+        soon_to_open_count:  ``len(soon_to_open)`` 를 명시 필드로 노출. 템플릿이
+                             ``soon_to_open|length`` 대신 본 필드를 직접 표시해
+                             가독성을 높인다 (사용자 원문 \"각각 몇건인지 표시\").
+        soon_to_close_count: ``len(soon_to_close)`` 를 명시 필드로 노출.
     """
 
     soon_to_open: list[SectionBRow]
@@ -88,6 +99,8 @@ class SectionBData:
     days_window: int
     is_to_in_past: bool
     past_notice_message: str
+    soon_to_open_count: int
+    soon_to_close_count: int
 
 
 # ──────────────────────────────────────────────────────────────
@@ -125,6 +138,17 @@ def build_section_b(
         session, to_kst_date=to_date, days=days
     )
 
+    today_kst: date = now_kst().date()
+    is_to_in_past = to_date < today_kst
+    past_notice_message = SECTION_B_PAST_BASE_DATE_NOTICE if is_to_in_past else ""
+
+    # D-Day 기준 날짜 — guidance §3 그대로:
+    # - 기본은 ``now_kst().date()`` (사용자가 \"지금 시점에서 며칠 남았는지\" 를 본다).
+    # - ``to_date`` 가 과거 (is_to_in_past) 인 경우는 ``to_date`` 를 기준으로 둬서
+    #   당시 시점의 D-Day 표기를 유지한다 (음수 D-Day 방지 — fetch 구간이
+    #   [to, to+30) 라 received_at/deadline_at 의 KST 일자는 to_date 이상이므로).
+    d_day_reference_date: date = to_date if is_to_in_past else today_kst
+
     soon_to_open_rows = [
         SectionBRow(
             announcement_id=announcement.id,
@@ -133,6 +157,10 @@ def build_section_b(
             agency=announcement.agency,
             deadline_at=announcement.deadline_at,
             received_at=announcement.received_at,
+            d_day_label=_compute_d_day_label(
+                target_datetime_utc=announcement.received_at,
+                reference_date=d_day_reference_date,
+            ),
         )
         for announcement in soon_to_open_announcements
     ]
@@ -144,13 +172,13 @@ def build_section_b(
             agency=announcement.agency,
             deadline_at=announcement.deadline_at,
             received_at=announcement.received_at,
+            d_day_label=_compute_d_day_label(
+                target_datetime_utc=announcement.deadline_at,
+                reference_date=d_day_reference_date,
+            ),
         )
         for announcement in soon_to_close_announcements
     ]
-
-    today_kst: date = now_kst().date()
-    is_to_in_past = to_date < today_kst
-    past_notice_message = SECTION_B_PAST_BASE_DATE_NOTICE if is_to_in_past else ""
 
     return SectionBData(
         soon_to_open=soon_to_open_rows,
@@ -158,7 +186,54 @@ def build_section_b(
         days_window=days,
         is_to_in_past=is_to_in_past,
         past_notice_message=past_notice_message,
+        soon_to_open_count=len(soon_to_open_rows),
+        soon_to_close_count=len(soon_to_close_rows),
     )
+
+
+def _compute_d_day_label(
+    *,
+    target_datetime_utc: datetime | None,
+    reference_date: date,
+) -> str:
+    """``target_datetime_utc`` 의 KST 일자와 ``reference_date`` 사이의 D-Day 라벨.
+
+    한국식 D-Day 표기 컨벤션 그대로:
+        - target 이 reference 보다 미래: ``\"D-N\"`` (N = 양수 일수).
+        - target 이 reference 와 같은 날: ``\"D-Day\"``.
+        - target 이 reference 보다 과거: ``\"D+N\"`` (N = 양수 일수).
+
+    호출 정상 흐름 (B 섹션) 에서 ``list_soon_to_open_announcements`` /
+    ``list_soon_to_close_announcements`` 가 반환하는 row 의 ``received_at`` /
+    ``deadline_at`` 은 KST 일자 기준으로 ``reference_date`` 이상이므로 일반적인
+    결과는 ``\"D-Day\"`` 또는 ``\"D-N\"`` 두 가지다. ``D+N`` 분기는 호출자가
+    direct row 를 만들어 넘기는 등 비정상 경로의 방어용으로 둔다.
+
+    Args:
+        target_datetime_utc: 기준 일자 산출의 대상 (UTC tz-aware 또는 naive UTC
+                             가정). None 이면 빈 문자열을 반환한다 (호출 측의
+                             None-guard 부담을 줄임 — repository 가 None 을
+                             걸러주지만 ORM 캐시 경로 등 안전망).
+        reference_date:      비교 기준 일자 (KST date).
+
+    Returns:
+        D-Day 라벨 문자열. ``target_datetime_utc`` 가 None 이면 ``\"\"`` (빈 문자열).
+    """
+    if target_datetime_utc is None:
+        return ""
+
+    # to_kst 는 None 입력에서만 None 을 반환하므로 위 가드 이후엔 항상 datetime.
+    target_kst = to_kst(target_datetime_utc)
+    assert target_kst is not None
+    target_kst_date = target_kst.date()
+
+    diff_days = (target_kst_date - reference_date).days
+    if diff_days > 0:
+        return f"D-{diff_days}"
+    if diff_days == 0:
+        return "D-Day"
+    # 비정상 경로 방어 — 음수면 \"D+N\" (지난 후 N일).
+    return f"D+{-diff_days}"
 
 
 __all__ = [
