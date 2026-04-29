@@ -49,6 +49,10 @@ from app.web.dashboard_compare import (
 )
 from app.web.dashboard_section_a import build_section_a
 from app.web.dashboard_section_b import build_section_b
+from app.web.dashboard_trend_chart import (
+    build_trend_chart,
+    serialize_trend_chart_for_template,
+)
 from app.web.dashboard_widgets import build_user_label_widgets
 from app.web.template_filters import register_kst_filters
 
@@ -336,6 +340,14 @@ def dashboard_page(
         widgets_data = None
         logger.debug("dashboard widgets skip (비로그인) — 4종 카운트 쿼리 실행 안 함")
 
+    # ── (5e) 추이 차트 — 기준일 ±15일 일별 카운트 (task 00042-6) ──────────
+    # design doc §9.1 — 31일 (양끝 포함). list_snapshots_in_inclusive_range 1회
+    # IN 쿼리로 31일 fetch + Python 측 dict lookup 으로 day-by-day 카운트 산출.
+    # 데이터는 서버 사전 계산 후 JSON 임베드 (별도 fetch/API 호출 없음 —
+    # 사용자 원문 §9.2).
+    trend_chart_data = build_trend_chart(session, base_date=base_date)
+    trend_chart_payload = serialize_trend_chart_for_template(trend_chart_data)
+
     # ── (6) 디버그 로그 ──────────────────────────────────────────────────
     # 사용자 원문 검증 16 ('비로그인 시 위젯 쿼리 자체 skip') 회귀를 후속
     # subtask 에서 가시화하려고 본 라우트 입구에 한 줄 DEBUG 로그를 둔다.
@@ -377,7 +389,9 @@ def dashboard_page(
             "section_a": section_a_data,
             # task 00042-4 — B 섹션 컨텍스트.
             "section_b": section_b_data,
-            "trend_chart": None,         # 00042-6 가 채움
+            # task 00042-6 — 추이 차트 컨텍스트 (frozen dataclass + plain dict 둘 다).
+            "trend_chart": trend_chart_data,
+            "trend_chart_json": trend_chart_payload,
         },
     )
 

@@ -568,3 +568,64 @@ class TestWidgetsOnPage:
             # loguru → stdlib bridge 가 본 테스트 환경에서 작동하지 않을 수 있다.
             # 그래도 DOM 에 위젯 영역이 빠졌으면 'skip' 의 시각 효과는 검증된 것.
             assert "data-dashboard-widgets" not in response.text
+
+
+# ---------------------------------------------------------------------------
+# 추이 차트 (task 00042-6) — 라우트 통합 테스트
+# ---------------------------------------------------------------------------
+
+
+class TestTrendChartOnPage:
+    """``GET /dashboard`` 응답에 추이 차트 영역 + JSON 임베드 + Chart.js script."""
+
+    def test_trend_chart_section_renders(self, client: TestClient) -> None:
+        """검증 12: 추이 차트 영역 + 캔버스 + 임베드 JSON 마커가 노출."""
+        response = client.get("/dashboard", params={"base_date": "2026-04-29"})
+        assert response.status_code == 200
+        body = response.text
+        # 컨테이너 마커 + 캔버스 + JSON 임베드 + vendor script.
+        assert "data-dashboard-trend-chart" in body
+        assert 'id="dashboardTrendChart"' in body
+        assert 'id="dashboardTrendChartData"' in body
+        assert "/static/vendor/chart.min.js" in body
+        assert "/static/js/dashboard_trend_chart.js" in body
+
+    def test_trend_chart_embeds_31_day_json(self, client: TestClient) -> None:
+        """임베드 JSON 에 31개 일자 + 양끝 ISO 일자 포함 (검증 12 + design doc §9.1)."""
+        response = client.get("/dashboard", params={"base_date": "2026-04-29"})
+        assert response.status_code == 200
+        body = response.text
+        # 양끝 일자가 임베드 JSON 안에 들어 있어야 한다.
+        assert "2026-04-14" in body
+        assert "2026-05-14" in body
+        # x_axis_label 키가 임베드 JSON 에 노출되어 있어야 한다.
+        assert "x_axis_label" in body
+
+    def test_trend_chart_uses_kst_mm_dd_label(self, client: TestClient) -> None:
+        """x축 라벨이 'MM-DD' KST 표시 — Jinja2 필터 경유 정합성 (검증 13)."""
+        response = client.get("/dashboard", params={"base_date": "2026-04-29"})
+        body = response.text
+        # 임베드 JSON 안에 \"x_axis_label\": \"04-29\" 같은 패턴이 들어 있어야 한다.
+        # tojson | safe 가 한글/영문 모두 이스케이프 처리하므로 substring 매칭.
+        assert '"04-14"' in body  # 시작 일자 라벨.
+        assert '"05-14"' in body  # 끝 일자 라벨.
+
+    def test_chart_js_vendor_bundle_exists(self) -> None:
+        """vendor 디렉토리에 실제 chart.min.js 가 존재해야 한다 (라이선스 NOTICE 정합)."""
+        from pathlib import Path
+
+        vendor_path = Path("app/web/static/vendor/chart.min.js").resolve()
+        assert vendor_path.is_file()
+        # 사이즈가 어느 정도 있어야 — 빈 placeholder 가 아닌 실제 번들.
+        assert vendor_path.stat().st_size > 50_000
+
+    def test_notice_file_lists_chart_js(self) -> None:
+        """NOTICE 파일에 Chart.js MIT 라이선스 항목이 있어야 한다."""
+        from pathlib import Path
+
+        notice_path = Path("NOTICE").resolve()
+        assert notice_path.is_file()
+        notice_text = notice_path.read_text(encoding="utf-8")
+        assert "Chart.js" in notice_text
+        assert "MIT" in notice_text
+        assert "chart.min.js" in notice_text

@@ -1,0 +1,50 @@
+Government Project Analysis Agent — Third-party License Notice
+==============================================================
+
+This project bundles third-party libraries listed below. Each entry includes
+the source URL, version, and license. The full license texts are reproduced
+under "License Texts" at the end of this file.
+
+본 프로젝트는 아래 제3자 라이브러리를 함께 배포(번들) 합니다. 각 항목은 출처
+URL / 버전 / 라이선스를 명시하며, 전체 라이선스 본문은 마지막 "License Texts"
+절에 그대로 인용했습니다.
+
+--------------------------------------------------------------------------
+1. Chart.js — used for the dashboard trend chart (Phase 5b / task 00042-6)
+--------------------------------------------------------------------------
+
+- File:     app/web/static/vendor/chart.min.js
+- Version:  4.4.0 (UMD bundle from chart.umd.min.js)
+- Source:   https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js
+- License:  MIT License
+- Copyright (c) 2014-2022 Chart.js Contributors
+- Project:  https://github.com/chartjs/Chart.js
+
+The bundle is included verbatim and is not modified. License terms are
+reproduced below.
+
+--------------------------------------------------------------------------
+License Texts
+--------------------------------------------------------------------------
+
+[Chart.js — MIT License]
+
+Copyright (c) 2014-2022 Chart.js Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.

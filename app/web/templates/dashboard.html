@@ -323,18 +323,32 @@
     </section>
 
     {# ─────────────────────────────────────────────────────────
-       5. 추이 차트 — 후속 subtask 00042-6.
+       5. 추이 차트 — 기준일 ±15일 일별 카운트 (task 00042-6).
+       Chart.js 4.x 로컬 vendor 번들 + 서버 사전 계산 후 JSON 임베드.
        ───────────────────────────────────────────────────────── #}
     <section class="dashboard-section dashboard-section--trend"
+             data-dashboard-trend-chart
              aria-label="추이 차트">
-        <h3 class="dashboard-section__title">추이 (기준일 ±15일)</h3>
-        {% if trend_chart %}
-            {# 00042-6 가 채움 — Chart.js 로컬 vendor + JSON 임베드. #}
-        {% else %}
+        <h3 class="dashboard-section__title">
+            추이 (기준일 ±{{ trend_chart.half_window }}일,
+            <span class="dashboard-section__title-meta">{{ trend_chart.from_date.isoformat() }}
+                ~ {{ trend_chart.to_date.isoformat() }}</span>)
+        </h3>
+        <div class="dashboard-trend-chart__canvas-wrapper">
+            {# Chart.js 가 그릴 캔버스. 사이즈는 CSS / wrapper 가 정한다. #}
+            <canvas id="dashboardTrendChart" role="img"
+                    aria-label="기준일 ±{{ trend_chart.half_window }}일 일별 신규/내용 변경/전이 카운트"></canvas>
+        </div>
+        <noscript>
             <p class="dashboard-section__placeholder">
-                추이 차트는 후속 subtask 에서 채워집니다 (Chart.js 일별 카운트).
+                JavaScript 가 비활성화된 환경에서는 추이 차트가 표시되지 않습니다.
             </p>
-        {% endif %}
+        </noscript>
+
+        {# 서버 사전 계산된 JSON 데이터를 임베드 (별도 API fetch 없음 — 사용자 원문 §12). #}
+        <script id="dashboardTrendChartData" type="application/json">
+            {{ trend_chart_json | tojson | safe }}
+        </script>
     </section>
 </section>
 
@@ -348,4 +362,7 @@
 
 {% block extra_scripts %}
 <script src="/static/js/dashboard_calendar.js"></script>
+{# Chart.js 4.x 로컬 vendor 번들 (외부 CDN 의존 없음 컨벤션). 라이선스는 NOTICE 참조. #}
+<script src="/static/vendor/chart.min.js"></script>
+<script src="/static/js/dashboard_trend_chart.js"></script>
 {% endblock %}

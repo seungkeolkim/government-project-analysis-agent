@@ -3701,6 +3701,43 @@ def list_snapshots_in_range(
     return list(rows)
 
 
+def list_snapshots_in_inclusive_range(
+    session: Session,
+    *,
+    from_inclusive: date,
+    to_inclusive: date,
+) -> list[ScrapeSnapshot]:
+    """``[from_inclusive, to_inclusive]`` 양끝 포함 구간의 ScrapeSnapshot list.
+
+    Phase 5b (task 00042-6) 의 추이 차트 (±15일) 가 사용한다.
+    ``list_snapshots_in_range`` (반-open ``(from, to]``) 와 시맨틱이 다르므로
+    별도 헬퍼로 둔다 — 호출자가 둘을 헷갈릴 위험을 줄인다.
+
+    SQL: ``WHERE snapshot_date >= :from_inclusive AND snapshot_date <= :to_inclusive``
+         ``ORDER BY snapshot_date ASC``
+
+    호출 의도:
+        추이 차트의 ±15일 = 31일 (양끝 포함, design doc §9.1) 데이터 fetch 를
+        단일 IN/BETWEEN 쿼리 1회로 끝낸다. snapshot 가 없는 날짜는 결과에서
+        자연스럽게 빠지고, 빌더가 0 으로 채워 그래프에 골짜기를 만든다.
+
+    Args:
+        session:        호출자 세션.
+        from_inclusive: 시작 경계 (포함). 보통 ``base_date - timedelta(days=15)``.
+        to_inclusive:   끝 경계 (포함). 보통 ``base_date + timedelta(days=15)``.
+
+    Returns:
+        ``ScrapeSnapshot`` list, ``snapshot_date`` 오름차순. 매칭 0건은 빈 list.
+    """
+    rows = session.execute(
+        select(ScrapeSnapshot)
+        .where(ScrapeSnapshot.snapshot_date >= from_inclusive)
+        .where(ScrapeSnapshot.snapshot_date <= to_inclusive)
+        .order_by(ScrapeSnapshot.snapshot_date.asc())
+    ).scalars().all()
+    return list(rows)
+
+
 def find_nearest_previous_snapshot_date(
     session: Session,
     *,
