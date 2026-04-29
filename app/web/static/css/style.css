@@ -977,6 +977,21 @@ body.is-anonymous .announcement-title-link--read {
     color: #1f2937;
 }
 
+/*
+  task 00045 — 최근 실행 이력 [요약] 셀 안에서 segment 한 줄씩 쌓기.
+  스크래퍼 로그 마지막 줄과 같은 정보(성공/실패/상세/첨부/apply 분포/2차 감지)
+  를 segment 5개로 나눠 표시하므로, 한 줄당 가독성을 위해 line-height 를 약간
+  좁히고 segment 사이만 살짝 띄운다.
+*/
+.admin-table__summary-line {
+    line-height: 1.4;
+    white-space: nowrap;
+}
+
+.admin-table__summary-line + .admin-table__summary-line {
+    margin-top: 2px;
+}
+
 .site-nav__link--admin {
     color: #b91c1c;
     font-weight: 600;

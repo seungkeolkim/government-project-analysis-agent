@@ -254,13 +254,14 @@
         return;
       }
       var rows = recentRuns.map(function (run) {
-        var countsSummary = "";
-        var totals = run.source_counts && run.source_counts.totals;
-        if (totals) {
-          countsSummary =
-            "성공 " + (totals.success || 0) +
-            " / 실패 " + (totals.failure || 0);
-        }
+        // task 00045 — 서버가 _summarize_source_counts 로 미리 만들어 보낸
+        // segment 리스트를 그대로 한 줄씩 출력한다. JS 측에서는 분기/계산 없이
+        // 표시만 한다(서버 사이드 템플릿과 같은 출력 모양을 유지). 빈 리스트면
+        // 셀이 비어 그 동안의 동작과 같다.
+        var summarySegments = Array.isArray(run.summary_segments) ? run.summary_segments : [];
+        var countsSummary = summarySegments.map(function (segment) {
+          return '<div class="admin-table__summary-line">' + escapeHtml(segment) + '</div>';
+        }).join("");
         var err = run.error_message
           ? ' <span class="admin-state__muted">(' + run.error_message + ')</span>'
           : "";

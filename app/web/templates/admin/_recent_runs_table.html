@@ -38,9 +38,17 @@
             <td>{{ run.started_at_display or '' }}</td>
             <td>{{ run.ended_at_display or '' }}</td>
             <td>
-                {% set totals = run.source_counts.totals if run.source_counts else None %}
-                {% if totals %}
-                    성공 {{ totals.success | default(0) }} / 실패 {{ totals.failure | default(0) }}
+                {#
+                  task 00045 — 최근 실행 이력 요약 강화.
+                  서버 측 _serialize_scrape_run 이 source_counts 로부터 한 줄짜리
+                  segment 리스트를 미리 만들어 둔다 (스크래퍼 로그 마지막 줄과
+                  동일 형식). 템플릿은 단순히 segment 별로 한 줄씩 출력만 한다.
+                  segment 가 없으면(running row, 옛 row 등) 셀을 비워 둔다.
+                #}
+                {% if run.summary_segments %}
+                    {% for segment in run.summary_segments %}
+                    <div class="admin-table__summary-line">{{ segment }}</div>
+                    {% endfor %}
                 {% endif %}
             </td>
             <td>

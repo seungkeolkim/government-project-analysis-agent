@@ -114,6 +114,118 @@ router = APIRouter(
 # ──────────────────────────────────────────────────────────────
 
 
+def _coerce_count(value: Any) -> int:
+    """source_counts dict 에서 읽어 들인 카운트를 안전하게 정수로 변환한다.
+
+    Args:
+        value: dict 에서 꺼낸 임의 값. 정상적으로는 int 지만, 옛 row 또는
+            손상된 row 에 None / 문자열 / float 가 들어 있을 수 있다.
+
+    Returns:
+        가능한 경우 int 로 환산한 값. 변환 실패하면 0 (raise 하지 않는다 —
+        UI 가 통째로 500 이 나면 관리자 탭이 마비된다).
+    """
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        # bool 은 int 의 서브클래스라 isinstance(value, int) 보다 먼저 거른다.
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _summarize_source_counts(source_counts: dict[str, Any]) -> list[str]:
+    """ScrapeRun.source_counts 를 사용자 화면 표시용 요약 segment 리스트로 변환.
+
+    스크래퍼 로그 마지막 줄(``app/cli.py`` 의 'scrape 실행 완료: ...' 라인) 의
+    형식과 동일한 segment 5개를 만들어 돌려준다 — 사용자 원문에서 \"바로 보이길
+    원하는 정보\" 가 그 로그 한 줄이기 때문이다.
+
+    반환되는 segment 순서/형식:
+        1) ``성공 N건 / 실패 N건`` (collection.delta_inserted/delta_failed)
+        2) ``상세 성공 N건 / 실패 N건 / 생략(unchanged peek) N건``
+        3) ``첨부 다운로드 성공 N건 / 실패 N건``
+        4) ``apply action 분포: 신규=N 변경없음=N 버전갱신=N 상태전이=N``
+        5) ``apply 2차 감지(첨부 변경)=N건``
+
+    ``_build_final_source_counts`` (``app/cli.py``) 가 만든 새 schema(``collection``
+    /``apply`` 두 섹션) 를 1순위로 읽고, 누락 키는 0 으로 폴백한다. 진행 중
+    running row 처럼 ``collection`` 도 ``apply`` 도 없는 경우(키가 ``active_sources``
+    뿐) 에는 표시할 의미 있는 값이 없으므로 **빈 리스트** 를 반환한다 —
+    호출자(템플릿/JS) 는 비어 있으면 셀에 아무것도 그리지 않는다.
+
+    옛 row 폴백 정책: collection/apply 가 부분적으로라도 있으면 segment 를
+    그리고, 누락 키는 0 으로 둔다. raise 하지 않는다 — UI 가 500 이 나면
+    [수집 제어] 탭 전체가 마비되고 그쪽 피해가 더 크다.
+
+    Args:
+        source_counts: ScrapeRun.source_counts 컬럼에서 읽은 dict (또는 빈 dict).
+
+    Returns:
+        화면 표시용 한 줄 segment 의 리스트. 표시할 값이 없으면 빈 리스트.
+    """
+    if not source_counts:
+        return []
+
+    collection = source_counts.get("collection")
+    apply_section = source_counts.get("apply")
+    if not isinstance(collection, dict) and not isinstance(apply_section, dict):
+        # 새 schema 의 두 섹션이 모두 없다 — running row 또는 finalize 가 안 된
+        # 케이스. 표시할 정보가 없으므로 빈 리스트를 돌려준다.
+        return []
+
+    collection_dict: dict[str, Any] = collection if isinstance(collection, dict) else {}
+    apply_dict: dict[str, Any] = (
+        apply_section if isinstance(apply_section, dict) else {}
+    )
+    action_counts_raw = apply_dict.get("action_counts")
+    action_counts: dict[str, Any] = (
+        action_counts_raw if isinstance(action_counts_raw, dict) else {}
+    )
+
+    delta_inserted = _coerce_count(collection_dict.get("delta_inserted"))
+    delta_failed = _coerce_count(collection_dict.get("delta_failed"))
+    detail_success = _coerce_count(collection_dict.get("detail_success"))
+    detail_failure = _coerce_count(collection_dict.get("detail_failure"))
+    skipped_detail = _coerce_count(collection_dict.get("skipped_detail"))
+    attachment_dl_success = _coerce_count(
+        collection_dict.get("attachment_download_success")
+    )
+    attachment_dl_failure = _coerce_count(
+        collection_dict.get("attachment_download_failure")
+    )
+
+    apply_created = _coerce_count(action_counts.get("created"))
+    apply_unchanged = _coerce_count(action_counts.get("unchanged"))
+    apply_new_version = _coerce_count(action_counts.get("new_version"))
+    apply_status_transitioned = _coerce_count(
+        action_counts.get("status_transitioned")
+    )
+    apply_attachment_content_change = _coerce_count(
+        apply_dict.get("attachment_content_change")
+    )
+
+    return [
+        f"성공 {delta_inserted}건 / 실패 {delta_failed}건",
+        (
+            f"상세 성공 {detail_success}건 / 실패 {detail_failure}건 / "
+            f"생략(unchanged peek) {skipped_detail}건"
+        ),
+        f"첨부 다운로드 성공 {attachment_dl_success}건 / 실패 {attachment_dl_failure}건",
+        (
+            f"apply action 분포: 신규={apply_created} 변경없음={apply_unchanged} "
+            f"버전갱신={apply_new_version} 상태전이={apply_status_transitioned}"
+        ),
+        f"apply 2차 감지(첨부 변경)={apply_attachment_content_change}건",
+    ]
+
+
 def _serialize_scrape_run(run: ScrapeRun) -> dict[str, Any]:
     """ScrapeRun ORM 을 JSON 직렬화 가능한 dict 로 변환한다.
 
@@ -129,7 +241,12 @@ def _serialize_scrape_run(run: ScrapeRun) -> dict[str, Any]:
       started_at/ended_at 표시 KST\" 요건을 만족시키되 원본 ISO 필드는
       깨뜨리지 않기 위함이다. None 입력은 빈 문자열로 통일.
     - ``source_counts`` 는 dict 원본을 그대로 노출 (UI 는 subset 만 사용).
+    - ``summary_segments`` 는 표시용으로 사전 계산해 둔 한 줄짜리 segment 리스트
+      이다 (task 00045 — \"최근 실행 이력 카드에 스크래퍼 로그 마지막 줄 수준의
+      정보가 바로 보이길 원해\"). 템플릿/폴링 JS 는 이 필드를 그대로 출력만 하면
+      되므로, 표시 로직 분기점이 한 곳(``_summarize_source_counts``)에 모인다.
     """
+    source_counts_dict = dict(run.source_counts or {})
     return {
         "id": run.id,
         "started_at": run.started_at.isoformat() if run.started_at else None,
@@ -140,7 +257,8 @@ def _serialize_scrape_run(run: ScrapeRun) -> dict[str, Any]:
         "ended_at_display": format_kst(run.ended_at, "%Y-%m-%d %H:%M:%S"),
         "status": run.status,
         "trigger": run.trigger,
-        "source_counts": dict(run.source_counts or {}),
+        "source_counts": source_counts_dict,
+        "summary_segments": _summarize_source_counts(source_counts_dict),
         "error_message": run.error_message,
         "pid": run.pid,
     }
