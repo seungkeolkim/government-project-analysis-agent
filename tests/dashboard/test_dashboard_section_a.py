@@ -115,7 +115,11 @@ class TestBuildSectionA:
     def test_no_data_when_compare_snapshot_missing_and_no_previous(
         self, session: Session
     ) -> None:
-        """(c) 비교일 이전 snapshot 전무 → is_no_data=True + 카드 5종 모두 0."""
+        """(d) baseline 도 없고 (from, to] 구간 안 snapshot 도 0건 → is_no_data=True.
+
+        DB 에 snapshot 이 전혀 없는 상태에서 호출하면 baseline 부재 + 구간 비어
+        있음 두 조건이 모두 충족되어 진짜 \"데이터 없음\" 분기로 빠진다.
+        """
         result = build_section_a(
             session,
             base_date=date(2026, 4, 29),
@@ -123,7 +127,9 @@ class TestBuildSectionA:
         )
 
         assert result.fallback.is_no_data is True
+        # 진짜 데이터 없음 박스가 우선이므로 fallback 안내문은 띄우지 않는다.
         assert result.fallback.applied is False
+        assert result.fallback.message == ""
         assert result.fallback.effective_compare_date is None
         # 5종 카드 모두 0 + items 빈 list.
         assert len(result.cards) == 5
@@ -134,6 +140,74 @@ class TestBuildSectionA:
             assert card.items == []
         assert result.merged_announcement_ids == []
         assert result.merged_canonical_group_ids == []
+
+    def test_no_baseline_but_base_snapshot_present_shows_cumulative(
+        self, session: Session
+    ) -> None:
+        """(c-NEW) baseline 부재 + 기준일 snapshot 1건 → 카드에 누적 변화 표시.
+
+        사용자 원문 시나리오 — 비교일(2026-04-28) snapshot 도, 그 이전
+        snapshot 도 없으나 기준일(2026-04-29) snapshot 은 존재. 이전 동작은
+        is_no_data=True 로 0건을 표시했지만, 본 회귀는 (from, to] 구간 안의
+        2026-04-29 snapshot 을 활용해 누적 결과 + compare_count=None (\"비교일
+        — \") 으로 노출되는지 검증한다.
+        """
+        # 사용자 원문 payload 의 announcement id 들을 1:1 로 INSERT (메타 fetch 가
+        # expand items 까지 채울 수 있도록) — id 40, 55-64, 58.
+        announcement_ids_in_payload = [40, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64]
+        for announcement_id in announcement_ids_in_payload:
+            _make_canonical_with_announcement(
+                session,
+                canonical_key=f"key-{announcement_id:03d}",
+                title=f"공고 {announcement_id}",
+                source_announcement_id=f"A-{announcement_id:03d}",
+            )
+        # ORM 이 1 부터 PK 를 채우므로 실제 announcement.id 와 payload id 가
+        # 어긋날 수 있다 — 카운트 검증은 payload.counts 기준이라 영향이 없으나,
+        # expand items 의 announcement_id 매핑까지 검증하려면 payload 의 id 를
+        # 실제 INSERT 결과와 맞춰 줘야 한다. 본 테스트는 카운트/베이스라인 부재
+        # 분기 검증이 핵심이므로 카운트 단언만 둔다.
+
+        # 사용자 원문 payload 그대로 — 기준일 (2026-04-29) snapshot 1건만 INSERT.
+        user_payload = {
+            "new": [55, 56, 57, 59, 60, 61, 62, 63, 64],
+            "content_changed": [58],
+            "transitioned_to_접수예정": [],
+            "transitioned_to_접수중": [{"id": 58, "from": "접수예정"}],
+            "transitioned_to_마감": [{"id": 40, "from": "접수중"}],
+        }
+        _insert_snapshot(
+            session,
+            snapshot_date_iso="2026-04-29",
+            payload=user_payload,
+        )
+
+        result = build_section_a(
+            session,
+            base_date=date(2026, 4, 29),
+            requested_compare_date=date(2026, 4, 28),
+        )
+
+        # baseline 부재 분기 — fallback.applied=True (\"baseline 없이 누적만\"
+        # 안내문) + is_no_data=False.
+        assert result.fallback.is_no_data is False
+        assert result.fallback.applied is True
+        assert result.fallback.effective_compare_date is None
+        assert "baseline 없이" in result.fallback.message
+
+        # 카운트는 사용자 원문 payload 와 정확히 일치해야 한다 (counts 기준).
+        cards_by_key = {card.category_key: card for card in result.cards}
+        assert cards_by_key[CATEGORY_NEW].base_count == 9
+        assert cards_by_key[CATEGORY_CONTENT_CHANGED].base_count == 1
+        assert cards_by_key["transitioned_to_접수예정"].base_count == 0
+        assert cards_by_key["transitioned_to_접수중"].base_count == 1
+        assert cards_by_key["transitioned_to_마감"].base_count == 1
+
+        # baseline 이 없으므로 5종 모두 compare_count/delta/direction 이 None.
+        for card in result.cards:
+            assert card.compare_count is None, card.category_key
+            assert card.delta is None, card.category_key
+            assert card.delta_direction is None, card.category_key
 
     def test_single_day_range_matches_single_snapshot_compare(
         self, session: Session
