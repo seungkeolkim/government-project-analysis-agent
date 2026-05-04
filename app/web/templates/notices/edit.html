@@ -1,0 +1,68 @@
+{#
+  공지사항 수정 폼 페이지 (task 00056-3).
+
+  컨텍스트 (라우트 edit_notice_page 가 주입):
+    - current_user: User          (관리자 보장 — dependency)
+    - is_admin:     bool (True)
+    - notice:       Notice ORM 인스턴스 (prefill 대상)
+
+  렌더 정책:
+    - 본 페이지는 라우트의 admin_user_required 를 통과한 관리자에게만 도달한다.
+    - 수정 가능 필드: 제목, 본문.
+    - POST 는 application/x-www-form-urlencoded 으로 /notices/{id}/edit 에 전송.
+#}
+{% extends "base.html" %}
+
+{% block page_title %}공지사항 수정{% endblock %}
+
+{% block content %}
+<section class="suggestions-page">
+    <header class="suggestions-page__heading">
+        <h2 class="suggestions-page__title">공지사항 수정</h2>
+        <a class="suggestion-form__cancel" href="/notices/{{ notice.id }}">취소</a>
+    </header>
+
+    <form class="suggestion-form" method="post" action="/notices/{{ notice.id }}/edit">
+        <div class="suggestion-form__row suggestion-form__row--inline">
+            <span class="suggestion-form__label">작성자</span>
+            <span class="suggestion-form__author-readonly">
+                {{ notice.author_name or current_user.username }}
+            </span>
+            <small class="suggestion-form__hint">
+                작성자명은 변경할 수 없습니다.
+            </small>
+        </div>
+
+        <div class="suggestion-form__row">
+            <label class="suggestion-form__label" for="notice-title">제목 *</label>
+            <input
+                class="suggestion-form__input"
+                id="notice-title"
+                name="title"
+                type="text"
+                required
+                maxlength="255"
+                autocomplete="off"
+                value="{{ notice.title }}"
+            >
+        </div>
+
+        <div class="suggestion-form__row">
+            <label class="suggestion-form__label" for="notice-body">본문 *</label>
+            {# textarea 안의 본문은 Jinja2 자동 escape. |safe 사용 금지. #}
+            <textarea
+                class="suggestion-form__textarea"
+                id="notice-body"
+                name="body"
+                required
+                maxlength="20000"
+            >{{ notice.body }}</textarea>
+        </div>
+
+        <div class="suggestion-form__actions">
+            <button type="submit" class="suggestion-form__submit">저장</button>
+            <a href="/notices/{{ notice.id }}" class="suggestion-form__cancel">취소</a>
+        </div>
+    </form>
+</section>
+{% endblock %}

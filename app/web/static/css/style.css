@@ -3377,13 +3377,31 @@ details[open] .user-card__org-summary::before {
     padding: 6px 4px;
 }
 
-/* ---------- 건의사항 게시판 (task 00051) ---------- */
+/* ---------- 공지사항 + 건의사항 게시판 (task 00056) ---------- */
 
-/* footer 진입 링크. 회귀 최소화를 위해 footer 내부에만 단일 링크로 추가한다. */
-.site-footer__suggestions {
+/* footer 진입 링크 두 개를 가로로 나란히 배치한다.
+   DOM 순서: 공지사항(왼쪽) → 건의사항(오른쪽). */
+.site-footer__board-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
     margin: 0 0 6px;
 }
 
+/* 공지사항 링크 — 틸(teal) 계열. 건의사항 인디고(#4f46e5)와 명확히 다른 색조. */
+.footer-notices-link {
+    color: #0f766e;
+    text-decoration: none;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.footer-notices-link:hover {
+    text-decoration: underline;
+}
+
+/* 건의사항 링크 — 인디고 계열. 기존 색 유지. */
 .footer-suggestions-link {
     color: #4f46e5;
     text-decoration: none;
@@ -3393,6 +3411,23 @@ details[open] .user-card__org-summary::before {
 
 .footer-suggestions-link:hover {
     text-decoration: underline;
+}
+
+/* 공지사항 목록 글쓰기 버튼 (관리자 전용) */
+.notices-page__write-button {
+    padding: 6px 14px;
+    border: 1px solid #0f766e;
+    border-radius: 4px;
+    background: #0f766e;
+    color: #ffffff;
+    text-decoration: none;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.notices-page__write-button:hover {
+    background: #0d6460;
+    border-color: #0d6460;
 }
 
 /* 페이지 컨테이너 — 목록/작성/뷰어 공통 헤딩 영역. */

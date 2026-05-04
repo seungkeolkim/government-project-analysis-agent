@@ -1,0 +1,79 @@
+{#
+  공지사항 게시판 목록 페이지 (task 00056-3).
+
+  컨텍스트 (라우트 list_notices_page 가 주입):
+    - current_user: User | None  (base.html 네비 분기용)
+    - is_admin:     bool         (글쓰기 버튼 노출 여부)
+    - notices:      list[Notice] (공지사항 ORM 인스턴스 리스트)
+    - page / page_size / total / total_pages: 페이지네이션 컨텍스트
+
+  표시 규칙:
+    - 비밀글·수용여부·댓글 없음 (사용자 원문 명시).
+    - 관리자에게만 글쓰기 버튼 노출.
+#}
+{% extends "base.html" %}
+
+{% block page_title %}공지사항{% endblock %}
+
+{% block content %}
+<section class="suggestions-page">
+    <header class="suggestions-page__heading">
+        <h2 class="suggestions-page__title">공지사항</h2>
+        {% if is_admin %}
+        <a class="notices-page__write-button" href="/notices/new">글쓰기</a>
+        {% endif %}
+    </header>
+
+    {% if notices %}
+    <div class="suggestion-list-wrapper">
+    <table class="suggestion-list">
+        <thead>
+            <tr>
+                <th scope="col" style="width: 60%;">제목</th>
+                <th scope="col" style="width: 20%;">작성자</th>
+                <th scope="col" style="width: 20%;">작성시간</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for notice in notices %}
+            <tr class="suggestion-row">
+                <td class="suggestion-list__title-cell">
+                    <a href="/notices/{{ notice.id }}">{{ notice.title }}</a>
+                </td>
+                <td>
+                    {% if notice.author_name %}
+                        {{ notice.author_name }}
+                    {% else %}
+                        <span class="suggestion-detail__placeholder">(없음)</span>
+                    {% endif %}
+                </td>
+                <td>{{ notice.created_at | kst_format }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    </div>
+
+    {% if total_pages > 1 %}
+    <nav class="suggestion-pagination" aria-label="페이지 이동">
+        {% if page > 1 %}
+            <a href="?page={{ page - 1 }}&page_size={{ page_size }}">이전</a>
+        {% else %}
+            <span>이전</span>
+        {% endif %}
+        <span class="is-current">{{ page }} / {{ total_pages }}</span>
+        {% if page < total_pages %}
+            <a href="?page={{ page + 1 }}&page_size={{ page_size }}">다음</a>
+        {% else %}
+            <span>다음</span>
+        {% endif %}
+    </nav>
+    {% endif %}
+
+    {% else %}
+    <div class="suggestion-empty">
+        등록된 공지사항이 없습니다.
+    </div>
+    {% endif %}
+</section>
+{% endblock %}

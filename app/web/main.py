@@ -56,7 +56,7 @@ from app.db.session import SessionLocal
 from app.logging_setup import configure_logging
 from app.scheduler import start_scheduler, stop_scheduler
 from app.scrape_control import cleanup_stale_running_runs
-from app.suggestions import init_suggestions_db
+from app.suggestions import init_suggestions_db, migrate_suggestions_to_boards
 from app.web.observability import (
     install_request_logging_middleware,
     install_unhandled_exception_handler,
@@ -66,6 +66,7 @@ from app.web.routes import (
     bulk_router,
     dashboard_router,
     favorites_router,
+    notices_router,
     relevance_router,
     settings_router,
     suggestions_router,
@@ -249,7 +250,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     effective_settings.ensure_runtime_paths()
     init_db()
 
-    # task 00051 — 건의사항 게시판 별도 DB 의 테이블을 멱등하게 보장한다.
+    # task 00056 — suggestions.sqlite3 → boards.sqlite3 원자적 이름 변경.
+    # 반드시 get_suggestions_engine() lru_cache 첫 호출(init_suggestions_db) 직전에
+    # 실행되어야 엔진이 신규 경로(boards.sqlite3)로 처음 생성된다.
+    migrate_suggestions_to_boards()
+
+    # task 00051 — 게시판 별도 DB 의 테이블을 멱등하게 보장한다.
     # 메인 DB(init_db, Alembic) 와 별개의 SQLite 파일이며, 메인 DB reset 시에도
     # 영향을 받지 않는다. create_all 기반이라 반복 호출 안전(이미 존재하면 무시).
     init_suggestions_db()
@@ -358,6 +364,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # task 00049-2: 개인 설정 라우터(/settings, /settings/*) mount.
     # 비로그인 GET → /login?next=/settings 리다이렉트. POST 는 401 반환.
     fastapi_app.include_router(settings_router)
+
+    # task 00056-3: 공지사항 게시판 라우터(/notices/*) mount.
+    # 목록·상세는 비로그인도 열람 가능. 작성/수정/삭제는 관리자 전용.
+    fastapi_app.include_router(notices_router)
 
     # task 00051-2: 건의사항 게시판 라우터(/suggestions, /suggestions/new) mount.
     # 비로그인도 목록·폼 진입 가능(폼은 안내만 표시), POST /suggestions 는 로그인 필수.
