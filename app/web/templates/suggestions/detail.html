@@ -45,13 +45,39 @@
     {% endif %}
 
     <article class="suggestion-detail__article {% if is_orphan %}suggestion-detail__article--orphan{% endif %}">
-        <h3 class="suggestion-detail__title">
-            {% if suggestion.is_secret %}
-                <span class="suggestion-list__secret-prefix" aria-hidden="true">🔒</span>
-            {% endif %}
-            {{ suggestion.title }}
-        </h3>
+        {#
+          헤더 — 제목 + 상태 배지(비밀글/수용 여부).
+          한 눈에 글 정체성과 처리 상태를 파악할 수 있도록 메타 카드보다 위에 둔다.
+        #}
+        <header class="suggestion-detail__header">
+            <h3 class="suggestion-detail__title">
+                {% if suggestion.is_secret %}
+                    <span class="suggestion-list__secret-prefix" aria-hidden="true">🔒</span>
+                {% endif %}
+                {{ suggestion.title }}
+            </h3>
+            <div class="suggestion-detail__header-badges">
+                {% if suggestion.is_secret %}
+                    <span class="suggestion-status-badge suggestion-status-badge--secret">비밀글</span>
+                {% endif %}
+                {% set status_value = suggestion.acceptance_status.value %}
+                {% if status_value == "수용" %}
+                    <span class="suggestion-status-badge suggestion-status-badge--accepted">수용</span>
+                {% elif status_value == "일부수용" %}
+                    <span class="suggestion-status-badge suggestion-status-badge--partial">일부수용</span>
+                {% elif status_value == "거절" %}
+                    <span class="suggestion-status-badge suggestion-status-badge--rejected">거절</span>
+                {% else %}
+                    <span class="suggestion-status-badge suggestion-status-badge--pending">검토중</span>
+                {% endif %}
+            </div>
+        </header>
 
+        {#
+          메타 카드 — 작성자/연락처/작성시간/비밀글/수용 여부 (구조화된 필드 정보).
+          관리자 사유와 예상 완료일은 시각적으로 더 강조해야 하고, 다중 줄 줄바꿈을
+          자연스럽게 처리해야 하므로 별도 관리자 피드백 섹션으로 분리했다.
+        #}
         <dl class="suggestion-detail__meta">
             <div class="suggestion-detail__meta-row">
                 <dt>작성자</dt>
@@ -106,34 +132,52 @@
                     {% endif %}
                 </dd>
             </div>
+        </dl>
 
-            {# 사유는 관리자가 입력했을 때만 의미 있는 값 — 미입력 시 안내 텍스트 노출. #}
-            <div class="suggestion-detail__meta-row">
-                <dt>관리자 사유</dt>
-                <dd>
+        {#
+          본문 섹션 — 본문 라벨로 시각 위계 명시.
+          |safe 절대 금지. 자동 escape + CSS white-space: pre-wrap 으로 줄바꿈 보존.
+        #}
+        <section class="suggestion-detail__section suggestion-detail__section--body">
+            <h4 class="suggestion-detail__section-title">본문</h4>
+            <div class="suggestion-detail__body">{{ suggestion.body }}</div>
+        </section>
+    </article>
+
+    {#
+      관리자 피드백 카드 (task 00052-3 에서 메타 dl 에서 분리).
+      - 사유와 예상 완료일을 한 카드에 묶어 큰 글씨/박스로 표시.
+      - 사유 텍스트는 inline span 이 아닌 block <p> 컨테이너로 감싸 다중 줄
+        줄바꿈이 자연스럽게 동작하도록 한다(white-space: pre-wrap 은 block 에 적용).
+      - 사유 미입력 시 기존 placeholder 톤(.suggestion-detail__placeholder)을 그대로 재사용.
+    #}
+    <section class="suggestion-detail__feedback" aria-label="관리자 피드백">
+        <h4 class="suggestion-detail__section-title">관리자 피드백</h4>
+        <dl class="suggestion-detail__feedback-list">
+            <div class="suggestion-detail__feedback-row">
+                <dt class="suggestion-detail__feedback-term">사유</dt>
+                <dd class="suggestion-detail__feedback-desc">
                     {% if suggestion.acceptance_reason %}
-                        <span class="suggestion-detail__reason">{{ suggestion.acceptance_reason }}</span>
+                        <p class="suggestion-detail__reason">{{ suggestion.acceptance_reason }}</p>
                     {% else %}
-                        <span class="suggestion-detail__placeholder">아직 입력되지 않았습니다.</span>
+                        <p class="suggestion-detail__placeholder">아직 입력되지 않았습니다.</p>
                     {% endif %}
                 </dd>
             </div>
-
-            <div class="suggestion-detail__meta-row">
-                <dt>예상 완료일</dt>
-                <dd>
+            <div class="suggestion-detail__feedback-row">
+                <dt class="suggestion-detail__feedback-term">예상 완료일</dt>
+                <dd class="suggestion-detail__feedback-desc">
                     {% if suggestion.expected_completion_date %}
-                        {{ suggestion.expected_completion_date.isoformat() }}
+                        <span class="suggestion-detail__feedback-date">
+                            {{ suggestion.expected_completion_date.isoformat() }}
+                        </span>
                     {% else %}
                         <span class="suggestion-detail__placeholder">미입력</span>
                     {% endif %}
                 </dd>
             </div>
         </dl>
-
-        {# 본문: |safe 절대 금지. 자동 escape + CSS pre-wrap 으로 줄바꿈 보존. #}
-        <div class="suggestion-detail__body">{{ suggestion.body }}</div>
-    </article>
+    </section>
 
     {#
       관리자 수용여부 체크/수정 버튼 + 모달 (00051-5).
