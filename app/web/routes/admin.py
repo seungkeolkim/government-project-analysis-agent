@@ -60,12 +60,15 @@ from app.db.session import SessionLocal, session_scope
 from app.organizations.service import (
     DuplicateOrganizationNameError,
     OrganizationHasChildrenError,
+    OrganizationInvalidMoveError,
     OrganizationNotFoundError,
     build_organization_tree,
     create_organization,
     delete_organization,
     get_user_organization_ids,
     list_all_organizations,
+    move_organization,
+    rename_organization,
     set_user_organizations,
 )
 from app.db.repository import (
@@ -1227,6 +1230,116 @@ def organizations_delete(
     )
     return RedirectResponse(
         url=_org_flash_url(f"조직 '{org_name}' 이(가) 삭제되었습니다.", level="success"),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.post(
+    "/organizations/{org_id}/rename",
+    dependencies=[Depends(ensure_same_origin)],
+)
+def organizations_rename(
+    org_id: int,
+    new_name: str = Form(...),
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """조직명을 변경한다.
+
+    Form 필드:
+        new_name: 새 조직명. 좌우 공백은 서비스 레이어에서 제거된다.
+
+    흐름:
+        1. rename_organization 호출.
+        2. ValueError(빈 이름) / OrganizationNotFoundError / DuplicateOrganizationNameError
+           → flash error redirect.
+        3. 성공 → flash success redirect (PRG 패턴).
+
+    Args:
+        org_id:  이름을 변경할 조직 PK (URL 경로 파라미터).
+        new_name: 새 조직명 (Form).
+    """
+    session = SessionLocal()
+    try:
+        try:
+            rename_organization(session, org_id, new_name)
+            session.commit()
+        except ValueError as exc:
+            session.rollback()
+            logger.info(
+                "조직 이름 변경 거부: 관리자={} org_id={} new_name={!r} ({})",
+                current_user.username, org_id, new_name, exc,
+            )
+            return RedirectResponse(
+                url=_org_flash_url(str(exc), level="error"),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+    finally:
+        session.close()
+
+    stripped_name = new_name.strip()
+    logger.info(
+        "조직 이름 변경 완료: 관리자={} org_id={} new_name={!r}",
+        current_user.username, org_id, stripped_name,
+    )
+    return RedirectResponse(
+        url=_org_flash_url(f"조직명이 '{stripped_name}' 으로 변경되었습니다.", level="success"),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.post(
+    "/organizations/{org_id}/move",
+    dependencies=[Depends(ensure_same_origin)],
+)
+def organizations_move(
+    org_id: int,
+    new_parent_id: Optional[int] = Form(default=None),
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """조직의 상위 조직(parent_id)을 변경한다.
+
+    Form 필드:
+        new_parent_id: 새 부모 조직 PK. 공백/0/미전송이면 최상위(None)로 처리한다.
+
+    흐름:
+        1. new_parent_id 정규화(0 또는 None → None).
+        2. move_organization 호출.
+        3. ValueError 계열(OrganizationNotFoundError / DuplicateOrganizationNameError /
+           OrganizationInvalidMoveError) → flash error redirect.
+        4. 성공 → flash success redirect (PRG 패턴).
+
+    Args:
+        org_id:        이동할 조직 PK (URL 경로 파라미터).
+        new_parent_id: 새 부모 조직 PK (Form). 빈 문자열/0 은 최상위 이동.
+    """
+    # HTML select 에서 value="" 로 최상위를 표현하므로 0 또는 None 모두 최상위.
+    normalized_parent_id = new_parent_id if new_parent_id else None
+
+    session = SessionLocal()
+    try:
+        try:
+            move_organization(session, org_id, normalized_parent_id)
+            session.commit()
+        except ValueError as exc:
+            session.rollback()
+            logger.info(
+                "조직 이동 거부: 관리자={} org_id={} new_parent_id={} ({})",
+                current_user.username, org_id, normalized_parent_id, exc,
+            )
+            return RedirectResponse(
+                url=_org_flash_url(str(exc), level="error"),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+    finally:
+        session.close()
+
+    parent_label = f"id={normalized_parent_id}" if normalized_parent_id else "루트(최상위)"
+    logger.info(
+        "조직 이동 완료: 관리자={} org_id={} new_parent_id={}",
+        current_user.username, org_id, normalized_parent_id,
+    )
+    return RedirectResponse(
+        url=_org_flash_url(f"조직이 '{parent_label}' 아래로 이동되었습니다.", level="success"),
         status_code=status.HTTP_303_SEE_OTHER,
     )
 

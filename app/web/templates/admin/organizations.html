@@ -1,9 +1,9 @@
 {#
-  [조직 구성] 탭 (task 00049-3).
+  [조직 구성] 탭 (task 00049-3, 00055-2).
 
   구성:
     1. flash 배지 — POST 후 redirect 시 쿼리 파라미터로 전달된 메시지.
-    2. 조직 트리 — 재귀 매크로로 depth-indent + 삭제 버튼 렌더.
+    2. 조직 트리 — 재귀 매크로로 depth-indent + 삭제/이름변경/이동 버튼 렌더.
        자식이 있는 노드는 삭제 버튼 disabled. 하위 N개 카운트 표시.
     3. 신규 조직 추가 폼 — 부모 선택(select) + 이름 입력.
 
@@ -27,11 +27,12 @@
 {% endif %}
 
 {# ──────────────────────────────────────────────────────────
-   재귀 매크로 — 조직 트리 노드를 depth-indent + 삭제 버튼으로 렌더한다.
+   재귀 매크로 — 조직 트리 노드를 depth-indent + 삭제/이름변경/이동 버튼으로 렌더한다.
    depth 가 1 증가할 때마다 20px 들여쓰기한다.
    자식이 있는 노드는 삭제 버튼을 disabled 로 표시한다.
+   flat_orgs 는 이동 form 의 부모 선택 select 에 사용한다.
 #}
-{% macro render_org_node(node, depth) %}
+{% macro render_org_node(node, depth, flat_orgs) %}
 <div class="org-tree__node" style="padding-left: {{ depth * 20 }}px">
     <div class="org-tree__row">
         <span class="org-tree__name">{{ node.name }}</span>
@@ -50,9 +51,45 @@
                 <button type="submit" class="org-tree__delete-btn">삭제</button>
             </form>
         {% endif %}
+
+        {# ── 이름 변경 — <details> 인라인 폼 (JS 없음) ── #}
+        <details class="org-tree__rename-details">
+            <summary class="org-tree__rename-summary">이름 변경</summary>
+            <form class="org-tree__rename-form"
+                  method="post"
+                  action="/admin/organizations/{{ node.id }}/rename">
+                <input
+                    class="org-tree__rename-input"
+                    type="text"
+                    name="new_name"
+                    value="{{ node.name }}"
+                    required
+                    maxlength="120">
+                <button type="submit" class="org-tree__rename-submit">변경</button>
+            </form>
+        </details>
+
+        {# ── 이동 — <details> 인라인 폼 (JS 없음, confirm 은 onsubmit) ── #}
+        <details class="org-tree__move-details">
+            <summary class="org-tree__move-summary">이동</summary>
+            <form class="org-tree__move-form"
+                  method="post"
+                  action="/admin/organizations/{{ node.id }}/move"
+                  onsubmit="return confirm('조직 \'{{ node.name }}\' 의 상위 조직을 변경합니다. 계속하시겠습니까?')">
+                <select class="org-tree__move-select" name="new_parent_id">
+                    <option value="">(최상위 — 루트)</option>
+                    {% for org in flat_orgs %}
+                        {% if org.id != node.id %}
+                        <option value="{{ org.id }}">{{ org.label }}</option>
+                        {% endif %}
+                    {% endfor %}
+                </select>
+                <button type="submit" class="org-tree__move-submit">이동</button>
+            </form>
+        </details>
     </div>
     {% for child in node.children %}
-        {{ render_org_node(child, depth + 1) }}
+        {{ render_org_node(child, depth + 1, flat_orgs) }}
     {% endfor %}
 </div>
 {% endmacro %}
@@ -64,7 +101,7 @@
     {% if org_tree %}
     <div class="org-tree">
         {% for root in org_tree %}
-            {{ render_org_node(root, 0) }}
+            {{ render_org_node(root, 0, flat_orgs) }}
         {% endfor %}
     </div>
     {% else %}
