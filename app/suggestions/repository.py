@@ -13,6 +13,8 @@
     - :func:`list_comments_by_suggestion_id` — 뷰어 하단 댓글 목록 조회 (00051-4).
     - :func:`create_suggestion_comment` — POST 댓글 작성 처리용 (00051-4).
     - :func:`update_suggestion_acceptance` — 관리자 수용 여부 모달 저장 (00051-5).
+    - :func:`update_suggestion` / :func:`delete_suggestion` — 작성자 본인의 글
+      수정·삭제 (00052-4).
 """
 
 from __future__ import annotations
@@ -238,6 +240,69 @@ def update_suggestion_acceptance(
     return suggestion
 
 
+def update_suggestion(
+    session: Session,
+    *,
+    suggestion_id: int,
+    title: str,
+    body: str,
+    is_secret: bool,
+) -> Suggestion | None:
+    """건의사항 게시글의 작성자 수정 가능 필드를 in-place 갱신한다 (00052-4).
+
+    작성자 본인이 자기 글을 수정하는 흐름 전용 — 관리자 수용 관련 필드
+    (acceptance_status / acceptance_reason / expected_completion_date) 는 본
+    함수의 책임이 아니며 :func:`update_suggestion_acceptance` 가 따로 다룬다.
+    작성자명 / 연락처 이메일 / 비밀번호 / 작성자 식별자(``author_user_id``) 는
+    수정 범위 밖이라 본 함수가 건드리지 않는다.
+
+    트랜잭션 commit 은 호출자(라우트) 책임이다. ``flush()`` 만 호출하며,
+    ``updated_at`` 은 모델 ``onupdate`` 가 자동으로 갱신한다.
+
+    Args:
+        session: 건의사항 DB ORM 세션.
+        suggestion_id: 갱신 대상 게시글 PK.
+        title: 새 제목 (필수).
+        body: 새 본문 (필수).
+        is_secret: 새 비밀글 여부.
+
+    Returns:
+        갱신된 ``Suggestion`` 인스턴스. 게시글이 존재하지 않으면 ``None`` 을
+        반환해 호출자가 404 분기를 책임지도록 한다.
+    """
+    suggestion = session.get(Suggestion, suggestion_id)
+    if suggestion is None:
+        return None
+    suggestion.title = title
+    suggestion.body = body
+    suggestion.is_secret = is_secret
+    session.flush()
+    return suggestion
+
+
+def delete_suggestion(session: Session, *, suggestion_id: int) -> bool:
+    """건의사항 게시글을 삭제한다 (00052-4).
+
+    소속 댓글은 모델의 ``cascade=\"all, delete-orphan\"`` + DB 레벨
+    ``ON DELETE CASCADE`` 로 함께 정리된다. 트랜잭션 commit 은 호출자 책임.
+    ``session.delete(...)`` + ``flush()`` 까지만 수행한다.
+
+    Args:
+        session: 건의사항 DB ORM 세션.
+        suggestion_id: 삭제 대상 게시글 PK.
+
+    Returns:
+        실제로 삭제됐으면 ``True``, 게시글이 이미 존재하지 않았다면 ``False``
+        — 호출자가 404 vs 정상 흐름을 분기할 수 있도록 한다.
+    """
+    suggestion = session.get(Suggestion, suggestion_id)
+    if suggestion is None:
+        return False
+    session.delete(suggestion)
+    session.flush()
+    return True
+
+
 __all__ = [
     "count_suggestions",
     "list_suggestions",
@@ -246,4 +311,6 @@ __all__ = [
     "list_comments_by_suggestion_id",
     "create_suggestion_comment",
     "update_suggestion_acceptance",
+    "update_suggestion",
+    "delete_suggestion",
 ]
