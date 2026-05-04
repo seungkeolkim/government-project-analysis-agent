@@ -58,6 +58,15 @@ class Settings(BaseSettings):
         description="SQLAlchemy 접속 문자열.",
     )
 
+    # 건의사항 게시판은 메인 DB(app.sqlite3) 가 reset 되어도 게시글 데이터가
+    # 보존되도록 별도 파일에 저장한다(task 00051). 두 DB 사이에는 cross-DB FK 가
+    # 불가능하므로 작성자 동기화는 app.suggestions.author_validity 가 batch 쿼리로
+    # 수행한다.
+    suggestions_db_url: str = Field(
+        default=f"sqlite:///{(PROJECT_ROOT / 'data' / 'db' / 'suggestions.sqlite3').as_posix()}",
+        description="건의사항 게시판 전용 SQLAlchemy 접속 문자열. 메인 DB 와 격리.",
+    )
+
     # ──────────────────────────────────────────────────────────────
     # 로깅
     # ──────────────────────────────────────────────────────────────
@@ -111,9 +120,12 @@ class Settings(BaseSettings):
         self.download_dir.mkdir(parents=True, exist_ok=True)
 
         # sqlite 접속 문자열인 경우 DB 파일의 부모 디렉터리를 생성한다.
+        # 메인 DB 와 건의사항 별도 DB 양쪽을 동일하게 보장한다.
         sqlite_prefix = "sqlite:///"
-        if self.db_url.startswith(sqlite_prefix):
-            raw_path = self.db_url[len(sqlite_prefix):]
+        for sqlite_url in (self.db_url, self.suggestions_db_url):
+            if not sqlite_url.startswith(sqlite_prefix):
+                continue
+            raw_path = sqlite_url[len(sqlite_prefix):]
             db_file = Path(raw_path).expanduser()
             if not db_file.is_absolute():
                 db_file = (PROJECT_ROOT / db_file).resolve()

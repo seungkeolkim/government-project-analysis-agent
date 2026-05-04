@@ -3378,3 +3378,560 @@ details[open] .user-card__org-summary::before {
     align-self: center;
     padding: 6px 4px;
 }
+
+/* ---------- 건의사항 게시판 (task 00051) ---------- */
+
+/* footer 진입 링크. 회귀 최소화를 위해 footer 내부에만 단일 링크로 추가한다. */
+.site-footer__suggestions {
+    margin: 0 0 6px;
+}
+
+.footer-suggestions-link {
+    color: #4f46e5;
+    text-decoration: none;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.footer-suggestions-link:hover {
+    text-decoration: underline;
+}
+
+/* 페이지 컨테이너 — 목록/작성/뷰어 공통 헤딩 영역. */
+.suggestions-page__heading {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+    margin: 0 0 16px;
+}
+
+.suggestions-page__title {
+    font-size: 22px;
+    margin: 0;
+}
+
+.suggestions-page__write-button {
+    display: inline-block;
+    padding: 8px 14px;
+    background: #4f46e5;
+    color: #ffffff;
+    border-radius: 6px;
+    text-decoration: none;
+    font-size: 14px;
+}
+
+.suggestions-page__write-button:hover {
+    background: #4338ca;
+}
+
+/* 목록 테이블. */
+.suggestion-list {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0 0 16px;
+}
+
+.suggestion-list th,
+.suggestion-list td {
+    padding: 10px 8px;
+    border-bottom: 1px solid #e5e7eb;
+    font-size: 14px;
+    text-align: left;
+    vertical-align: middle;
+}
+
+.suggestion-list th {
+    background: #f9fafb;
+    font-weight: 600;
+    color: #374151;
+}
+
+.suggestion-list__title-cell a {
+    color: #1f2937;
+    text-decoration: none;
+}
+
+.suggestion-list__title-cell a:hover {
+    text-decoration: underline;
+}
+
+/* 비밀글 표시(자물쇠 prefix). */
+.suggestion-list__secret-prefix {
+    color: #9ca3af;
+    margin-right: 4px;
+}
+
+/* 수용 상태 배지. */
+.suggestion-status-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid #d1d5db;
+    background: #f3f4f6;
+    color: #374151;
+}
+
+.suggestion-status-badge--accepted {
+    background: #dcfce7;
+    color: #166534;
+    border-color: #86efac;
+}
+
+.suggestion-status-badge--partial {
+    background: #fef3c7;
+    color: #92400e;
+    border-color: #fde68a;
+}
+
+.suggestion-status-badge--rejected {
+    background: #fee2e2;
+    color: #991b1b;
+    border-color: #fecaca;
+}
+
+.suggestion-status-badge--pending {
+    background: #e0e7ff;
+    color: #3730a3;
+    border-color: #c7d2fe;
+}
+
+/* 고아 글 (관리자 전용 표시) — 시각적 마커. */
+.suggestion-row--orphan {
+    background: #fff7ed;
+}
+
+.suggestion-row--orphan .suggestion-list__title-cell {
+    color: #92400e;
+    font-style: italic;
+}
+
+.suggestion-orphan-note {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 6px;
+    background: #fde68a;
+    color: #92400e;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+/* 작성 폼. */
+.suggestion-form {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-width: 720px;
+}
+
+.suggestion-form__row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.suggestion-form__row--inline {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+}
+
+.suggestion-form__label {
+    font-size: 13px;
+    font-weight: 600;
+    color: #374151;
+}
+
+.suggestion-form__hint {
+    font-size: 12px;
+    color: #6b7280;
+}
+
+.suggestion-form__input,
+.suggestion-form__textarea {
+    width: 100%;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 14px;
+    box-sizing: border-box;
+}
+
+.suggestion-form__textarea {
+    min-height: 200px;
+    resize: vertical;
+}
+
+.suggestion-form__actions {
+    display: flex;
+    gap: 8px;
+}
+
+.suggestion-form__submit {
+    padding: 8px 16px;
+    background: #4f46e5;
+    color: #ffffff;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+}
+
+.suggestion-form__submit:hover {
+    background: #4338ca;
+}
+
+.suggestion-form__cancel {
+    padding: 8px 16px;
+    background: #f3f4f6;
+    color: #374151;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    text-decoration: none;
+    font-size: 14px;
+}
+
+/* 비로그인 안내 박스. */
+.suggestion-login-required {
+    margin: 16px 0;
+    padding: 16px 18px;
+    background: #fef3c7;
+    border: 1px solid #fde68a;
+    border-radius: 8px;
+    color: #92400e;
+}
+
+.suggestion-login-required__cta {
+    display: inline-block;
+    margin-top: 8px;
+    padding: 6px 12px;
+    background: #f59e0b;
+    color: #ffffff;
+    border-radius: 6px;
+    text-decoration: none;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+/* 페이지네이션 (목록 하단). 기존 list.html 패턴과 시각적 톤을 맞춘다. */
+.suggestion-pagination {
+    display: flex;
+    gap: 6px;
+    justify-content: center;
+    margin: 12px 0;
+    font-size: 13px;
+}
+
+.suggestion-pagination a,
+.suggestion-pagination span {
+    padding: 4px 10px;
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    text-decoration: none;
+    color: #374151;
+}
+
+.suggestion-pagination span.is-current {
+    background: #4f46e5;
+    color: #ffffff;
+    border-color: #4f46e5;
+}
+
+.suggestion-empty {
+    margin: 24px 0;
+    padding: 24px;
+    text-align: center;
+    color: #6b7280;
+    background: #f9fafb;
+    border-radius: 8px;
+}
+
+/* ---------- 건의사항 뷰어 (task 00051-3) ---------- */
+
+/* 고아 글 진입 안내 배너 (관리자 전용 경로). */
+.suggestion-orphan-banner {
+    margin: 0 0 16px;
+    padding: 12px 14px;
+    background: #fff7ed;
+    border: 1px solid #fdba74;
+    border-radius: 8px;
+    color: #92400e;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.suggestion-orphan-banner strong {
+    display: block;
+    font-size: 14px;
+    margin-bottom: 4px;
+}
+
+/* 본문 카드. */
+.suggestion-detail__article {
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 20px 22px;
+    background: #ffffff;
+}
+
+.suggestion-detail__article--orphan {
+    background: #fffaf0;
+    border-color: #fde68a;
+}
+
+.suggestion-detail__title {
+    font-size: 20px;
+    margin: 0 0 16px;
+    color: #1f2937;
+    word-break: break-word;
+}
+
+.suggestion-detail__meta {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 6px 16px;
+    margin: 0 0 18px;
+    padding: 12px 14px;
+    background: #f9fafb;
+    border-radius: 6px;
+    font-size: 13px;
+}
+
+.suggestion-detail__meta-row {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+}
+
+.suggestion-detail__meta-row dt {
+    flex: 0 0 88px;
+    color: #6b7280;
+    font-weight: 600;
+    margin: 0;
+}
+
+.suggestion-detail__meta-row dd {
+    flex: 1 1 auto;
+    margin: 0;
+    color: #1f2937;
+    word-break: break-word;
+}
+
+.suggestion-detail__placeholder {
+    color: #9ca3af;
+    font-style: italic;
+}
+
+.suggestion-detail__reason {
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* 본문 — 사용자 입력. white-space: pre-wrap 으로 줄바꿈 보존(|safe 사용 X). */
+.suggestion-detail__body {
+    margin: 12px 0 0;
+    padding: 16px 18px;
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    font-size: 14px;
+    line-height: 1.6;
+    color: #1f2937;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* 후속 subtask 가 채울 placeholder 컨테이너 — 본 단계에서는 빈 영역. */
+.suggestion-acceptance-modal-container {
+    margin: 16px 0 0;
+}
+
+/* ---------- 건의사항 댓글 (task 00051-4) ---------- */
+
+.suggestion-comments-section {
+    margin: 24px 0 0;
+    padding: 18px 20px;
+    background: #f9fafb;
+    border-radius: 8px;
+}
+
+.suggestion-comments-section__title {
+    font-size: 16px;
+    font-weight: 600;
+    margin: 0 0 12px;
+    color: #1f2937;
+}
+
+.suggestion-comments-section__count {
+    color: #6b7280;
+    font-weight: 500;
+    margin-left: 4px;
+}
+
+.suggestion-comments-section__empty {
+    margin: 0 0 12px;
+    padding: 14px;
+    text-align: center;
+    color: #9ca3af;
+    background: #ffffff;
+    border-radius: 6px;
+    font-size: 13px;
+}
+
+.suggestion-comment-list {
+    list-style: none;
+    margin: 0 0 16px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.suggestion-comment {
+    padding: 10px 12px;
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+}
+
+/* 고아 댓글 (관리자 전용 노출) — 시각적 강조. */
+.suggestion-comment--orphan {
+    background: #fff7ed;
+    border-color: #fde68a;
+}
+
+.suggestion-comment__header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin: 0 0 6px;
+    font-size: 12px;
+    color: #6b7280;
+}
+
+.suggestion-comment__author {
+    font-weight: 600;
+    color: #1f2937;
+}
+
+.suggestion-comment__time {
+    color: #9ca3af;
+}
+
+/* 본문: 사용자 입력 — pre-wrap 으로 줄바꿈 보존, |safe 사용 X. */
+.suggestion-comment__body {
+    font-size: 14px;
+    line-height: 1.55;
+    color: #1f2937;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* 댓글 작성 폼. */
+.suggestion-comment-form {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 0;
+}
+
+.suggestion-comment-form__textarea {
+    min-height: 84px;
+}
+
+/* ---------- 건의사항 관리자 수용 여부 모달 (task 00051-5) ---------- */
+
+/* 컨테이너 — 뷰어 본문(article) 직후 위치. 관리자에게만 보이는 단일 버튼. */
+.suggestion-acceptance-button {
+    display: inline-block;
+    margin: 12px 0 0;
+    padding: 8px 14px;
+    background: #4f46e5;
+    color: #ffffff;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.suggestion-acceptance-button:hover {
+    background: #4338ca;
+}
+
+/* native <dialog> 모달 — backdrop 은 ::backdrop 으로 처리. */
+.suggestion-acceptance-modal {
+    width: min(520px, calc(100vw - 32px));
+    padding: 22px 24px;
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    box-shadow: 0 20px 48px rgba(15, 23, 42, 0.28);
+    background: #ffffff;
+    color: #1f2937;
+}
+
+.suggestion-acceptance-modal::backdrop {
+    background: rgba(15, 23, 42, 0.4);
+}
+
+/* <dialog> 미지원 브라우저 폴백 — JS 가 [open] 속성을 직접 토글한다. */
+.suggestion-acceptance-modal:not([open]) {
+    display: none;
+}
+
+.suggestion-acceptance-form {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    margin: 0;
+}
+
+.suggestion-acceptance-form__title {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 700;
+    color: #1f2937;
+}
+
+.suggestion-acceptance-form__fieldset {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin: 0;
+    padding: 10px 12px;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    background: #f9fafb;
+}
+
+.suggestion-acceptance-form__legend {
+    padding: 0 4px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #374151;
+}
+
+.suggestion-acceptance-form__radio {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 13px;
+    color: #1f2937;
+    cursor: pointer;
+}
+
+.suggestion-acceptance-form__radio input[type="radio"] {
+    margin: 0;
+}
+
+/* 비활성 상태의 date 입력은 회색 톤으로 시각화. */
+.suggestion-form__input:disabled {
+    background: #f3f4f6;
+    color: #9ca3af;
+    cursor: not-allowed;
+}

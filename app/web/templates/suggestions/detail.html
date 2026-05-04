@@ -1,0 +1,336 @@
+{#
+  건의사항 게시글 뷰어 페이지 (task 00051-3).
+
+  컨텍스트 (라우트 view_suggestion_page 가 주입):
+    - current_user:         User | None
+    - is_admin:             bool
+    - is_owner:             bool — 작성자 본인 여부 (author_user_id 정수 비교)
+    - is_orphan:            bool — 메인 DB users 에 author_user_id 가 없음
+                                    (관리자 전용 경로에서만 True 가 노출됨)
+    - suggestion:           Suggestion ORM 인스턴스 (본문/제목/시각/수용 정보)
+    - display_author_name:  str | None (고아 글이면 None — NULL 마스킹)
+    - display_contact_email: str | None (고아 글이면 None — NULL 마스킹)
+
+  렌더 규칙:
+    - 본문(body)은 사용자 입력이라 XSS 위험 → Jinja2 자동 escape 에 의존하고
+      |safe 사용 금지. 줄바꿈은 CSS white-space: pre-wrap 으로 보존한다.
+    - 비밀글이라도 본 페이지에 도달했다면 (라우트 게이트를 통과한) 작성자
+      본인/관리자이므로 본문을 정상 노출한다.
+    - 댓글 영역(00051-4)과 관리자 수용여부 모달(00051-5) 자리에 빈 placeholder
+      컨테이너를 둔다 — 후속 subtask 가 위치를 새로 만들지 않게 한다.
+#}
+{% extends "base.html" %}
+
+{% block page_title %}{{ suggestion.title }} · 건의사항{% endblock %}
+
+{# 관리자 수용 여부 모달 제어용 JS. 본 페이지에서만 로드 — 다른 페이지에는
+   .suggestion-acceptance-button 이 없어도 안전하지만 불필요한 로드를 피한다. #}
+{% block extra_scripts %}
+<script src="/static/js/suggestion_acceptance.js" defer></script>
+{% endblock %}
+
+{% block content %}
+<section class="suggestions-page suggestion-detail">
+    <header class="suggestions-page__heading">
+        <h2 class="suggestions-page__title">건의사항</h2>
+        <a class="suggestion-form__cancel" href="/suggestions">목록으로</a>
+    </header>
+
+    {# 고아 글에 관리자만 진입 가능 — 시각 마커로 명시. #}
+    {% if is_orphan %}
+    <div class="suggestion-orphan-banner" role="alert">
+        <strong>작성자 정보가 사라진 게시글입니다.</strong>
+        <span>메인 DB 의 사용자 row 가 더 이상 존재하지 않아 작성자명·연락처를 NULL 로 표시합니다. 관리자에게만 노출됩니다.</span>
+    </div>
+    {% endif %}
+
+    <article class="suggestion-detail__article {% if is_orphan %}suggestion-detail__article--orphan{% endif %}">
+        <h3 class="suggestion-detail__title">
+            {% if suggestion.is_secret %}
+                <span class="suggestion-list__secret-prefix" aria-hidden="true">🔒</span>
+            {% endif %}
+            {{ suggestion.title }}
+        </h3>
+
+        <dl class="suggestion-detail__meta">
+            <div class="suggestion-detail__meta-row">
+                <dt>작성자</dt>
+                <dd>
+                    {% if display_author_name %}
+                        {{ display_author_name }}
+                    {% else %}
+                        <span class="suggestion-orphan-note" style="background:#e5e7eb;color:#6b7280;">
+                            (없음)
+                        </span>
+                    {% endif %}
+                </dd>
+            </div>
+
+            <div class="suggestion-detail__meta-row">
+                <dt>연락처 이메일</dt>
+                <dd>
+                    {% if display_contact_email %}
+                        {{ display_contact_email }}
+                    {% else %}
+                        <span class="suggestion-orphan-note" style="background:#e5e7eb;color:#6b7280;">
+                            (없음)
+                        </span>
+                    {% endif %}
+                </dd>
+            </div>
+
+            <div class="suggestion-detail__meta-row">
+                <dt>작성 시간</dt>
+                <dd>{{ suggestion.created_at | kst_format }}</dd>
+            </div>
+
+            <div class="suggestion-detail__meta-row">
+                <dt>비밀글</dt>
+                <dd>
+                    {% if suggestion.is_secret %}예 (작성자 본인 또는 관리자만 열람){% else %}아니오{% endif %}
+                </dd>
+            </div>
+
+            <div class="suggestion-detail__meta-row">
+                <dt>수용 여부</dt>
+                <dd>
+                    {% set status_value = suggestion.acceptance_status.value %}
+                    {% if status_value == "수용" %}
+                        <span class="suggestion-status-badge suggestion-status-badge--accepted">수용</span>
+                    {% elif status_value == "일부수용" %}
+                        <span class="suggestion-status-badge suggestion-status-badge--partial">일부수용</span>
+                    {% elif status_value == "거절" %}
+                        <span class="suggestion-status-badge suggestion-status-badge--rejected">거절</span>
+                    {% else %}
+                        <span class="suggestion-status-badge suggestion-status-badge--pending">검토중</span>
+                    {% endif %}
+                </dd>
+            </div>
+
+            {# 사유는 관리자가 입력했을 때만 의미 있는 값 — 미입력 시 안내 텍스트 노출. #}
+            <div class="suggestion-detail__meta-row">
+                <dt>관리자 사유</dt>
+                <dd>
+                    {% if suggestion.acceptance_reason %}
+                        <span class="suggestion-detail__reason">{{ suggestion.acceptance_reason }}</span>
+                    {% else %}
+                        <span class="suggestion-detail__placeholder">아직 입력되지 않았습니다.</span>
+                    {% endif %}
+                </dd>
+            </div>
+
+            <div class="suggestion-detail__meta-row">
+                <dt>예상 완료일</dt>
+                <dd>
+                    {% if suggestion.expected_completion_date %}
+                        {{ suggestion.expected_completion_date.isoformat() }}
+                    {% else %}
+                        <span class="suggestion-detail__placeholder">미입력</span>
+                    {% endif %}
+                </dd>
+            </div>
+        </dl>
+
+        {# 본문: |safe 절대 금지. 자동 escape + CSS pre-wrap 으로 줄바꿈 보존. #}
+        <div class="suggestion-detail__body">{{ suggestion.body }}</div>
+    </article>
+
+    {#
+      관리자 수용여부 체크/수정 버튼 + 모달 (00051-5).
+      - 관리자 세션일 때만 렌더 — is_admin=False 면 컨테이너만 비어 있다.
+      - 단일 '수용 여부 체크/수정' 버튼이 신규/재수정 두 흐름을 모두 처리한다.
+      - 모달 폼은 native HTML dialog 요소를 쓰고, 라디오 변경 시 native
+        <input type="date"> 의 disabled 만 토글한다 — 외부 라이브러리 0.
+      - 폼은 application/x-www-form-urlencoded POST → 303 PRG 로 뷰어 재진입.
+    #}
+    <section
+        id="suggestion-acceptance-modal-container"
+        class="suggestion-acceptance-modal-container"
+        data-suggestion-id="{{ suggestion.id }}"
+        data-is-admin="{{ 'true' if is_admin else 'false' }}"
+    >
+        {% if is_admin %}
+        {# 현재 저장값을 모달에 미리 채워 \"재수정\" 흐름이 바로 동작하도록 한다. #}
+        {% set current_status_value = suggestion.acceptance_status.value %}
+        <button
+            type="button"
+            id="suggestion-acceptance-open"
+            class="suggestion-acceptance-button"
+            aria-haspopup="dialog"
+            aria-controls="suggestion-acceptance-modal"
+        >수용 여부 체크/수정</button>
+
+        <dialog
+            id="suggestion-acceptance-modal"
+            class="suggestion-acceptance-modal"
+            aria-labelledby="suggestion-acceptance-modal-title"
+        >
+            <form
+                method="post"
+                action="/suggestions/{{ suggestion.id }}/acceptance"
+                class="suggestion-acceptance-form"
+            >
+                <h4 id="suggestion-acceptance-modal-title" class="suggestion-acceptance-form__title">
+                    수용 여부 체크/수정
+                </h4>
+
+                <fieldset class="suggestion-acceptance-form__fieldset">
+                    <legend class="suggestion-acceptance-form__legend">수용 여부</legend>
+                    <label class="suggestion-acceptance-form__radio">
+                        <input
+                            type="radio"
+                            name="acceptance_status"
+                            value="검토중"
+                            {% if current_status_value == "검토중" %}checked{% endif %}
+                        >
+                        <span>검토중</span>
+                    </label>
+                    <label class="suggestion-acceptance-form__radio">
+                        <input
+                            type="radio"
+                            name="acceptance_status"
+                            value="수용"
+                            {% if current_status_value == "수용" %}checked{% endif %}
+                        >
+                        <span>수용</span>
+                    </label>
+                    <label class="suggestion-acceptance-form__radio">
+                        <input
+                            type="radio"
+                            name="acceptance_status"
+                            value="일부수용"
+                            {% if current_status_value == "일부수용" %}checked{% endif %}
+                        >
+                        <span>일부 수용</span>
+                    </label>
+                    <label class="suggestion-acceptance-form__radio">
+                        <input
+                            type="radio"
+                            name="acceptance_status"
+                            value="거절"
+                            {% if current_status_value == "거절" %}checked{% endif %}
+                        >
+                        <span>거절</span>
+                    </label>
+                </fieldset>
+
+                <div class="suggestion-form__row">
+                    <label class="suggestion-form__label" for="suggestion-acceptance-reason">
+                        사유
+                    </label>
+                    <textarea
+                        id="suggestion-acceptance-reason"
+                        name="acceptance_reason"
+                        class="suggestion-form__textarea"
+                        maxlength="2000"
+                        placeholder="결정 사유를 입력하세요 (선택)"
+                    >{{ suggestion.acceptance_reason or '' }}</textarea>
+                </div>
+
+                <div class="suggestion-form__row">
+                    <label class="suggestion-form__label" for="suggestion-acceptance-date">
+                        예상 완료일
+                    </label>
+                    <input
+                        id="suggestion-acceptance-date"
+                        name="expected_completion_date"
+                        type="date"
+                        class="suggestion-form__input"
+                        value="{% if suggestion.expected_completion_date %}{{ suggestion.expected_completion_date.isoformat() }}{% endif %}"
+                    >
+                    <small class="suggestion-form__hint">
+                        '수용' 또는 '일부 수용' 일 때만 입력할 수 있습니다.
+                    </small>
+                </div>
+
+                <div class="suggestion-form__actions">
+                    <button type="submit" class="suggestion-form__submit">저장</button>
+                    <button
+                        type="button"
+                        id="suggestion-acceptance-cancel"
+                        class="suggestion-form__cancel"
+                    >취소</button>
+                </div>
+            </form>
+        </dialog>
+        {% endif %}
+    </section>
+
+    {#
+      댓글 영역 (00051-4).
+      - comment_views 는 라우터에서 이미 고아 정책이 적용된 결과 — 비관리자에게는
+        고아 댓글이 제외되어 있고, 관리자에게는 display_author_name=None 으로
+        마스킹된 채 포함되어 있다. 템플릿은 추가 권한 분기 없이 그대로 렌더한다.
+      - 댓글 본문은 사용자 입력 자유 텍스트 → |safe 절대 금지. Jinja2 자동
+        escape + CSS white-space: pre-wrap 조합으로 안전 + 줄바꿈 보존.
+      - 댓글 작성 폼은 로그인 시에만 노출. 비로그인은 안내 박스만 표시.
+    #}
+    <section
+        id="suggestion-comments-section"
+        class="suggestion-comments-section"
+        data-suggestion-id="{{ suggestion.id }}"
+    >
+        <h4 class="suggestion-comments-section__title">
+            댓글 <span class="suggestion-comments-section__count">{{ comment_views | length }}</span>
+        </h4>
+
+        {% if comment_views %}
+        <ul id="suggestion-comment-list" class="suggestion-comment-list">
+            {% for view in comment_views %}
+            <li class="suggestion-comment {% if view.is_orphan %}suggestion-comment--orphan{% endif %}">
+                <div class="suggestion-comment__header">
+                    <span class="suggestion-comment__author">
+                        {% if view.display_author_name %}
+                            {{ view.display_author_name }}
+                        {% else %}
+                            <span class="suggestion-orphan-note" style="background:#e5e7eb;color:#6b7280;">
+                                (없음)
+                            </span>
+                        {% endif %}
+                    </span>
+                    <span class="suggestion-comment__time">{{ view.created_at | kst_format }}</span>
+                    {% if view.is_orphan %}
+                        <span class="suggestion-orphan-note">작성자 정보 없음</span>
+                    {% endif %}
+                </div>
+                <div class="suggestion-comment__body">{{ view.body }}</div>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <ul id="suggestion-comment-list" class="suggestion-comment-list"></ul>
+        <p class="suggestion-comments-section__empty">아직 댓글이 없습니다.</p>
+        {% endif %}
+
+        {# 작성 폼: 로그인 필수. 비로그인은 안내만. #}
+        {% if current_user is none %}
+        <div class="suggestion-login-required" role="note">
+            <strong>댓글 작성은 로그인이 필요합니다.</strong>
+            <a class="suggestion-login-required__cta"
+               href="/login?next=/suggestions/{{ suggestion.id }}">로그인하러 가기</a>
+        </div>
+        {% else %}
+        <form
+            class="suggestion-comment-form"
+            method="post"
+            action="/suggestions/{{ suggestion.id }}/comments"
+        >
+            <label class="suggestion-form__label" for="suggestion-comment-body">
+                댓글 작성
+            </label>
+            <textarea
+                id="suggestion-comment-body"
+                class="suggestion-form__textarea suggestion-comment-form__textarea"
+                name="body"
+                required
+                maxlength="2000"
+                placeholder="댓글을 입력하세요"
+            ></textarea>
+            <div class="suggestion-form__actions">
+                <button type="submit" class="suggestion-form__submit">댓글 등록</button>
+            </div>
+        </form>
+        {% endif %}
+    </section>
+</section>
+{% endblock %}

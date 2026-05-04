@@ -56,6 +56,7 @@ from app.db.session import SessionLocal
 from app.logging_setup import configure_logging
 from app.scheduler import start_scheduler, stop_scheduler
 from app.scrape_control import cleanup_stale_running_runs
+from app.suggestions import init_suggestions_db
 from app.web.observability import (
     install_request_logging_middleware,
     install_unhandled_exception_handler,
@@ -67,6 +68,7 @@ from app.web.routes import (
     favorites_router,
     relevance_router,
     settings_router,
+    suggestions_router,
 )
 from app.web.template_filters import register_kst_filters
 
@@ -247,6 +249,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     effective_settings.ensure_runtime_paths()
     init_db()
 
+    # task 00051 — 건의사항 게시판 별도 DB 의 테이블을 멱등하게 보장한다.
+    # 메인 DB(init_db, Alembic) 와 별개의 SQLite 파일이며, 메인 DB reset 시에도
+    # 영향을 받지 않는다. create_all 기반이라 반복 호출 안전(이미 존재하면 무시).
+    init_suggestions_db()
+
     # Phase 2(00025) — 웹 startup 시 "pid 없는 running row" 및 프로세스 사라진
     # running row 를 failed 로 정리한다. 이전 인스턴스가 관리하던 subprocess
     # 는 재시작 후 제어 불가능한 고아 상태이므로 lock 을 해제해 다음 수집을
@@ -351,6 +358,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # task 00049-2: 개인 설정 라우터(/settings, /settings/*) mount.
     # 비로그인 GET → /login?next=/settings 리다이렉트. POST 는 401 반환.
     fastapi_app.include_router(settings_router)
+
+    # task 00051-2: 건의사항 게시판 라우터(/suggestions, /suggestions/new) mount.
+    # 비로그인도 목록·폼 진입 가능(폼은 안내만 표시), POST /suggestions 는 로그인 필수.
+    fastapi_app.include_router(suggestions_router)
 
     # Phase 2(00025-6): shutdown 시 APScheduler 정지.
     # docker-compose 의 `restart: unless-stopped` 와 결합해, 웹 프로세스가 정상

@@ -1,0 +1,104 @@
+{#
+  건의사항 게시판 목록 페이지 (task 00051-2).
+
+  컨텍스트 (라우트 list_suggestions_page 가 주입):
+    - current_user:      User | None  (base.html 상단 네비 분기용)
+    - is_admin:          bool         (관리자 여부 — 고아 글 마스킹 row 표시 분기)
+    - suggestion_views:  list[SuggestionView]  (이미 고아 정책이 적용된 표시용 리스트)
+    - page / page_size / total / total_pages: 페이지네이션 컨텍스트.
+
+  표시 규칙:
+    - 비밀글: 제목 자리에 자물쇠 prefix + "비밀글입니다" 라벨.
+    - 고아 글(관리자에게만 보임): 작성자명을 NULL/(없음) 으로 마스킹하고
+      .suggestion-row--orphan 으로 시각 강조 + "(작성자 정보 없음)" 노트.
+    - 수용 상태 배지: AcceptanceStatus 한글 값에 따라 색상 분기.
+#}
+{% extends "base.html" %}
+
+{% block page_title %}건의사항 게시판{% endblock %}
+
+{% block content %}
+<section class="suggestions-page">
+    <header class="suggestions-page__heading">
+        <h2 class="suggestions-page__title">건의사항 게시판</h2>
+        <a class="suggestions-page__write-button" href="/suggestions/new">글쓰기</a>
+    </header>
+
+    {% if suggestion_views %}
+    <table class="suggestion-list">
+        <thead>
+            <tr>
+                <th scope="col" style="width: 60%;">제목</th>
+                <th scope="col" style="width: 12%;">작성자</th>
+                <th scope="col" style="width: 14%;">작성시간</th>
+                <th scope="col" style="width: 14%;">수용 여부</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for view in suggestion_views %}
+            <tr class="suggestion-row {% if view.is_orphan %}suggestion-row--orphan{% endif %}">
+                <td class="suggestion-list__title-cell">
+                    {% if view.is_secret %}
+                        <span class="suggestion-list__secret-prefix" aria-hidden="true">🔒</span>
+                        {# 사용자 원문: "목록에서 비밀글은 '비밀글입니다' 표시" #}
+                        <a href="/suggestions/{{ view.suggestion_id }}">비밀글입니다</a>
+                    {% else %}
+                        <a href="/suggestions/{{ view.suggestion_id }}">{{ view.title }}</a>
+                    {% endif %}
+                    {% if view.is_orphan %}
+                        {# 관리자에게만 보이는 row 이므로 안전. #}
+                        <span class="suggestion-orphan-note">작성자 정보 없음</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {# 고아 글이면 마스킹된 None 이 들어온다 — 관리자에게도 NULL 표시. #}
+                    {% if view.display_author_name %}
+                        {{ view.display_author_name }}
+                    {% else %}
+                        <span class="suggestion-orphan-note" style="background:#e5e7eb;color:#6b7280;">
+                            (없음)
+                        </span>
+                    {% endif %}
+                </td>
+                <td>{{ view.created_at | kst_format }}</td>
+                <td>
+                    {% set status_value = view.acceptance_status.value %}
+                    {% if status_value == "수용" %}
+                        <span class="suggestion-status-badge suggestion-status-badge--accepted">수용</span>
+                    {% elif status_value == "일부수용" %}
+                        <span class="suggestion-status-badge suggestion-status-badge--partial">일부수용</span>
+                    {% elif status_value == "거절" %}
+                        <span class="suggestion-status-badge suggestion-status-badge--rejected">거절</span>
+                    {% else %}
+                        <span class="suggestion-status-badge suggestion-status-badge--pending">검토중</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    {# 페이지네이션 — 비관리자 화면에서 일부 row 가 가려져도 페이지 전환 자체는 가능. #}
+    {% if total_pages > 1 %}
+    <nav class="suggestion-pagination" aria-label="페이지 이동">
+        {% if page > 1 %}
+            <a href="?page={{ page - 1 }}&page_size={{ page_size }}">이전</a>
+        {% else %}
+            <span>이전</span>
+        {% endif %}
+        <span class="is-current">{{ page }} / {{ total_pages }}</span>
+        {% if page < total_pages %}
+            <a href="?page={{ page + 1 }}&page_size={{ page_size }}">다음</a>
+        {% else %}
+            <span>다음</span>
+        {% endif %}
+    </nav>
+    {% endif %}
+
+    {% else %}
+    <div class="suggestion-empty">
+        등록된 건의사항이 없습니다.
+    </div>
+    {% endif %}
+</section>
+{% endblock %}
