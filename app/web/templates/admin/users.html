@@ -40,7 +40,7 @@
     {% endif %}
 
     {% for user in users %}
-    {% set user_org_ids = user_org_map.get(user.id, set()) %}
+    {% set user_org_ids = user_org_map.get(user.id, []) %}
     {% set org_names = [] %}
     {% for org_id in user_org_ids %}
         {% if org_name_map.get(org_id) %}
