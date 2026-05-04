@@ -46,18 +46,21 @@ from app.db.models import User
 from app.db.session import SessionLocal
 from app.suggestions import (
     AcceptanceStatus,
+    Suggestion,
     SuggestionsSessionLocal,
     apply_orphan_policy_to_comments,
     apply_orphan_policy_to_suggestions,
     count_suggestions,
     create_suggestion,
     create_suggestion_comment,
+    delete_suggestion,
     get_alive_user_ids,
     get_alive_user_username_map,
     get_suggestion_by_id,
     is_orphan_author,
     list_comments_by_suggestion_id,
     list_suggestions,
+    update_suggestion,
     update_suggestion_acceptance,
 )
 from app.web.template_filters import register_kst_filters
@@ -726,6 +729,277 @@ def update_acceptance_route(
     # 하지만 관성상 PRG 유지).
     return RedirectResponse(
         url=f"/suggestions/{suggestion_id}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# 작성자 본인의 글 수정·삭제 (00052-4)
+# ──────────────────────────────────────────────────────────────
+
+
+def _apply_owner_edit_gates(
+    main_session: Session,
+    suggestions_session: Session,
+    *,
+    suggestion_id: int,
+    current_user: User,
+) -> Suggestion:
+    """수정·삭제 라우트가 공통으로 적용해야 하는 4단 게이트.
+
+    적용 순서는 ``view_suggestion_page`` 와 일관되며, 마지막에 작성자 본인
+    검증을 추가한다 — 가이던스 그대로:
+
+    1. 게시글 존재 (404)
+    2. 고아 게이트 (404 비관리자) — 작성자 user 가 사라진 글은 비관리자에게
+       존재 자체를 가린다. (수정/삭제 흐름에서도 동일 정책으로 처리.)
+    3. 비밀글 게이트 (403 비-작성자/비-관리자) — 작성자 본인은 자동 통과.
+    4. 작성자 본인 게이트 (403 비-작성자) — 관리자라도 본인 글이 아니면 거절.
+       사용자 원문이 \"작성자\" 한정이라 보수적으로 본인만 허용한다.
+
+    Args:
+        main_session: 메인 DB 세션 (cross-DB 고아 판정용).
+        suggestions_session: 건의사항 DB 세션 (게시글 조회용).
+        suggestion_id: 게시글 PK.
+        current_user: 로그인 사용자(필수).
+
+    Returns:
+        4단 게이트를 통과한 ``Suggestion`` ORM 인스턴스 (수정/삭제 대상).
+
+    Raises:
+        HTTPException(404): 게시글이 없거나, 고아 글에 비관리자 접근.
+        HTTPException(403): 비밀글에 비-작성자 비-관리자 접근, 또는 비-작성자 접근.
+    """
+    suggestion = get_suggestion_by_id(suggestions_session, suggestion_id)
+    if suggestion is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="해당 건의사항을 찾을 수 없습니다.",
+        )
+
+    is_admin = bool(current_user.is_admin)
+    is_owner = bool(
+        suggestion.author_user_id is not None
+        and current_user.id == suggestion.author_user_id
+    )
+
+    # 게이트 2: 고아 (404 우선) — 비관리자에게 존재 자체를 노출하지 않는다.
+    alive_user_ids = get_alive_user_ids(main_session, [suggestion.author_user_id])
+    is_orphan = is_orphan_author(suggestion.author_user_id, alive_user_ids)
+    if is_orphan and not is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="해당 건의사항을 찾을 수 없습니다.",
+        )
+
+    # 게이트 3: 비밀글 (403). 작성자 본인은 자동 통과(아래 게이트 4 에서 별도 검증).
+    if suggestion.is_secret and not is_admin and not is_owner:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="비밀글은 작성자 본인 또는 관리자만 열람할 수 있습니다.",
+        )
+
+    # 게이트 4: 작성자 본인. 관리자는 본 task 범위에서 수정·삭제 불가.
+    if not is_owner:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="자신이 작성한 글만 수정·삭제할 수 있습니다.",
+        )
+
+    return suggestion
+
+
+@router.get(
+    "/suggestions/{suggestion_id}/edit",
+    response_class=HTMLResponse,
+    response_model=None,
+)
+def edit_suggestion_page(
+    request: Request,
+    suggestion_id: int,
+    main_session: Session = Depends(_main_db_session),
+    suggestions_session: Session = Depends(_suggestions_db_session),
+    current_user: User = Depends(current_user_required),
+) -> HTMLResponse:
+    """건의사항 수정 폼 페이지 (GET /suggestions/{id}/edit) — 작성자 본인 전용.
+
+    ``_apply_owner_edit_gates`` 가 4단 게이트(존재/고아/비밀글/작성자) 를
+    적용한다. 통과한 ``Suggestion`` 을 그대로 폼에 prefill 한다.
+
+    수정 가능 필드는 제목/본문/비밀글 여부 3개로 제한된다(가이던스: 작성자명·
+    비밀번호·연락처 이메일은 본 task 범위 밖). 비밀번호 입력 필드는 폼에
+    아예 두지 않으므로 의도치 않은 비밀번호 변경도 발생하지 않는다.
+
+    Args:
+        request: FastAPI Request (Jinja2 컨텍스트용).
+        suggestion_id: 게시글 PK.
+        main_session: 메인 DB 세션 (cross-DB 고아 판정용).
+        suggestions_session: 건의사항 DB 세션 (게시글 조회용).
+        current_user: 로그인 사용자(필수). 비로그인은 401 (dependency).
+
+    Returns:
+        ``suggestions/edit.html`` 렌더 결과.
+
+    Raises:
+        HTTPException(401): 비로그인 (current_user_required dependency).
+        HTTPException(404): 게시글 없음 또는 고아 글에 비관리자 접근.
+        HTTPException(403): 비밀글 비-작성자 접근 또는 비-작성자 접근.
+    """
+    suggestion = _apply_owner_edit_gates(
+        main_session,
+        suggestions_session,
+        suggestion_id=suggestion_id,
+        current_user=current_user,
+    )
+
+    return _templates.TemplateResponse(
+        request,
+        "suggestions/edit.html",
+        {
+            "current_user": current_user,
+            "suggestion": suggestion,
+        },
+    )
+
+
+@router.post(
+    "/suggestions/{suggestion_id}/edit",
+    dependencies=[Depends(ensure_same_origin)],
+    response_class=RedirectResponse,
+    response_model=None,
+)
+def update_suggestion_route(
+    suggestion_id: int,
+    title: str = Form(...),
+    body: str = Form(...),
+    is_secret: str | None = Form(default=None),
+    main_session: Session = Depends(_main_db_session),
+    suggestions_session: Session = Depends(_suggestions_db_session),
+    current_user: User = Depends(current_user_required),
+) -> RedirectResponse:
+    """건의사항 수정 처리 (POST /suggestions/{id}/edit) — 작성자 본인 전용.
+
+    GET 폼과 동일한 4단 게이트를 통과해야만 갱신이 수행된다(URL 직접 호출
+    우회 방지). 수정 가능 필드는 제목/본문/비밀글 여부로 한정한다.
+
+    Form 필드:
+        - ``title``: 필수, ≤255자.
+        - ``body``: 필수, ≤20000자.
+        - ``is_secret``: 체크박스. 체크되어 있으면 truthy 문자열, 해제 시 None.
+
+    Returns:
+        303 리다이렉트 (``Location: /suggestions/{id}``) — PRG.
+
+    Raises:
+        HTTPException(401): 비로그인.
+        HTTPException(404): 게시글 없음 또는 고아 글에 비관리자.
+        HTTPException(403): 비밀글 비-작성자 또는 비-작성자.
+        HTTPException(400): 빈 입력 또는 길이 초과.
+    """
+    # 4단 게이트 — 게시글 존재/고아/비밀글/작성자 본인.
+    _apply_owner_edit_gates(
+        main_session,
+        suggestions_session,
+        suggestion_id=suggestion_id,
+        current_user=current_user,
+    )
+
+    # ── 입력 정규화·검증 ──────────────────────────────────────────────────
+    title_normalized = _validate_required_text(
+        title, field_label="제목", max_length=_TITLE_MAX_LENGTH
+    )
+    body_normalized = _validate_required_text(
+        body, field_label="본문", max_length=_BODY_MAX_LENGTH
+    )
+    is_secret_bool = is_secret is not None and is_secret.strip() != ""
+
+    # ── UPDATE (트랜잭션은 라우트 끝에서 명시 commit) ──────────────────────
+    try:
+        result = update_suggestion(
+            suggestions_session,
+            suggestion_id=suggestion_id,
+            title=title_normalized,
+            body=body_normalized,
+            is_secret=is_secret_bool,
+        )
+        if result is None:
+            # 게이트 통과와 갱신 사이에 row 가 사라진 race — 보수적으로 404.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="해당 건의사항을 찾을 수 없습니다.",
+            )
+        suggestions_session.commit()
+    except HTTPException:
+        suggestions_session.rollback()
+        raise
+    except Exception:
+        suggestions_session.rollback()
+        raise
+
+    return RedirectResponse(
+        url=f"/suggestions/{suggestion_id}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.post(
+    "/suggestions/{suggestion_id}/delete",
+    dependencies=[Depends(ensure_same_origin)],
+    response_class=RedirectResponse,
+    response_model=None,
+)
+def delete_suggestion_route(
+    suggestion_id: int,
+    main_session: Session = Depends(_main_db_session),
+    suggestions_session: Session = Depends(_suggestions_db_session),
+    current_user: User = Depends(current_user_required),
+) -> RedirectResponse:
+    """건의사항 삭제 처리 (POST /suggestions/{id}/delete) — 작성자 본인 전용.
+
+    동일한 4단 게이트를 적용한 뒤 게시글을 삭제한다. 소속 댓글은 모델
+    cascade(``all, delete-orphan`` + DB ``ON DELETE CASCADE``) 로 함께 정리된다.
+    성공 시 목록 페이지(``/suggestions``) 로 303 리다이렉트한다.
+
+    Returns:
+        303 리다이렉트 (``Location: /suggestions``) — PRG.
+
+    Raises:
+        HTTPException(401): 비로그인.
+        HTTPException(404): 게시글 없음 또는 고아 글에 비관리자.
+        HTTPException(403): 비밀글 비-작성자 또는 비-작성자.
+    """
+    # 4단 게이트 — 게시글 존재/고아/비밀글/작성자 본인.
+    _apply_owner_edit_gates(
+        main_session,
+        suggestions_session,
+        suggestion_id=suggestion_id,
+        current_user=current_user,
+    )
+
+    # ── DELETE (트랜잭션은 라우트 끝에서 명시 commit) ──────────────────────
+    try:
+        deleted = delete_suggestion(
+            suggestions_session,
+            suggestion_id=suggestion_id,
+        )
+        if not deleted:
+            # 게이트 통과 직후 사라진 race 케이스. 사용자 경험상 404 보다
+            # \"이미 삭제됨\" 이 자연스러우나, 정합성 차원에서 404 로 응답한다.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="해당 건의사항을 찾을 수 없습니다.",
+            )
+        suggestions_session.commit()
+    except HTTPException:
+        suggestions_session.rollback()
+        raise
+    except Exception:
+        suggestions_session.rollback()
+        raise
+
+    # 글이 사라졌으니 뷰어가 아니라 목록으로 보낸다.
+    return RedirectResponse(
+        url="/suggestions",
         status_code=status.HTTP_303_SEE_OTHER,
     )
 

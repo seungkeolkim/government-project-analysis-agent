@@ -36,9 +36,11 @@ from app.suggestions.repository import (
     count_suggestions,
     create_suggestion,
     create_suggestion_comment,
+    delete_suggestion,
     get_suggestion_by_id,
     list_comments_by_suggestion_id,
     list_suggestions,
+    update_suggestion,
     update_suggestion_acceptance,
 )
 from app.suggestions.service import (
@@ -75,6 +77,8 @@ __all__ = [
     "list_comments_by_suggestion_id",
     "create_suggestion_comment",
     "update_suggestion_acceptance",
+    "update_suggestion",
+    "delete_suggestion",
     "SuggestionView",
     "SuggestionCommentView",
     "apply_orphan_policy_to_suggestions",

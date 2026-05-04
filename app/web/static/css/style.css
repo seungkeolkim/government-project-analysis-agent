@@ -3905,6 +3905,61 @@ details[open] .user-card__org-summary::before {
     margin: 16px 0 0;
 }
 
+/* 작성자 본인 액션(수정·삭제) 버튼 영역 (task 00052-4).
+   본문 카드 하단에 우측 정렬로 배치. 수정은 인디고 톤, 삭제는 빨강 톤으로
+   분리해 시각적으로 위험도(되돌릴 수 없는 작업)를 시그널한다.
+   삭제 form 은 inline-block 처리하여 두 버튼이 같은 행에 정렬되도록 한다. */
+.suggestion-detail__owner-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: flex-end;
+    align-items: center;
+    margin: 16px 0 0;
+    padding: 12px 0 0;
+    border-top: 1px solid #e5e7eb;
+}
+
+.suggestion-detail__owner-action-form {
+    margin: 0;
+    display: inline-block;
+}
+
+.suggestion-detail__owner-action {
+    display: inline-block;
+    padding: 6px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    border-radius: 6px;
+    border: 1px solid #d1d5db;
+    background: #ffffff;
+    color: #1f2937;
+    text-decoration: none;
+    cursor: pointer;
+    line-height: 1.3;
+    box-sizing: border-box;
+}
+
+.suggestion-detail__owner-action--edit {
+    color: #4338ca;
+    border-color: #c7d2fe;
+    background: #eef2ff;
+}
+
+.suggestion-detail__owner-action--edit:hover {
+    background: #e0e7ff;
+}
+
+.suggestion-detail__owner-action--delete {
+    color: #b91c1c;
+    border-color: #fecaca;
+    background: #fef2f2;
+}
+
+.suggestion-detail__owner-action--delete:hover {
+    background: #fee2e2;
+}
+
 /* ---------- 건의사항 댓글 (task 00051-4) ---------- */
 
 .suggestion-comments-section {

@@ -142,6 +142,29 @@
             <h4 class="suggestion-detail__section-title">본문</h4>
             <div class="suggestion-detail__body">{{ suggestion.body }}</div>
         </section>
+
+        {#
+          작성자 본인 액션 (task 00052-4) — 본인이 아닌 사용자(타인/비로그인/관리자)
+          에게는 노출되지 않는다. 라우트가 4단 게이트로 권한을 차단하지만, UI 단계
+          에서도 버튼 자체를 숨겨 "보이는데 못 누르는" 혼란을 막는다.
+          삭제는 form POST 안에 native confirm() 으로 1차 확인을 받는다 — 외부
+          라이브러리 0, JS 인라인 한 줄.
+        #}
+        {% if is_owner %}
+        <div class="suggestion-detail__owner-actions">
+            <a class="suggestion-detail__owner-action suggestion-detail__owner-action--edit"
+               href="/suggestions/{{ suggestion.id }}/edit">수정</a>
+            <form method="post"
+                  action="/suggestions/{{ suggestion.id }}/delete"
+                  class="suggestion-detail__owner-action-form"
+                  onsubmit="return confirm('정말 삭제하시겠습니까? 댓글도 함께 삭제됩니다.')">
+                <button type="submit"
+                        class="suggestion-detail__owner-action suggestion-detail__owner-action--delete">
+                    삭제
+                </button>
+            </form>
+        </div>
+        {% endif %}
     </article>
 
     {#
