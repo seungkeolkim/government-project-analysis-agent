@@ -70,9 +70,11 @@
 
     <footer class="site-footer">
         <div class="container">
-            {# task 00051 — 건의사항 게시판 진입점. 최하단 단일 링크.
-               비로그인 사용자도 클릭해 목록을 열 수 있다(작성만 로그인 필수). #}
-            <p class="site-footer__suggestions">
+            {# task 00056 — 공지사항(왼쪽) + 건의사항(오른쪽) 두 게시판 진입점.
+               DOM 순서: 공지사항이 먼저(왼쪽), 건의사항이 나중(오른쪽).
+               색상으로 두 게시판을 구분한다: 공지=틸, 건의=인디고. #}
+            <p class="site-footer__board-links">
+                <a class="footer-notices-link" href="/notices">공지사항 게시판</a>
                 <a class="footer-suggestions-link" href="/suggestions">건의사항 게시판</a>
             </p>
             <small>로컬 전용 · 외부 공개 금지</small>

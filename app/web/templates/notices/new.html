@@ -1,0 +1,77 @@
+{#
+  공지사항 작성 폼 페이지 (task 00056-3).
+
+  컨텍스트 (라우트 new_notice_page 가 주입):
+    - current_user: User | None
+    - is_admin:     bool
+
+  렌더 분기:
+    - is_admin == False 이면 폼 대신 "관리자만 작성 가능합니다" 안내만 표시.
+    - 관리자에게만 실제 폼 노출. POST /notices 로 전송.
+
+  비밀글·비밀번호·수용여부·댓글 필드 없음 (사용자 원문 명시).
+#}
+{% extends "base.html" %}
+
+{% block page_title %}공지사항 작성{% endblock %}
+
+{% block content %}
+<section class="suggestions-page">
+    <header class="suggestions-page__heading">
+        <h2 class="suggestions-page__title">공지사항 작성</h2>
+        <a class="suggestion-form__cancel" href="/notices">목록으로</a>
+    </header>
+
+    {% if not is_admin %}
+    {# 비로그인 또는 비관리자에게 안내 표시 #}
+    <div class="suggestion-login-required" role="alert">
+        <strong>공지사항은 관리자만 작성할 수 있습니다.</strong>
+        <p>관리자 계정으로 로그인한 상태에서만 공지사항 작성이 가능합니다.</p>
+        {% if not current_user %}
+        <a class="suggestion-login-required__cta" href="/login?next=/notices/new">로그인하러 가기</a>
+        {% endif %}
+    </div>
+    {% else %}
+    <form class="suggestion-form" method="post" action="/notices">
+        <div class="suggestion-form__row suggestion-form__row--inline">
+            <span class="suggestion-form__label">작성자</span>
+            <span class="suggestion-form__author-readonly">
+                {{ current_user.username }}
+            </span>
+            <small class="suggestion-form__hint">
+                로그인 관리자명이 작성자로 자동 등록됩니다.
+            </small>
+        </div>
+
+        <div class="suggestion-form__row">
+            <label class="suggestion-form__label" for="notice-title">제목 *</label>
+            <input
+                class="suggestion-form__input"
+                id="notice-title"
+                name="title"
+                type="text"
+                required
+                maxlength="255"
+                autocomplete="off"
+            >
+        </div>
+
+        <div class="suggestion-form__row">
+            <label class="suggestion-form__label" for="notice-body">본문 *</label>
+            <textarea
+                class="suggestion-form__textarea"
+                id="notice-body"
+                name="body"
+                required
+                maxlength="20000"
+            ></textarea>
+        </div>
+
+        <div class="suggestion-form__actions">
+            <button type="submit" class="suggestion-form__submit">등록</button>
+            <a href="/notices" class="suggestion-form__cancel">취소</a>
+        </div>
+    </form>
+    {% endif %}
+</section>
+{% endblock %}

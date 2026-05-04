@@ -1,0 +1,70 @@
+{#
+  공지사항 상세 페이지 (task 00056-3).
+
+  컨텍스트 (라우트 view_notice_page 가 주입):
+    - current_user: User | None
+    - is_admin:     bool
+    - notice:       Notice ORM 인스턴스
+
+  렌더 규칙:
+    - 본문(body)은 사용자 입력이라 XSS 위험 → Jinja2 자동 escape, |safe 금지.
+      줄바꿈은 CSS white-space: pre-wrap 으로 보존한다.
+    - 비밀글·수용여부·댓글 섹션 없음 (사용자 원문 명시).
+    - 관리자에게만 수정/삭제 버튼 노출.
+#}
+{% extends "base.html" %}
+
+{% block page_title %}{{ notice.title }} · 공지사항{% endblock %}
+
+{% block content %}
+<section class="suggestions-page suggestion-detail">
+    <header class="suggestions-page__heading">
+        <h2 class="suggestions-page__title">공지사항</h2>
+        <a class="suggestion-form__cancel" href="/notices">목록으로</a>
+    </header>
+
+    <article class="suggestion-detail__article">
+        <header class="suggestion-detail__header">
+            <h3 class="suggestion-detail__title">{{ notice.title }}</h3>
+        </header>
+
+        <dl class="suggestion-detail__meta">
+            <div class="suggestion-detail__meta-row">
+                <dt>작성자</dt>
+                <dd>
+                    {% if notice.author_name %}
+                        {{ notice.author_name }}
+                    {% else %}
+                        <span class="suggestion-detail__placeholder">(없음)</span>
+                    {% endif %}
+                </dd>
+            </div>
+            <div class="suggestion-detail__meta-row">
+                <dt>작성시간</dt>
+                <dd>{{ notice.created_at | kst_format }}</dd>
+            </div>
+            {% if notice.updated_at != notice.created_at %}
+            <div class="suggestion-detail__meta-row">
+                <dt>최종 수정</dt>
+                <dd>{{ notice.updated_at | kst_format }}</dd>
+            </div>
+            {% endif %}
+        </dl>
+
+        <div class="suggestion-detail__body">
+            {# Jinja2 자동 escape — |safe 사용 금지. 줄바꿈은 CSS pre-wrap 으로 보존. #}
+            {{ notice.body }}
+        </div>
+
+        {% if is_admin %}
+        <footer class="suggestion-detail__actions">
+            <a class="suggestion-form__submit" href="/notices/{{ notice.id }}/edit">수정</a>
+            <form method="post" action="/notices/{{ notice.id }}/delete"
+                  onsubmit="return confirm('이 공지사항을 삭제하시겠습니까?')">
+                <button type="submit" class="suggestion-form__delete-button">삭제</button>
+            </form>
+        </footer>
+        {% endif %}
+    </article>
+</section>
+{% endblock %}

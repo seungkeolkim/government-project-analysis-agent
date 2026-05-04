@@ -66,6 +66,7 @@ from app.web.routes import (
     bulk_router,
     dashboard_router,
     favorites_router,
+    notices_router,
     relevance_router,
     settings_router,
     suggestions_router,
@@ -363,6 +364,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # task 00049-2: 개인 설정 라우터(/settings, /settings/*) mount.
     # 비로그인 GET → /login?next=/settings 리다이렉트. POST 는 401 반환.
     fastapi_app.include_router(settings_router)
+
+    # task 00056-3: 공지사항 게시판 라우터(/notices/*) mount.
+    # 목록·상세는 비로그인도 열람 가능. 작성/수정/삭제는 관리자 전용.
+    fastapi_app.include_router(notices_router)
 
     # task 00051-2: 건의사항 게시판 라우터(/suggestions, /suggestions/new) mount.
     # 비로그인도 목록·폼 진입 가능(폼은 안내만 표시), POST /suggestions 는 로그인 필수.
