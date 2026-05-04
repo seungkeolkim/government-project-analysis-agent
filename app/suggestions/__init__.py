@@ -18,10 +18,14 @@ batch 헬퍼를 노출한다.
         :func:`reset_suggestions_engine_cache`,
         :func:`init_suggestions_db`
     - cross-DB author 헬퍼:
-        :func:`get_alive_user_ids`
+        :func:`get_alive_user_ids`,
+        :func:`get_alive_user_username_map`
 """
 
-from app.suggestions.author_validity import get_alive_user_ids
+from app.suggestions.author_validity import (
+    get_alive_user_ids,
+    get_alive_user_username_map,
+)
 from app.suggestions.models import (
     AcceptanceStatus,
     Base,
@@ -31,11 +35,15 @@ from app.suggestions.models import (
 from app.suggestions.repository import (
     count_suggestions,
     create_suggestion,
+    create_suggestion_comment,
     get_suggestion_by_id,
+    list_comments_by_suggestion_id,
     list_suggestions,
 )
 from app.suggestions.service import (
+    SuggestionCommentView,
     SuggestionView,
+    apply_orphan_policy_to_comments,
     apply_orphan_policy_to_suggestions,
     is_orphan_author,
 )
@@ -58,11 +66,16 @@ __all__ = [
     "reset_suggestions_engine_cache",
     "init_suggestions_db",
     "get_alive_user_ids",
+    "get_alive_user_username_map",
     "count_suggestions",
     "list_suggestions",
     "create_suggestion",
     "get_suggestion_by_id",
+    "list_comments_by_suggestion_id",
+    "create_suggestion_comment",
     "SuggestionView",
+    "SuggestionCommentView",
     "apply_orphan_policy_to_suggestions",
+    "apply_orphan_policy_to_comments",
     "is_orphan_author",
 ]

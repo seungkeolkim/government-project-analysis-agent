@@ -76,6 +76,47 @@ def get_alive_user_ids(
     return set(rows)
 
 
+def get_alive_user_username_map(
+    main_session: Session,
+    user_ids: Iterable[int | None],
+) -> dict[int, str]:
+    """주어진 user id 들에 대해 살아있는 user 의 ``id → username`` 매핑을 반환한다.
+
+    :func:`get_alive_user_ids` 의 형제 함수로, IN 절 단일 쿼리는 동일하지만
+    ``(id, username)`` 두 열을 함께 가져와 dict 으로 반환한다. 댓글 렌더 단계
+    에서 사용한다 — :class:`SuggestionComment` 모델은 ``author_name`` 컬럼이
+    없으므로 표시용 작성자명을 메인 DB ``users.username`` 에서 즉석으로
+    조회해야 한다(스키마 변경 회피).
+
+    호출자는 다음 단순한 규칙으로 alive/orphan 을 분기할 수 있다:
+
+        - ``author_user_id is None``    → orphan (관리자만, 작성자 NULL 표시)
+        - ``author_user_id in map``     → alive  → 표시명 = ``map[author_user_id]``
+        - 그 외                         → orphan (관리자만, 작성자 NULL 표시)
+
+    또한 ``set(map.keys())`` 는 :func:`get_alive_user_ids` 와 동일한 alive set 이
+    되므로, 같은 입력으로 두 함수를 동시에 호출하지 않고 본 함수 결과만으로
+    두 정보를 모두 얻을 수 있다.
+
+    Args:
+        main_session: 메인 DB(``app.sqlite3``) 의 ORM 세션. SELECT 만 수행한다.
+        user_ids: 검사 대상 user id 들의 iterable. ``None`` 은 자동으로 제외된다.
+
+    Returns:
+        ``{user_id: username}`` dict. 입력이 비어 있거나 ``None`` 만으로 구성되면
+        빈 dict 을 반환한다(메인 DB 에 쿼리 발송 없음).
+    """
+    candidate_ids: set[int] = {uid for uid in user_ids if uid is not None}
+    if not candidate_ids:
+        return {}
+
+    rows = main_session.execute(
+        select(User.id, User.username).where(User.id.in_(candidate_ids))
+    ).all()
+    return {user_id: username for user_id, username in rows}
+
+
 __all__ = [
     "get_alive_user_ids",
+    "get_alive_user_username_map",
 ]

@@ -3750,12 +3750,96 @@ details[open] .user-card__org-summary::before {
     margin: 16px 0 0;
 }
 
+/* ---------- 건의사항 댓글 (task 00051-4) ---------- */
+
 .suggestion-comments-section {
     margin: 24px 0 0;
+    padding: 18px 20px;
+    background: #f9fafb;
+    border-radius: 8px;
+}
+
+.suggestion-comments-section__title {
+    font-size: 16px;
+    font-weight: 600;
+    margin: 0 0 12px;
+    color: #1f2937;
+}
+
+.suggestion-comments-section__count {
+    color: #6b7280;
+    font-weight: 500;
+    margin-left: 4px;
+}
+
+.suggestion-comments-section__empty {
+    margin: 0 0 12px;
+    padding: 14px;
+    text-align: center;
+    color: #9ca3af;
+    background: #ffffff;
+    border-radius: 6px;
+    font-size: 13px;
 }
 
 .suggestion-comment-list {
     list-style: none;
-    margin: 0;
+    margin: 0 0 16px;
     padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.suggestion-comment {
+    padding: 10px 12px;
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+}
+
+/* 고아 댓글 (관리자 전용 노출) — 시각적 강조. */
+.suggestion-comment--orphan {
+    background: #fff7ed;
+    border-color: #fde68a;
+}
+
+.suggestion-comment__header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin: 0 0 6px;
+    font-size: 12px;
+    color: #6b7280;
+}
+
+.suggestion-comment__author {
+    font-weight: 600;
+    color: #1f2937;
+}
+
+.suggestion-comment__time {
+    color: #9ca3af;
+}
+
+/* 본문: 사용자 입력 — pre-wrap 으로 줄바꿈 보존, |safe 사용 X. */
+.suggestion-comment__body {
+    font-size: 14px;
+    line-height: 1.55;
+    color: #1f2937;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* 댓글 작성 폼. */
+.suggestion-comment-form {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 0;
+}
+
+.suggestion-comment-form__textarea {
+    min-height: 84px;
 }

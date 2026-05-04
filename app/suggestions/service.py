@@ -17,10 +17,15 @@
 사용 패턴 (subtask 00051-2/3/4 공통):
     1. 라우트가 게시글/댓글을 한 번에 조회한다.
     2. ``author_user_id`` set 을 모은다.
-    3. ``app.suggestions.author_validity.get_alive_user_ids(main_session, ids)`` 로
-       살아있는 user id set 을 받는다.
-    4. ``apply_orphan_policy_to_suggestions(items, alive, is_admin=...)`` 로
-       템플릿이 그대로 쓸 수 있는 ``SuggestionView`` 리스트를 얻는다.
+    3. cross-DB 헬퍼 호출:
+        - 글 목록/뷰어: ``get_alive_user_ids`` 로 alive set 만 받음 — Suggestion 은
+          모델 자체에 ``author_name`` 컬럼이 있어 표시명을 가져오지 않아도 된다.
+        - 댓글 목록: ``get_alive_user_username_map`` 으로 ``id → username`` map 을
+          받음 — SuggestionComment 는 ``author_name`` 컬럼이 없어 메인 DB 의
+          username 을 즉석 조회해야 한다.
+    4. ``apply_orphan_policy_to_suggestions(items, alive, is_admin=...)`` 또는
+       ``apply_orphan_policy_to_comments(items, username_map, is_admin=...)`` 로
+       템플릿이 그대로 쓸 수 있는 view 리스트를 얻는다.
 
 본 모듈은 ORM 인스턴스를 변형하지 않는다 — 항상 view dataclass 를 새로 생성한다.
 세션이 닫힌 뒤에도 안전하게 템플릿이 참조할 수 있도록(SQLAlchemy detached
@@ -33,7 +38,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from app.suggestions.models import AcceptanceStatus, Suggestion
+from app.suggestions.models import AcceptanceStatus, Suggestion, SuggestionComment
 
 
 @dataclass(frozen=True)
@@ -146,8 +151,95 @@ def apply_orphan_policy_to_suggestions(
     return views
 
 
+@dataclass(frozen=True)
+class SuggestionCommentView:
+    """라우트→템플릿 표시용 댓글 view dataclass.
+
+    :class:`SuggestionComment` ORM 인스턴스를 직접 참조하는 대신, 템플릿이 필요로
+    하는 필드만 추출해 보존한다. 세션이 닫힌 뒤에도 detached lazy-load 예외 없이
+    템플릿이 안전하게 렌더할 수 있도록 한다.
+
+    Attributes:
+        comment_id: 댓글 PK.
+        body: 댓글 본문 (사용자 입력 — XSS 위험. 템플릿에서 |safe 절대 금지).
+        is_orphan: 고아 댓글 여부 (작성자가 메인 DB 에 없거나 None).
+        display_author_name: 표시용 작성자명.
+            - alive 작성자: 메인 DB users.username 값(렌더 시점 조회).
+            - 고아 댓글: ``None`` 으로 마스킹 (관리자 전용 경로에서만 노출됨).
+        created_at: 댓글 작성 시각(UTC). KST 표시는 템플릿 필터가 처리한다.
+    """
+
+    comment_id: int
+    body: str
+    is_orphan: bool
+    display_author_name: str | None
+    created_at: datetime
+
+
+def apply_orphan_policy_to_comments(
+    comments: Iterable[SuggestionComment],
+    alive_user_username_map: dict[int, str],
+    *,
+    is_admin: bool,
+) -> list[SuggestionCommentView]:
+    """댓글 목록에 고아 댓글 노출/마스킹 정책을 적용한다.
+
+    글(:func:`apply_orphan_policy_to_suggestions`) 과 완전히 동일한 정책 — 단지
+    표시 페이로드(body/created_at) 와 작성자명 출처(메인 DB users.username) 가
+    다르다. 사용자 modify 턴 \"댓글 작성자는 NULL 로 표시되고 관리자만 볼 수
+    있도록\" 을 그대로 충족한다.
+
+    - 비관리자: 고아 댓글은 결과에서 **제외** (UI 비노출).
+    - 관리자: 고아 댓글도 포함시키되 ``display_author_name=None`` 으로 마스킹.
+    - alive 댓글: ``alive_user_username_map[author_user_id]`` 를 표시명으로 사용.
+
+    입력 순서를 그대로 보존한다(라우트가 정렬을 책임진다 — 보통 created_at 오름).
+
+    Args:
+        comments: 정렬·페이지네이션이 끝난 ``SuggestionComment`` 시퀀스.
+        alive_user_username_map: ``get_alive_user_username_map`` 결과 dict.
+            살아있는 user id 만 키로 포함되어 있다.
+        is_admin: 현재 사용자가 관리자 (``is_admin=True``) 인지. 비로그인은 False.
+
+    Returns:
+        ``SuggestionCommentView`` 리스트. 비관리자 호출에서는 길이가 입력보다 짧을
+        수 있다(고아 댓글 제외).
+    """
+    views: list[SuggestionCommentView] = []
+    for comment in comments:
+        # 고아 판정은 글과 동일한 단일 정책 — alive_set 키만 추출해 재사용.
+        is_orphan = is_orphan_author(
+            comment.author_user_id,
+            set(alive_user_username_map.keys()),
+        )
+        if is_orphan and not is_admin:
+            # 비관리자: 고아 댓글 비노출 (사용자 modify 턴).
+            continue
+
+        # alive 댓글은 username 으로 표시, orphan 댓글은 None 으로 마스킹.
+        if is_orphan:
+            display_author_name: str | None = None
+        else:
+            # author_user_id 가 alive 라면 map 에 반드시 존재한다.
+            # author_user_id 가 None 인 경우는 is_orphan=True 분기에서 이미 처리됨.
+            display_author_name = alive_user_username_map[comment.author_user_id]
+
+        views.append(
+            SuggestionCommentView(
+                comment_id=comment.id,
+                body=comment.body,
+                is_orphan=is_orphan,
+                display_author_name=display_author_name,
+                created_at=comment.created_at,
+            )
+        )
+    return views
+
+
 __all__ = [
     "SuggestionView",
+    "SuggestionCommentView",
     "is_orphan_author",
     "apply_orphan_policy_to_suggestions",
+    "apply_orphan_policy_to_comments",
 ]

@@ -44,12 +44,16 @@ from app.db.models import User
 from app.db.session import SessionLocal
 from app.suggestions import (
     SuggestionsSessionLocal,
+    apply_orphan_policy_to_comments,
     apply_orphan_policy_to_suggestions,
     count_suggestions,
     create_suggestion,
+    create_suggestion_comment,
     get_alive_user_ids,
+    get_alive_user_username_map,
     get_suggestion_by_id,
     is_orphan_author,
+    list_comments_by_suggestion_id,
     list_suggestions,
 )
 from app.web.template_filters import register_kst_filters
@@ -80,6 +84,9 @@ _CONTACT_EMAIL_MAX_LENGTH: int = 255
 # 너무 짧으면 brute force 위험이 있어 4자 이상으로 보수적 하한을 둔다.
 _POST_PASSWORD_MIN_LENGTH: int = 4
 _POST_PASSWORD_MAX_LENGTH: int = 128
+
+# 댓글 본문 길이 상한 — 본문보다는 짧게 두어 길어도 채팅 형태를 유지하게 한다.
+_COMMENT_BODY_MAX_LENGTH: int = 2000
 
 
 # ──────────────────────────────────────────────────────────────
@@ -463,7 +470,7 @@ def view_suggestion_page(
             detail="비밀글은 작성자 본인 또는 관리자만 열람할 수 있습니다.",
         )
 
-    # ── 표시 데이터 가공 ─────────────────────────────────────────────────
+    # ── 표시 데이터 가공 (글) ────────────────────────────────────────────
     # 고아 글(관리자 전용 경로)은 작성자명/연락처를 NULL 로 마스킹한다.
     if is_orphan:
         display_author_name = None
@@ -471,6 +478,24 @@ def view_suggestion_page(
     else:
         display_author_name = suggestion.author_name
         display_contact_email = suggestion.contact_email
+
+    # ── 댓글 로드 + 고아 댓글 정책 적용 (00051-4) ─────────────────────────
+    # 가이던스: "비밀글 권한 위반 시 댓글 작성/열람 모두 막는다(이미 뷰어 단에서
+    # 차단되므로 상위 게이트 통과 후 댓글 렌더)" — 위 두 게이트를 통과한 시점에서만
+    # 본 분기로 진입하므로 별도 추가 게이트는 불필요.
+    raw_comments = list_comments_by_suggestion_id(
+        suggestions_session,
+        suggestion_id=suggestion.id,
+    )
+    # cross-DB 헬퍼를 batch 로 한 번 호출 — 댓글 작성자들의 alive 여부 + username
+    # 매핑을 동시에 얻는다(N+1 회피, 가이던스 \"동일 패턴 함수 재사용\").
+    comment_author_user_ids = [c.author_user_id for c in raw_comments]
+    alive_username_map = get_alive_user_username_map(main_session, comment_author_user_ids)
+    comment_views = apply_orphan_policy_to_comments(
+        raw_comments,
+        alive_username_map,
+        is_admin=is_admin,
+    )
 
     return _templates.TemplateResponse(
         request,
@@ -483,7 +508,99 @@ def view_suggestion_page(
             "suggestion": suggestion,
             "display_author_name": display_author_name,
             "display_contact_email": display_contact_email,
+            # 00051-4 — 댓글 view 리스트 (정책 적용 끝). 비관리자에게는 고아 댓글이
+            # 이미 제외된 상태이며, 관리자에게는 display_author_name=None 으로
+            # 마스킹된 채로 포함된다.
+            "comment_views": comment_views,
         },
+    )
+
+
+@router.post(
+    "/suggestions/{suggestion_id}/comments",
+    dependencies=[Depends(ensure_same_origin)],
+    response_class=RedirectResponse,
+    response_model=None,
+)
+def create_comment_route(
+    suggestion_id: int,
+    body: str = Form(...),
+    current_user: User = Depends(current_user_required),
+    main_session: Session = Depends(_main_db_session),
+    suggestions_session: Session = Depends(_suggestions_db_session),
+) -> RedirectResponse:
+    """건의사항 게시글에 댓글을 작성한다 (POST /suggestions/{id}/comments).
+
+    가이던스 그대로 — 로그인 필수, 대댓글 없음, application/x-www-form-urlencoded.
+    AJAX 가 아니라 폼 submit 후 PRG 패턴으로 뷰어 페이지로 303 리다이렉트한다.
+
+    권한 게이트는 뷰어와 동일한 두 단계를 동일 순서로 적용한다 — 작성 단계에서도
+    \"고아 글에 비관리자 댓글 작성\" / \"비밀글에 비-작성자 비-관리자 댓글 작성\"
+    을 차단해야 GET 우회로 댓글이 달리는 경로를 막을 수 있다.
+
+    Form 필드:
+        - ``body``: 필수, ≤2000자.
+
+    Returns:
+        303 리다이렉트 (``Location: /suggestions/{id}``).
+
+    Raises:
+        HTTPException(401): 비로그인 (current_user_required dependency).
+        HTTPException(404): 게시글 없음 또는 고아 글에 비관리자 접근.
+        HTTPException(403): 비밀글에 작성자 본인/관리자 외 접근.
+        HTTPException(400): 빈 본문 또는 길이 초과.
+    """
+    # ── 입력 검증 ─────────────────────────────────────────────────────────
+    body_normalized = _validate_required_text(
+        body, field_label="댓글 본문", max_length=_COMMENT_BODY_MAX_LENGTH
+    )
+
+    # ── 부모 게시글 조회 + 두 권한 게이트 (뷰어와 동일 순서·동일 정책) ────────
+    suggestion = get_suggestion_by_id(suggestions_session, suggestion_id)
+    if suggestion is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="해당 건의사항을 찾을 수 없습니다.",
+        )
+
+    is_admin = bool(current_user.is_admin)
+    is_owner = bool(
+        suggestion.author_user_id is not None
+        and current_user.id == suggestion.author_user_id
+    )
+
+    alive_user_ids = get_alive_user_ids(main_session, [suggestion.author_user_id])
+    is_orphan = is_orphan_author(suggestion.author_user_id, alive_user_ids)
+    if is_orphan and not is_admin:
+        # 비관리자가 고아 글에 댓글을 시도해도 글 자체 존재를 노출하지 않는다.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="해당 건의사항을 찾을 수 없습니다.",
+        )
+
+    if suggestion.is_secret and not is_admin and not is_owner:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="비밀글에는 작성자 본인 또는 관리자만 댓글을 달 수 있습니다.",
+        )
+
+    # ── INSERT (트랜잭션 commit 명시) ─────────────────────────────────────
+    try:
+        create_suggestion_comment(
+            suggestions_session,
+            suggestion_id=suggestion.id,
+            author_user_id=current_user.id,
+            body=body_normalized,
+        )
+        suggestions_session.commit()
+    except Exception:
+        suggestions_session.rollback()
+        raise
+
+    # PRG: 작성 후 뷰어로 303 리다이렉트 (새로고침 중복 INSERT 방지).
+    return RedirectResponse(
+        url=f"/suggestions/{suggestion.id}",
+        status_code=status.HTTP_303_SEE_OTHER,
     )
 
 

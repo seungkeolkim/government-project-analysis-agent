@@ -142,17 +142,80 @@
     ></section>
 
     {#
-      00051-4 placeholder — 댓글 영역.
-      뷰어 도달 자체가 가능한 사용자(작성자/관리자/일반 alive) 모두에게 보일
-      예정이지만, 본 단계에서는 빈 컨테이너만 둔다. 후속 subtask 가
-      댓글 입력 폼 + #suggestion-comment-list 안의 ul 을 채운다.
+      댓글 영역 (00051-4).
+      - comment_views 는 라우터에서 이미 고아 정책이 적용된 결과 — 비관리자에게는
+        고아 댓글이 제외되어 있고, 관리자에게는 display_author_name=None 으로
+        마스킹된 채 포함되어 있다. 템플릿은 추가 권한 분기 없이 그대로 렌더한다.
+      - 댓글 본문은 사용자 입력 자유 텍스트 → |safe 절대 금지. Jinja2 자동
+        escape + CSS white-space: pre-wrap 조합으로 안전 + 줄바꿈 보존.
+      - 댓글 작성 폼은 로그인 시에만 노출. 비로그인은 안내 박스만 표시.
     #}
     <section
         id="suggestion-comments-section"
         class="suggestion-comments-section"
         data-suggestion-id="{{ suggestion.id }}"
     >
+        <h4 class="suggestion-comments-section__title">
+            댓글 <span class="suggestion-comments-section__count">{{ comment_views | length }}</span>
+        </h4>
+
+        {% if comment_views %}
+        <ul id="suggestion-comment-list" class="suggestion-comment-list">
+            {% for view in comment_views %}
+            <li class="suggestion-comment {% if view.is_orphan %}suggestion-comment--orphan{% endif %}">
+                <div class="suggestion-comment__header">
+                    <span class="suggestion-comment__author">
+                        {% if view.display_author_name %}
+                            {{ view.display_author_name }}
+                        {% else %}
+                            <span class="suggestion-orphan-note" style="background:#e5e7eb;color:#6b7280;">
+                                (없음)
+                            </span>
+                        {% endif %}
+                    </span>
+                    <span class="suggestion-comment__time">{{ view.created_at | kst_format }}</span>
+                    {% if view.is_orphan %}
+                        <span class="suggestion-orphan-note">작성자 정보 없음</span>
+                    {% endif %}
+                </div>
+                <div class="suggestion-comment__body">{{ view.body }}</div>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
         <ul id="suggestion-comment-list" class="suggestion-comment-list"></ul>
+        <p class="suggestion-comments-section__empty">아직 댓글이 없습니다.</p>
+        {% endif %}
+
+        {# 작성 폼: 로그인 필수. 비로그인은 안내만. #}
+        {% if current_user is none %}
+        <div class="suggestion-login-required" role="note">
+            <strong>댓글 작성은 로그인이 필요합니다.</strong>
+            <a class="suggestion-login-required__cta"
+               href="/login?next=/suggestions/{{ suggestion.id }}">로그인하러 가기</a>
+        </div>
+        {% else %}
+        <form
+            class="suggestion-comment-form"
+            method="post"
+            action="/suggestions/{{ suggestion.id }}/comments"
+        >
+            <label class="suggestion-form__label" for="suggestion-comment-body">
+                댓글 작성
+            </label>
+            <textarea
+                id="suggestion-comment-body"
+                class="suggestion-form__textarea suggestion-comment-form__textarea"
+                name="body"
+                required
+                maxlength="2000"
+                placeholder="댓글을 입력하세요"
+            ></textarea>
+            <div class="suggestion-form__actions">
+                <button type="submit" class="suggestion-form__submit">댓글 등록</button>
+            </div>
+        </form>
+        {% endif %}
     </section>
 </section>
 {% endblock %}

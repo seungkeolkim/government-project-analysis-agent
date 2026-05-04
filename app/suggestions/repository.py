@@ -10,8 +10,10 @@
     - :func:`list_suggestions` / :func:`count_suggestions` — 목록 페이지용 (00051-2).
     - :func:`create_suggestion` — POST /suggestions 작성 처리용 (00051-2).
     - :func:`get_suggestion_by_id` — GET /suggestions/{id} 뷰어 페이지용 (00051-3).
+    - :func:`list_comments_by_suggestion_id` — 뷰어 하단 댓글 목록 조회 (00051-4).
+    - :func:`create_suggestion_comment` — POST 댓글 작성 처리용 (00051-4).
 
-댓글/관리자 모달은 후속 subtask(00051-4 / 00051-5) 에서 본 모듈에 추가될 예정.
+관리자 모달 처리는 후속 subtask(00051-5) 에서 본 모듈에 추가될 예정.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.suggestions.models import AcceptanceStatus, Suggestion
+from app.suggestions.models import AcceptanceStatus, Suggestion, SuggestionComment
 
 
 def get_suggestion_by_id(session: Session, suggestion_id: int) -> Suggestion | None:
@@ -131,9 +133,70 @@ def create_suggestion(
     return suggestion
 
 
+def list_comments_by_suggestion_id(
+    session: Session,
+    *,
+    suggestion_id: int,
+) -> list[SuggestionComment]:
+    """주어진 게시글의 댓글을 작성 시각 오름차순(오래된 것 먼저) 으로 반환한다.
+
+    오래된 댓글 → 최신 댓글 순서는 \"대화의 흐름\" 을 자연스럽게 따라가는
+    Q&A 게시판 전형 패턴이다. 동일 시각 다중 row 의 결정적 순서 보장을 위해
+    ``id`` 오름차순을 보조 정렬키로 둔다.
+
+    Args:
+        session: 건의사항 DB ORM 세션.
+        suggestion_id: 부모 게시글 PK.
+
+    Returns:
+        ``SuggestionComment`` ORM 인스턴스 리스트. 댓글이 없으면 빈 리스트.
+    """
+    rows = session.execute(
+        select(SuggestionComment)
+        .where(SuggestionComment.suggestion_id == suggestion_id)
+        .order_by(SuggestionComment.created_at.asc(), SuggestionComment.id.asc())
+    ).scalars().all()
+    return list(rows)
+
+
+def create_suggestion_comment(
+    session: Session,
+    *,
+    suggestion_id: int,
+    author_user_id: int,
+    body: str,
+) -> SuggestionComment:
+    """새 댓글을 생성한다.
+
+    트랜잭션 commit 은 호출자 책임. ``add`` + ``flush`` 까지만 수행해 ``id`` 가
+    채워진 인스턴스를 반환한다. 댓글 작성 자체는 로그인 필수이므로
+    ``author_user_id`` 는 항상 정수가 주어진다(라우트에서 보장).
+
+    Args:
+        session: 건의사항 DB ORM 세션.
+        suggestion_id: 부모 게시글 PK.
+        author_user_id: 작성자(로그인 사용자) 의 메인 DB users.id 값.
+        body: 댓글 본문 (필수).
+
+    Returns:
+        flush 된 ``SuggestionComment`` ORM 인스턴스.
+    """
+    comment = SuggestionComment(
+        suggestion_id=suggestion_id,
+        author_user_id=author_user_id,
+        body=body,
+        # created_at 은 모델 default(_utcnow) 가 채운다.
+    )
+    session.add(comment)
+    session.flush()
+    return comment
+
+
 __all__ = [
     "count_suggestions",
     "list_suggestions",
     "create_suggestion",
     "get_suggestion_by_id",
+    "list_comments_by_suggestion_id",
+    "create_suggestion_comment",
 ]
