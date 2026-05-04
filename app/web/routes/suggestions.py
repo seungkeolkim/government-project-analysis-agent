@@ -321,7 +321,6 @@ def create_suggestion_route(
     body: str = Form(...),
     password: str = Form(...),
     is_secret: str | None = Form(default=None),
-    author_name: str | None = Form(default=None),
     contact_email: str | None = Form(default=None),
     current_user: User = Depends(current_user_required),
     suggestions_session: Session = Depends(_suggestions_db_session),
@@ -338,8 +337,12 @@ def create_suggestion_route(
         - ``password``: 필수, 4~128자 — bcrypt 해시로 저장.
         - ``is_secret``: 체크박스. 체크되어 있으면 임의의 truthy 문자열이 넘어오고,
             체크 해제 시 키 자체가 누락되어 None 이 된다(브라우저 표준 동작).
-        - ``author_name``: 선택, ≤64자.
         - ``contact_email``: 선택, ≤255자(엄격 RFC 검증 X — 로컬 전제).
+
+    작성자명은 task 00052-2 부터 폼에서 받지 않고, 로그인 사용자의
+    ``current_user.username`` 을 그대로 ``author_name`` 컬럼에 저장한다.
+    ``User.username`` 은 NOT NULL + UNIQUE String(64) 라 None 이 될 수 없고
+    길이도 64자를 넘을 수 없으므로, 별도 정규화 없이 그대로 전달한다.
 
     Returns:
         303 리다이렉트 (``Location: /suggestions``).
@@ -354,9 +357,6 @@ def create_suggestion_route(
     password_normalized = _validate_post_password(password)
     is_secret_bool = is_secret is not None and is_secret.strip() != ""
 
-    author_name_normalized = _normalize_optional_text(
-        author_name, max_length=_AUTHOR_NAME_MAX_LENGTH
-    )
     contact_email_normalized = _normalize_optional_text(
         contact_email, max_length=_CONTACT_EMAIL_MAX_LENGTH
     )
@@ -370,7 +370,9 @@ def create_suggestion_route(
             body=body_normalized,
             password_hash=hash_password(password_normalized),
             is_secret=is_secret_bool,
-            author_name=author_name_normalized,
+            # 로그인 사용자명을 그대로 작성자명으로 저장. username 은 모델 단에서
+            # NOT NULL + UNIQUE + String(64) 이라 None/길이초과 가능성이 없다.
+            author_name=current_user.username,
             contact_email=contact_email_normalized,
         )
         suggestions_session.commit()

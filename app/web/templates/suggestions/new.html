@@ -11,7 +11,13 @@
 
   필드:
     - 필수: 제목, 본문, 비밀번호, 비밀글 여부 체크박스.
-    - 선택: 작성자명, 연락처 이메일.
+    - 선택: 연락처 이메일.
+
+  작성자명:
+    - task 00052-2 부터 폼에서 별도 입력하지 않는다.
+    - 로그인 사용자명(current_user.username) 이 서버 단에서 자동으로 author_name
+      컬럼에 기록된다. 폼에는 read-only 안내만 노출하여 누구로 등록되는지를
+      시각화한다.
 #}
 {% extends "base.html" %}
 
@@ -33,6 +39,18 @@
     </div>
     {% else %}
     <form class="suggestion-form" method="post" action="/suggestions">
+        {# 작성자명은 로그인 사용자명으로 서버에서 자동 기록된다(task 00052-2).
+           폼에는 read-only 안내만 노출하여 누구로 등록되는지 알려준다. #}
+        <div class="suggestion-form__row suggestion-form__row--inline">
+            <span class="suggestion-form__label">작성자</span>
+            <span class="suggestion-form__author-readonly">
+                {{ current_user.username }}
+            </span>
+            <small class="suggestion-form__hint">
+                로그인 사용자명이 작성자로 자동 등록됩니다.
+            </small>
+        </div>
+
         <div class="suggestion-form__row">
             <label class="suggestion-form__label" for="suggestion-title">제목 *</label>
             <input
@@ -84,20 +102,6 @@
             <label class="suggestion-form__label" for="suggestion-is-secret">
                 비밀글로 작성 (작성자 본인 또는 관리자만 열람 가능)
             </label>
-        </div>
-
-        <div class="suggestion-form__row">
-            <label class="suggestion-form__label" for="suggestion-author-name">
-                작성자명 (선택)
-            </label>
-            <input
-                class="suggestion-form__input"
-                id="suggestion-author-name"
-                name="author_name"
-                type="text"
-                maxlength="64"
-                autocomplete="off"
-            >
         </div>
 
         <div class="suggestion-form__row">

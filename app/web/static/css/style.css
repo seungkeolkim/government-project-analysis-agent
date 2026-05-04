@@ -3540,12 +3540,30 @@ details[open] .user-card__org-summary::before {
     font-weight: 600;
 }
 
-/* 작성 폼. */
+/* 작성 폼.
+   task 00052-2: 입력 칸이 충분히 여유롭게 보이도록 max-width 를 720→920px 로
+   확장하고, margin-inline:auto 로 페이지 가운데 정렬하여 좌측에 치우친 인상을
+   줄인다. 자식 input/textarea 는 width:100% 그대로 두어 컨테이너 확장의
+   이득을 그대로 받는다. */
 .suggestion-form {
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    max-width: 720px;
+    gap: 14px;
+    max-width: 920px;
+    margin-inline: auto;
+}
+
+/* 로그인 사용자명을 read-only 로 노출(input 이 아닌 단순 텍스트). 회색톤으로
+   '입력 칸이 아닌 안내'라는 인상을 주고, 옆의 hint 와 함께 한 줄에 정렬된다. */
+.suggestion-form__author-readonly {
+    display: inline-block;
+    padding: 4px 10px;
+    background: #f3f4f6;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    font-size: 14px;
+    color: #1f2937;
+    font-weight: 500;
 }
 
 .suggestion-form__row {
@@ -3582,8 +3600,9 @@ details[open] .user-card__org-summary::before {
 }
 
 .suggestion-form__textarea {
-    min-height: 200px;
+    min-height: 260px;
     resize: vertical;
+    line-height: 1.6;
 }
 
 .suggestion-form__actions {
