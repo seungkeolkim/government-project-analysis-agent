@@ -50,6 +50,13 @@ class DuplicateOrganizationNameError(ValueError):
     """
 
 
+class OrganizationInvalidMoveError(ValueError):
+    """조직을 이동할 수 없는 위치로 이동하려 할 때 발생.
+
+    자기 자신을 부모로 지정하거나, 자신의 후손 아래로 이동하려 할 때 발생한다.
+    """
+
+
 # ──────────────────────────────────────────────────────────────
 # 조직 CRUD
 # ──────────────────────────────────────────────────────────────
@@ -176,6 +183,191 @@ def create_organization(
     return org
 
 
+def _descendant_ids(orgs: list[Organization], target_id: int) -> set[int]:
+    """target_id 의 모든 후손 조직 id 집합을 BFS 로 반환한다 (target 자신은 포함하지 않음).
+
+    Args:
+        orgs: list_all_organizations 가 반환한 평탄한 목록.
+        target_id: 후손 집합을 구할 조직의 id.
+
+    Returns:
+        모든 후손 조직 id set (target 자신 미포함).
+    """
+    # parent_id → 직속 자식 id 목록 dict 구성
+    children_map: dict[int, list[int]] = {}
+    for org in orgs:
+        if org.parent_id is not None:
+            children_map.setdefault(org.parent_id, []).append(org.id)
+
+    result: set[int] = set()
+    queue = list(children_map.get(target_id, []))
+    while queue:
+        node_id = queue.pop()
+        result.add(node_id)
+        queue.extend(children_map.get(node_id, []))
+    return result
+
+
+def rename_organization(
+    session: Session,
+    organization_id: int,
+    new_name: str,
+) -> Organization:
+    """조직명을 변경한다.
+
+    새 이름(공백 제거 후)이 현재 이름과 동일하면 변경 없이 그대로 반환한다(no-op).
+    같은 부모(parent_id) 아래 다른 조직과 이름이 충돌하면 DuplicateOrganizationNameError 를 발생시킨다.
+
+    commit 은 호출자 책임.
+
+    Args:
+        session: 호출자 세션.
+        organization_id: 이름을 변경할 조직 PK.
+        new_name: 새 조직명. 좌우 공백을 제거 후 적용한다.
+
+    Returns:
+        flush 완료된 Organization 인스턴스.
+
+    Raises:
+        OrganizationNotFoundError: 해당 organization_id 가 없을 때.
+        ValueError: 공백 제거 후 new_name 이 빈 문자열일 때.
+        DuplicateOrganizationNameError: 같은 부모 아래 동명 조직이 이미 존재할 때.
+    """
+    org = session.get(Organization, organization_id)
+    if org is None:
+        raise OrganizationNotFoundError(
+            f"조직을 찾을 수 없습니다: organization_id={organization_id}"
+        )
+
+    stripped_name = new_name.strip()
+    if not stripped_name:
+        raise ValueError("조직명은 빈 문자열일 수 없습니다.")
+
+    # 현재 이름과 동일하면 no-op
+    if org.name == stripped_name:
+        return org
+
+    # 동명 체크 — 같은 부모 아래 자신 외의 조직 중 동명 확인
+    if org.parent_id is None:
+        duplicate = session.execute(
+            select(Organization).where(
+                Organization.parent_id.is_(None),
+                Organization.name == stripped_name,
+                Organization.id != organization_id,
+            )
+        ).scalar_one_or_none()
+    else:
+        duplicate = session.execute(
+            select(Organization).where(
+                Organization.parent_id == org.parent_id,
+                Organization.name == stripped_name,
+                Organization.id != organization_id,
+            )
+        ).scalar_one_or_none()
+
+    if duplicate is not None:
+        raise DuplicateOrganizationNameError(
+            f"같은 위치에 동일한 조직명이 이미 존재합니다: {stripped_name!r}"
+        )
+
+    old_name = org.name
+    org.name = stripped_name
+    session.flush()
+    logger.info(
+        "조직 이름 변경: id={} {!r} → {!r}", organization_id, old_name, org.name
+    )
+    return org
+
+
+def move_organization(
+    session: Session,
+    organization_id: int,
+    new_parent_id: int | None,
+) -> Organization:
+    """조직의 상위 조직(parent_id)을 변경한다.
+
+    자기 자신을 부모로 지정하거나 자신의 후손 아래로 이동하면 OrganizationInvalidMoveError 를 발생시킨다.
+    이동 대상 위치에 같은 이름의 조직이 있으면 DuplicateOrganizationNameError 를 발생시킨다.
+
+    commit 은 호출자 책임.
+
+    Args:
+        session: 호출자 세션.
+        organization_id: 이동할 조직 PK.
+        new_parent_id: 새 부모 조직 PK. None 이면 루트로 이동.
+
+    Returns:
+        flush 완료된 Organization 인스턴스.
+
+    Raises:
+        OrganizationNotFoundError: organization_id 또는 new_parent_id 에 해당하는 조직이 없을 때.
+        OrganizationInvalidMoveError: 자기 자신 부모 지정 또는 후손에게 이동 시.
+        DuplicateOrganizationNameError: 이동 대상 위치에 같은 이름의 조직이 이미 존재할 때.
+    """
+    org = session.get(Organization, organization_id)
+    if org is None:
+        raise OrganizationNotFoundError(
+            f"조직을 찾을 수 없습니다: organization_id={organization_id}"
+        )
+
+    # 자기 자신을 부모로 지정 금지
+    if new_parent_id == organization_id:
+        raise OrganizationInvalidMoveError(
+            f"자기 자신을 부모 조직으로 지정할 수 없습니다: organization_id={organization_id}"
+        )
+
+    if new_parent_id is not None:
+        # 부모 존재 검증
+        new_parent = session.get(Organization, new_parent_id)
+        if new_parent is None:
+            raise OrganizationNotFoundError(
+                f"부모 조직을 찾을 수 없습니다: new_parent_id={new_parent_id}"
+            )
+
+        # 순환 참조 검사 — new_parent_id 가 org 의 후손인지 확인
+        all_orgs = list_all_organizations(session)
+        descendants = _descendant_ids(all_orgs, organization_id)
+        if new_parent_id in descendants:
+            raise OrganizationInvalidMoveError(
+                f"후손 조직으로 이동할 수 없습니다: "
+                f"organization_id={organization_id} → new_parent_id={new_parent_id}"
+            )
+
+    # 이동 후 동명 충돌 검사
+    if new_parent_id is None:
+        duplicate = session.execute(
+            select(Organization).where(
+                Organization.parent_id.is_(None),
+                Organization.name == org.name,
+                Organization.id != organization_id,
+            )
+        ).scalar_one_or_none()
+    else:
+        duplicate = session.execute(
+            select(Organization).where(
+                Organization.parent_id == new_parent_id,
+                Organization.name == org.name,
+                Organization.id != organization_id,
+            )
+        ).scalar_one_or_none()
+
+    if duplicate is not None:
+        raise DuplicateOrganizationNameError(
+            f"이동 대상 위치에 동일한 조직명이 이미 존재합니다: {org.name!r}"
+        )
+
+    old_parent_id = org.parent_id
+    org.parent_id = new_parent_id
+    session.flush()
+    logger.info(
+        "조직 이동: id={} parent_id {} → {}",
+        organization_id,
+        old_parent_id,
+        new_parent_id,
+    )
+    return org
+
+
 def delete_organization(session: Session, organization_id: int) -> None:
     """조직을 삭제한다. 자식이 있으면 OrganizationHasChildrenError 를 발생시킨다.
 
@@ -282,11 +474,14 @@ def set_user_organizations(
 __all__ = [
     "DuplicateOrganizationNameError",
     "OrganizationHasChildrenError",
+    "OrganizationInvalidMoveError",
     "OrganizationNotFoundError",
     "build_organization_tree",
     "create_organization",
     "delete_organization",
     "get_user_organization_ids",
     "list_all_organizations",
+    "move_organization",
+    "rename_organization",
     "set_user_organizations",
 ]
