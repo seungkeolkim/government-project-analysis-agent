@@ -6,12 +6,12 @@
       :func:`app.suggestions.suggestions_session_scope` 등으로 제어한다.
     - 본 repository 는 ``flush()`` 까지만 수행한다.
 
-본 단계(subtask 00051-2) 범위:
-    - :func:`list_suggestions` / :func:`count_suggestions` — 목록 페이지용.
-    - :func:`create_suggestion` — POST /suggestions 작성 처리용.
+본 모듈 범위:
+    - :func:`list_suggestions` / :func:`count_suggestions` — 목록 페이지용 (00051-2).
+    - :func:`create_suggestion` — POST /suggestions 작성 처리용 (00051-2).
+    - :func:`get_suggestion_by_id` — GET /suggestions/{id} 뷰어 페이지용 (00051-3).
 
-뷰어/댓글/관리자 모달은 후속 subtask 에서 본 모듈에 추가될 예정이며, 본 단계에서는
-의존성 노이즈를 줄이기 위해 정의하지 않는다.
+댓글/관리자 모달은 후속 subtask(00051-4 / 00051-5) 에서 본 모듈에 추가될 예정.
 """
 
 from __future__ import annotations
@@ -20,6 +20,23 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.suggestions.models import AcceptanceStatus, Suggestion
+
+
+def get_suggestion_by_id(session: Session, suggestion_id: int) -> Suggestion | None:
+    """주어진 PK 의 ``Suggestion`` row 를 조회한다. 없으면 ``None`` 반환.
+
+    뷰어 라우트에서 단일 row 조회 + 404 분기에 사용한다. 라우트는 본 함수가
+    ``None`` 을 반환하면 ``HTTPException(404)`` 를 던지고, 인스턴스를 받으면
+    이어서 (a) 고아 게이트 → (b) 비밀글 게이트 순서로 권한 검사를 수행한다.
+
+    Args:
+        session: 건의사항 DB ORM 세션.
+        suggestion_id: ``suggestions.id`` 값.
+
+    Returns:
+        해당 row 의 ``Suggestion`` 인스턴스 또는 ``None``.
+    """
+    return session.get(Suggestion, suggestion_id)
 
 
 def count_suggestions(session: Session) -> int:
@@ -118,4 +135,5 @@ __all__ = [
     "count_suggestions",
     "list_suggestions",
     "create_suggestion",
+    "get_suggestion_by_id",
 ]

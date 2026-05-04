@@ -31,6 +31,7 @@ from app.suggestions.models import (
 from app.suggestions.repository import (
     count_suggestions,
     create_suggestion,
+    get_suggestion_by_id,
     list_suggestions,
 )
 from app.suggestions.service import (
@@ -60,6 +61,7 @@ __all__ = [
     "count_suggestions",
     "list_suggestions",
     "create_suggestion",
+    "get_suggestion_by_id",
     "SuggestionView",
     "apply_orphan_policy_to_suggestions",
     "is_orphan_author",

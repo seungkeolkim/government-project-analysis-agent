@@ -1,0 +1,158 @@
+{#
+  건의사항 게시글 뷰어 페이지 (task 00051-3).
+
+  컨텍스트 (라우트 view_suggestion_page 가 주입):
+    - current_user:         User | None
+    - is_admin:             bool
+    - is_owner:             bool — 작성자 본인 여부 (author_user_id 정수 비교)
+    - is_orphan:            bool — 메인 DB users 에 author_user_id 가 없음
+                                    (관리자 전용 경로에서만 True 가 노출됨)
+    - suggestion:           Suggestion ORM 인스턴스 (본문/제목/시각/수용 정보)
+    - display_author_name:  str | None (고아 글이면 None — NULL 마스킹)
+    - display_contact_email: str | None (고아 글이면 None — NULL 마스킹)
+
+  렌더 규칙:
+    - 본문(body)은 사용자 입력이라 XSS 위험 → Jinja2 자동 escape 에 의존하고
+      |safe 사용 금지. 줄바꿈은 CSS white-space: pre-wrap 으로 보존한다.
+    - 비밀글이라도 본 페이지에 도달했다면 (라우트 게이트를 통과한) 작성자
+      본인/관리자이므로 본문을 정상 노출한다.
+    - 댓글 영역(00051-4)과 관리자 수용여부 모달(00051-5) 자리에 빈 placeholder
+      컨테이너를 둔다 — 후속 subtask 가 위치를 새로 만들지 않게 한다.
+#}
+{% extends "base.html" %}
+
+{% block page_title %}{{ suggestion.title }} · 건의사항{% endblock %}
+
+{% block content %}
+<section class="suggestions-page suggestion-detail">
+    <header class="suggestions-page__heading">
+        <h2 class="suggestions-page__title">건의사항</h2>
+        <a class="suggestion-form__cancel" href="/suggestions">목록으로</a>
+    </header>
+
+    {# 고아 글에 관리자만 진입 가능 — 시각 마커로 명시. #}
+    {% if is_orphan %}
+    <div class="suggestion-orphan-banner" role="alert">
+        <strong>작성자 정보가 사라진 게시글입니다.</strong>
+        <span>메인 DB 의 사용자 row 가 더 이상 존재하지 않아 작성자명·연락처를 NULL 로 표시합니다. 관리자에게만 노출됩니다.</span>
+    </div>
+    {% endif %}
+
+    <article class="suggestion-detail__article {% if is_orphan %}suggestion-detail__article--orphan{% endif %}">
+        <h3 class="suggestion-detail__title">
+            {% if suggestion.is_secret %}
+                <span class="suggestion-list__secret-prefix" aria-hidden="true">🔒</span>
+            {% endif %}
+            {{ suggestion.title }}
+        </h3>
+
+        <dl class="suggestion-detail__meta">
+            <div class="suggestion-detail__meta-row">
+                <dt>작성자</dt>
+                <dd>
+                    {% if display_author_name %}
+                        {{ display_author_name }}
+                    {% else %}
+                        <span class="suggestion-orphan-note" style="background:#e5e7eb;color:#6b7280;">
+                            (없음)
+                        </span>
+                    {% endif %}
+                </dd>
+            </div>
+
+            <div class="suggestion-detail__meta-row">
+                <dt>연락처 이메일</dt>
+                <dd>
+                    {% if display_contact_email %}
+                        {{ display_contact_email }}
+                    {% else %}
+                        <span class="suggestion-orphan-note" style="background:#e5e7eb;color:#6b7280;">
+                            (없음)
+                        </span>
+                    {% endif %}
+                </dd>
+            </div>
+
+            <div class="suggestion-detail__meta-row">
+                <dt>작성 시간</dt>
+                <dd>{{ suggestion.created_at | kst_format }}</dd>
+            </div>
+
+            <div class="suggestion-detail__meta-row">
+                <dt>비밀글</dt>
+                <dd>
+                    {% if suggestion.is_secret %}예 (작성자 본인 또는 관리자만 열람){% else %}아니오{% endif %}
+                </dd>
+            </div>
+
+            <div class="suggestion-detail__meta-row">
+                <dt>수용 여부</dt>
+                <dd>
+                    {% set status_value = suggestion.acceptance_status.value %}
+                    {% if status_value == "수용" %}
+                        <span class="suggestion-status-badge suggestion-status-badge--accepted">수용</span>
+                    {% elif status_value == "일부수용" %}
+                        <span class="suggestion-status-badge suggestion-status-badge--partial">일부수용</span>
+                    {% elif status_value == "거절" %}
+                        <span class="suggestion-status-badge suggestion-status-badge--rejected">거절</span>
+                    {% else %}
+                        <span class="suggestion-status-badge suggestion-status-badge--pending">검토중</span>
+                    {% endif %}
+                </dd>
+            </div>
+
+            {# 사유는 관리자가 입력했을 때만 의미 있는 값 — 미입력 시 안내 텍스트 노출. #}
+            <div class="suggestion-detail__meta-row">
+                <dt>관리자 사유</dt>
+                <dd>
+                    {% if suggestion.acceptance_reason %}
+                        <span class="suggestion-detail__reason">{{ suggestion.acceptance_reason }}</span>
+                    {% else %}
+                        <span class="suggestion-detail__placeholder">아직 입력되지 않았습니다.</span>
+                    {% endif %}
+                </dd>
+            </div>
+
+            <div class="suggestion-detail__meta-row">
+                <dt>예상 완료일</dt>
+                <dd>
+                    {% if suggestion.expected_completion_date %}
+                        {{ suggestion.expected_completion_date.isoformat() }}
+                    {% else %}
+                        <span class="suggestion-detail__placeholder">미입력</span>
+                    {% endif %}
+                </dd>
+            </div>
+        </dl>
+
+        {# 본문: |safe 절대 금지. 자동 escape + CSS pre-wrap 으로 줄바꿈 보존. #}
+        <div class="suggestion-detail__body">{{ suggestion.body }}</div>
+    </article>
+
+    {#
+      00051-5 placeholder — 관리자 수용여부 체크/수정 버튼 + 모달.
+      관리자 세션일 때만 외부에 보이며, 후속 subtask 가 본 컨테이너 안을 채운다.
+      현재 단계에서는 위치만 잡아두고 빈 채로 둔다.
+    #}
+    <section
+        id="suggestion-acceptance-modal-container"
+        class="suggestion-acceptance-modal-container"
+        data-suggestion-id="{{ suggestion.id }}"
+        data-is-admin="{{ 'true' if is_admin else 'false' }}"
+    ></section>
+
+    {#
+      00051-4 placeholder — 댓글 영역.
+      뷰어 도달 자체가 가능한 사용자(작성자/관리자/일반 alive) 모두에게 보일
+      예정이지만, 본 단계에서는 빈 컨테이너만 둔다. 후속 subtask 가
+      댓글 입력 폼 + #suggestion-comment-list 안의 ul 을 채운다.
+    #}
+    <section
+        id="suggestion-comments-section"
+        class="suggestion-comments-section"
+        data-suggestion-id="{{ suggestion.id }}"
+    >
+        <ul id="suggestion-comment-list" class="suggestion-comment-list"></ul>
+    </section>
+</section>
+{% endblock %}

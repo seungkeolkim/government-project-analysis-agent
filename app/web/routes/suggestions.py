@@ -48,6 +48,8 @@ from app.suggestions import (
     count_suggestions,
     create_suggestion,
     get_alive_user_ids,
+    get_suggestion_by_id,
+    is_orphan_author,
     list_suggestions,
 )
 from app.web.template_filters import register_kst_filters
@@ -369,6 +371,119 @@ def create_suggestion_route(
     return RedirectResponse(
         url="/suggestions",
         status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.get(
+    "/suggestions/{suggestion_id}",
+    response_class=HTMLResponse,
+    response_model=None,
+)
+def view_suggestion_page(
+    request: Request,
+    suggestion_id: int,
+    main_session: Session = Depends(_main_db_session),
+    suggestions_session: Session = Depends(_suggestions_db_session),
+    current_user: User | None = Depends(current_user_optional),
+) -> HTMLResponse:
+    """건의사항 게시글 뷰어 HTML 페이지 (GET /suggestions/{id}).
+
+    두 권한 게이트를 가이던스에 명시된 순서로 적용한다:
+
+    1. **고아 게이트 (404 우선)** — ``author_user_id`` 가 메인 DB ``users`` 에
+       살아있는지 cross-DB 헬퍼로 확인. 고아인데 관리자가 아니면 404 로
+       응답해 게시글 존재 자체를 노출하지 않는다(사용자 modify 턴 — "관리자만
+       볼 수 있도록").
+    2. **비밀글 게이트 (403)** — 통과한 글이 ``is_secret=True`` 면 작성자 본인
+       (author_user_id 정수 비교) 또는 관리자만 본문 열람 가능. 그 외는 403
+       (글 존재는 이미 목록에서 \"비밀글입니다\" 라벨로 노출되었기 때문에
+       404 가 아닌 403 으로 응답해 권한 부족 사실을 명시).
+
+    관리자는 두 게이트 모두 통과한다(비밀글 여부와 무관).
+
+    표시 규칙:
+        - 고아 글에 관리자가 진입하면 ``display_author_name`` / ``contact_email`` 을
+          ``None`` 으로 마스킹한다 — 목록 페이지 정책과 동일.
+        - 본문은 사용자 입력 자유 텍스트라 XSS 위험이 있다. Jinja2 의
+          기본 자동 escape 에 의존하고 ``|safe`` 를 절대 쓰지 않는다.
+          줄바꿈은 CSS ``white-space: pre-wrap`` (.suggestion-detail__body) 으로
+          처리해 별도 변환 없이 보존한다.
+
+    Args:
+        request: FastAPI Request (Jinja2 컨텍스트용).
+        suggestion_id: 게시글 PK.
+        main_session: 메인 DB 세션 (cross-DB author 유효성 조회용).
+        suggestions_session: 건의사항 DB 세션 (게시글 조회용).
+        current_user: 로그인 사용자 또는 None.
+
+    Returns:
+        ``suggestions/detail.html`` 렌더 결과.
+
+    Raises:
+        HTTPException(404): 게시글이 없거나, 고아 글에 비관리자가 접근.
+        HTTPException(403): 비밀글에 작성자 본인/관리자 외 접근.
+    """
+    suggestion = get_suggestion_by_id(suggestions_session, suggestion_id)
+    if suggestion is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="해당 건의사항을 찾을 수 없습니다.",
+        )
+
+    is_admin = bool(current_user is not None and current_user.is_admin)
+    # author_user_id 정수 비교 — 별도 DB 이지만 메인 DB users.id 는 공통 식별자.
+    # 작성자가 메인 DB 에서 사라진 고아 글이면 어떤 사용자도 정수가 일치하지
+    # 않으므로 자연스럽게 is_owner=False 가 된다(고아 게이트가 우선이라 실제
+    # 분기 도달 전에 차단되지만, 방어적으로 의미 있는 동작).
+    is_owner = bool(
+        current_user is not None
+        and suggestion.author_user_id is not None
+        and current_user.id == suggestion.author_user_id
+    )
+
+    # ── 게이트 1: 고아 (404 우선) ─────────────────────────────────────────
+    # cross-DB batch 헬퍼를 단일 row 입력으로 호출한다. IN 절 단일 쿼리이며
+    # 입력이 None 1개뿐이면 헬퍼가 메인 DB 쿼리 자체를 skip 한다.
+    alive_user_ids = get_alive_user_ids(main_session, [suggestion.author_user_id])
+    is_orphan = is_orphan_author(suggestion.author_user_id, alive_user_ids)
+    if is_orphan and not is_admin:
+        # 사용자 modify 턴: "일반 사용자에게는 비노출 — 관리자만 볼 수 있도록".
+        # 존재 자체를 가리려면 403 보다 404 가 적절하다(가이던스 명시).
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="해당 건의사항을 찾을 수 없습니다.",
+        )
+
+    # ── 게이트 2: 비밀글 (403) ────────────────────────────────────────────
+    # 작성자 본인 또는 관리자만 통과. 비밀번호 입력 분기는 본 task 범위 외
+    # (가이던스 명시 — 사용자 원문은 본인/관리자 세션 기반 권한만 명시).
+    if suggestion.is_secret and not is_admin and not is_owner:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="비밀글은 작성자 본인 또는 관리자만 열람할 수 있습니다.",
+        )
+
+    # ── 표시 데이터 가공 ─────────────────────────────────────────────────
+    # 고아 글(관리자 전용 경로)은 작성자명/연락처를 NULL 로 마스킹한다.
+    if is_orphan:
+        display_author_name = None
+        display_contact_email = None
+    else:
+        display_author_name = suggestion.author_name
+        display_contact_email = suggestion.contact_email
+
+    return _templates.TemplateResponse(
+        request,
+        "suggestions/detail.html",
+        {
+            "current_user": current_user,
+            "is_admin": is_admin,
+            "is_owner": is_owner,
+            "is_orphan": is_orphan,
+            "suggestion": suggestion,
+            "display_author_name": display_author_name,
+            "display_contact_email": display_contact_email,
+        },
     )
 
 
