@@ -1,0 +1,377 @@
+"""건의사항 게시판 라우터 (task 00051-2 — 진입점·작성·목록).
+
+엔드포인트:
+    GET    /suggestions          건의사항 목록 HTML (비로그인도 열람 가능 — 단,
+                                  modify 요구상 고아 글은 비관리자에게 비노출).
+    GET    /suggestions/new      작성 폼 HTML. 비로그인 시 "글쓰기는 로그인이
+                                  필요합니다" 안내만 표시.
+    POST   /suggestions          작성 처리. 로그인 필수 + Origin 체크.
+
+설계 메모:
+    - 본 라우터는 두 개의 DB 세션을 동시에 들고 동작한다:
+        * suggestions_session — 건의사항 별도 SQLite (``app.sqlite3`` 와 격리).
+        * main_session       — 메인 DB(``app.sqlite3``). cross-DB author 유효성
+                                판정 시 ``users`` 테이블 조회용.
+      두 세션은 명시적으로 분리된 ``Depends`` 로 주입되며, 서로의 트랜잭션과
+      독립적이다.
+    - 고아 글 노출/마스킹 정책은 :mod:`app.suggestions.service` 한 곳에 모아두고
+      뷰어/댓글 subtask 가 동일 헬퍼를 재사용한다 (사용자 modify 턴 분산 통합).
+    - 작성 폼 CSRF 방어는 ``ensure_same_origin`` 으로 충분하다(프로젝트 컨벤션).
+    - 비밀번호 해싱은 사용자 계정과 동일한 ``app.auth.service.hash_password``
+      (bcrypt) 를 재사용한다 — 게시글별 비밀번호는 향후 수정/삭제 권한용으로
+      저장만 한다(원문은 비밀글 열람 권한을 본인/관리자 세션 기반으로 명시).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from math import ceil
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.templating import Jinja2Templates
+from loguru import logger
+from sqlalchemy.orm import Session
+
+from app.auth.dependencies import (
+    current_user_optional,
+    current_user_required,
+    ensure_same_origin,
+)
+from app.auth.service import hash_password
+from app.db.models import User
+from app.db.session import SessionLocal
+from app.suggestions import (
+    SuggestionsSessionLocal,
+    apply_orphan_policy_to_suggestions,
+    count_suggestions,
+    create_suggestion,
+    get_alive_user_ids,
+    list_suggestions,
+)
+from app.web.template_filters import register_kst_filters
+
+router = APIRouter(tags=["suggestions"])
+
+_TEMPLATES_DIR: Path = Path(__file__).resolve().parent.parent / "templates"
+_templates: Jinja2Templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+register_kst_filters(_templates)
+
+
+# ──────────────────────────────────────────────────────────────
+# 페이지네이션 / 입력 길이 정책
+# ──────────────────────────────────────────────────────────────
+
+_DEFAULT_PAGE_SIZE: int = 20
+_MAX_PAGE_SIZE: int = 100
+
+# 게시글 제목/본문은 모델 컬럼 길이와 일치하는 상한선을 둔다 — 폼 단계에서
+# DB 제약 위반 전에 일찍 사용자에게 검증 실패를 알리기 위함.
+_TITLE_MAX_LENGTH: int = 255
+_BODY_MAX_LENGTH: int = 20000
+_AUTHOR_NAME_MAX_LENGTH: int = 64
+_CONTACT_EMAIL_MAX_LENGTH: int = 255
+
+# 게시글별 비밀번호는 향후 수정/삭제 권한용. 사용자 계정 비밀번호 정책과 별도로,
+# 본 게시판은 짧은 PIN 도 허용한다(원문 "비밀번호 필수입력" 만 명시).
+# 너무 짧으면 brute force 위험이 있어 4자 이상으로 보수적 하한을 둔다.
+_POST_PASSWORD_MIN_LENGTH: int = 4
+_POST_PASSWORD_MAX_LENGTH: int = 128
+
+
+# ──────────────────────────────────────────────────────────────
+# 세션 의존성 (메인 DB / 건의사항 DB 두 개를 명시 분리)
+# ──────────────────────────────────────────────────────────────
+
+
+def _main_db_session() -> Iterator[Session]:
+    """메인 DB(``app.sqlite3``) 의 요청 단위 세션 의존성.
+
+    ``app.web.main.get_session`` 과 동일 패턴이지만, 본 라우터가 ``main`` 의
+    헬퍼에 의존하지 않도록 자체 정의한다. cross-DB author 유효성 헬퍼가 사용한다.
+    """
+    session = SessionLocal()
+    logger.debug("suggestions main DB 세션 open")
+    try:
+        yield session
+    finally:
+        session.close()
+        logger.debug("suggestions main DB 세션 close")
+
+
+def _suggestions_db_session() -> Iterator[Session]:
+    """건의사항 별도 DB(``suggestions.sqlite3``) 의 요청 단위 세션 의존성."""
+    session = SuggestionsSessionLocal()
+    logger.debug("suggestions DB 세션 open")
+    try:
+        yield session
+    finally:
+        session.close()
+        logger.debug("suggestions DB 세션 close")
+
+
+# ──────────────────────────────────────────────────────────────
+# 폼 검증 헬퍼
+# ──────────────────────────────────────────────────────────────
+
+
+def _normalize_optional_text(value: str | None, *, max_length: int) -> str | None:
+    """선택 입력 텍스트를 strip 한 뒤 빈 문자열은 ``None`` 으로 정규화한다.
+
+    길이 초과 시 ``HTTPException(400)`` 으로 거절한다.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    if len(stripped) > max_length:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"입력값이 너무 깁니다 (최대 {max_length}자).",
+        )
+    return stripped
+
+
+def _validate_required_text(value: str, *, field_label: str, max_length: int) -> str:
+    """필수 입력 텍스트를 검증한다.
+
+    빈 문자열·공백만 입력은 400 으로 거절한다. 길이 초과도 400.
+
+    Args:
+        value: 폼에서 받은 원문 문자열.
+        field_label: 에러 메시지에 사용할 사용자 친화적 필드 라벨.
+        max_length: 허용 최대 길이.
+
+    Returns:
+        strip 된 검증 통과 문자열.
+
+    Raises:
+        HTTPException(400): 빈 입력 또는 길이 초과.
+    """
+    stripped = (value or "").strip()
+    if not stripped:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_label} 은(는) 필수 입력 항목입니다.",
+        )
+    if len(stripped) > max_length:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_label} 의 길이가 너무 깁니다 (최대 {max_length}자).",
+        )
+    return stripped
+
+
+def _validate_post_password(value: str) -> str:
+    """게시글별 비밀번호 길이를 검증한다.
+
+    사용자 계정 비밀번호와는 별도 정책(짧은 PIN 도 허용 — 본 게시판 한정).
+    원문 "비밀번호 필수 입력" 외에 명시 정책이 없어, brute force 방어 하한선만 둔다.
+    """
+    if value is None or not value:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="비밀번호는 필수 입력 항목입니다.",
+        )
+    if len(value) < _POST_PASSWORD_MIN_LENGTH:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"비밀번호는 최소 {_POST_PASSWORD_MIN_LENGTH}자 이상이어야 합니다.",
+        )
+    if len(value) > _POST_PASSWORD_MAX_LENGTH:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"비밀번호는 최대 {_POST_PASSWORD_MAX_LENGTH}자까지 허용됩니다.",
+        )
+    return value
+
+
+# ──────────────────────────────────────────────────────────────
+# 라우트
+# ──────────────────────────────────────────────────────────────
+
+
+@router.get(
+    "/suggestions",
+    response_class=HTMLResponse,
+    response_model=None,
+)
+def list_suggestions_page(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=_DEFAULT_PAGE_SIZE, ge=1, le=_MAX_PAGE_SIZE),
+    main_session: Session = Depends(_main_db_session),
+    suggestions_session: Session = Depends(_suggestions_db_session),
+    current_user: User | None = Depends(current_user_optional),
+) -> HTMLResponse:
+    """건의사항 목록 HTML 페이지.
+
+    누구나 열람 가능하지만(비로그인 포함), 고아 글(작성자가 메인 DB users 에 없는
+    글) 은 비관리자에게 비노출 / 관리자에게는 작성자 마스킹 표시된다.
+
+    Args:
+        request: FastAPI Request (Jinja2 컨텍스트용).
+        page: 1-based 페이지 번호.
+        page_size: 페이지 크기(최대 100).
+        main_session: 메인 DB 세션 (cross-DB author 유효성 조회용).
+        suggestions_session: 건의사항 DB 세션 (게시글 목록 조회용).
+        current_user: 로그인 사용자 또는 None. base.html 상단 네비 분기 + 관리자
+            여부 판정에 쓰인다.
+
+    Returns:
+        ``suggestions/list.html`` 렌더 결과.
+    """
+    is_admin = bool(current_user is not None and current_user.is_admin)
+
+    safe_offset = (page - 1) * page_size
+    suggestions = list_suggestions(
+        suggestions_session,
+        limit=page_size,
+        offset=safe_offset,
+    )
+
+    # cross-DB 작성자 유효성 batch 판정 — IN 절 단일 쿼리. 빈/all-None 입력 시
+    # 메인 DB 에 쿼리 자체가 가지 않는다(헬퍼 내부 short-circuit).
+    author_user_ids = {s.author_user_id for s in suggestions}
+    alive_user_ids = get_alive_user_ids(main_session, author_user_ids)
+
+    # 정책 적용: 비관리자 → 고아 글 제외, 관리자 → 고아 글 마스킹 포함.
+    suggestion_views = apply_orphan_policy_to_suggestions(
+        suggestions,
+        alive_user_ids,
+        is_admin=is_admin,
+    )
+
+    # 전체 건수는 정책 적용 전 raw count 를 그대로 노출한다 — 비관리자에게도
+    # "원래 N건 있는데 일부 가려졌다" 는 사실은 굳이 드러내지 않는다.
+    # 페이지 계산상 약간의 row 가 비관리자 페이지에서 누락될 수 있으나, 본
+    # 게시판 규모상 사용자 체감으로는 무리 없다.
+    total_count = count_suggestions(suggestions_session)
+    total_pages = ceil(total_count / page_size) if total_count > 0 else 1
+
+    return _templates.TemplateResponse(
+        request,
+        "suggestions/list.html",
+        {
+            "current_user": current_user,
+            "is_admin": is_admin,
+            "suggestion_views": suggestion_views,
+            "page": page,
+            "page_size": page_size,
+            "total": total_count,
+            "total_pages": total_pages,
+        },
+    )
+
+
+@router.get(
+    "/suggestions/new",
+    response_class=HTMLResponse,
+    response_model=None,
+)
+def new_suggestion_page(
+    request: Request,
+    current_user: User | None = Depends(current_user_optional),
+) -> HTMLResponse:
+    """건의사항 작성 폼 HTML.
+
+    로그인 사용자에게는 폼을 그대로 보여주고, 비로그인 사용자에게는 동일
+    페이지에 "글쓰기는 로그인이 필요합니다" 안내만 표시한다 — 사용자 원문 그대로.
+
+    Args:
+        request: FastAPI Request.
+        current_user: 로그인 사용자 또는 None.
+
+    Returns:
+        ``suggestions/new.html`` 렌더 결과.
+    """
+    return _templates.TemplateResponse(
+        request,
+        "suggestions/new.html",
+        {
+            "current_user": current_user,
+            # 로그인 안내 분기는 템플릿이 current_user 로 직접 판단한다.
+        },
+    )
+
+
+@router.post(
+    "/suggestions",
+    dependencies=[Depends(ensure_same_origin)],
+    response_class=RedirectResponse,
+    response_model=None,
+)
+def create_suggestion_route(
+    title: str = Form(...),
+    body: str = Form(...),
+    password: str = Form(...),
+    is_secret: str | None = Form(default=None),
+    author_name: str | None = Form(default=None),
+    contact_email: str | None = Form(default=None),
+    current_user: User = Depends(current_user_required),
+    suggestions_session: Session = Depends(_suggestions_db_session),
+) -> RedirectResponse:
+    """건의사항 작성 처리 — application/x-www-form-urlencoded POST.
+
+    로그인 필수(비로그인 시 dependency 단계에서 401). Origin/Referer 가 현재 host
+    와 다르면 400 (CSRF 방어). 입력 검증 통과 시 ``Suggestion`` row 를 INSERT 하고
+    ``/suggestions`` 목록 페이지로 303 리다이렉트(PRG 패턴).
+
+    Form 필드:
+        - ``title``: 필수, ≤255자.
+        - ``body``: 필수, ≤20000자.
+        - ``password``: 필수, 4~128자 — bcrypt 해시로 저장.
+        - ``is_secret``: 체크박스. 체크되어 있으면 임의의 truthy 문자열이 넘어오고,
+            체크 해제 시 키 자체가 누락되어 None 이 된다(브라우저 표준 동작).
+        - ``author_name``: 선택, ≤64자.
+        - ``contact_email``: 선택, ≤255자(엄격 RFC 검증 X — 로컬 전제).
+
+    Returns:
+        303 리다이렉트 (``Location: /suggestions``).
+    """
+    # ── 입력 정규화·검증 ──────────────────────────────────────────────────
+    title_normalized = _validate_required_text(
+        title, field_label="제목", max_length=_TITLE_MAX_LENGTH
+    )
+    body_normalized = _validate_required_text(
+        body, field_label="본문", max_length=_BODY_MAX_LENGTH
+    )
+    password_normalized = _validate_post_password(password)
+    is_secret_bool = is_secret is not None and is_secret.strip() != ""
+
+    author_name_normalized = _normalize_optional_text(
+        author_name, max_length=_AUTHOR_NAME_MAX_LENGTH
+    )
+    contact_email_normalized = _normalize_optional_text(
+        contact_email, max_length=_CONTACT_EMAIL_MAX_LENGTH
+    )
+
+    # ── INSERT (트랜잭션은 라우트 끝에서 명시 commit) ──────────────────────
+    try:
+        create_suggestion(
+            suggestions_session,
+            author_user_id=current_user.id,
+            title=title_normalized,
+            body=body_normalized,
+            password_hash=hash_password(password_normalized),
+            is_secret=is_secret_bool,
+            author_name=author_name_normalized,
+            contact_email=contact_email_normalized,
+        )
+        suggestions_session.commit()
+    except Exception:
+        suggestions_session.rollback()
+        raise
+
+    # PRG 패턴: 새로고침 시 중복 INSERT 방지.
+    return RedirectResponse(
+        url="/suggestions",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+__all__ = [
+    "router",
+]

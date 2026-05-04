@@ -28,6 +28,16 @@ from app.suggestions.models import (
     Suggestion,
     SuggestionComment,
 )
+from app.suggestions.repository import (
+    count_suggestions,
+    create_suggestion,
+    list_suggestions,
+)
+from app.suggestions.service import (
+    SuggestionView,
+    apply_orphan_policy_to_suggestions,
+    is_orphan_author,
+)
 from app.suggestions.session import (
     SuggestionsSessionLocal,
     get_suggestions_engine,
@@ -47,4 +57,10 @@ __all__ = [
     "reset_suggestions_engine_cache",
     "init_suggestions_db",
     "get_alive_user_ids",
+    "count_suggestions",
+    "list_suggestions",
+    "create_suggestion",
+    "SuggestionView",
+    "apply_orphan_policy_to_suggestions",
+    "is_orphan_author",
 ]
