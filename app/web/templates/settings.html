@@ -14,31 +14,11 @@
   두 경우 모두 동일한 변수명을 사용한다.
 #}
 {% extends "base.html" %}
+{% from "_org_tree_checkbox.html" import render_org_node %}
 
 {% block page_title %}개인 설정{% endblock %}
 
 {% block content %}
-
-{# ──────────────────────────────────────────────────────────────
-   재귀 매크로 — 조직 트리 노드를 indent + 체크박스로 렌더한다.
-   depth 가 1 증가할 때마다 20px 들여쓰기한다.
-#}
-{% macro render_org_node(node, depth) %}
-<div class="settings-org__node" style="padding-left: {{ depth * 20 }}px">
-    <label class="settings-org__label">
-        <input
-            class="settings-org__checkbox"
-            type="checkbox"
-            name="organization_ids"
-            value="{{ node.id }}"
-            {% if node.id in user_org_ids %}checked{% endif %}>
-        {{ node.name }}
-    </label>
-    {% for child in node.children %}
-        {{ render_org_node(child, depth + 1) }}
-    {% endfor %}
-</div>
-{% endmacro %}
 
 <div class="settings-wrap">
     <h2 class="settings__heading">개인 설정</h2>
@@ -148,7 +128,7 @@
             {% if org_tree %}
                 <div class="settings-org__tree">
                     {% for root in org_tree %}
-                        {{ render_org_node(root, 0) }}
+                        {{ render_org_node(root, 0, user_org_ids) }}
                     {% endfor %}
                 </div>
             {% else %}

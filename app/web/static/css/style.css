@@ -3161,3 +3161,220 @@ a.site-nav__user:hover {
     color: #1d4ed8;
     text-decoration: underline;
 }
+
+/* ──────────────────────────────────────────────────────────────
+ * task 00049-4 — 관리자 사용자 관리 탭 (/admin/users).
+ * ────────────────────────────────────────────────────────────── */
+
+/* 공용 조직 트리 체크박스 매크로(_org_tree_checkbox.html) 스타일 */
+.org-tree-check__node {
+    /* padding-left 는 인라인 style 로 depth 에 따라 주입된다 */
+}
+
+.org-tree-check__label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 0;
+    font-size: 14px;
+    color: #374151;
+    cursor: pointer;
+    user-select: none;
+}
+
+.org-tree-check__label:hover {
+    color: #111827;
+}
+
+.org-tree-check__checkbox {
+    margin: 0;
+    cursor: pointer;
+}
+
+/* 사용자 카드 */
+.user-card {
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 16px 20px;
+    margin: 0 0 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.user-card__empty {
+    color: #9ca3af;
+    font-size: 14px;
+    font-style: italic;
+}
+
+/* 기본 정보 행 */
+.user-card__info {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.user-card__username {
+    font-size: 15px;
+    font-weight: 700;
+    color: #111827;
+}
+
+.user-card__badge {
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.user-card__badge--admin {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.user-card__badge--self {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.user-card__meta {
+    font-size: 13px;
+    color: #6b7280;
+}
+
+/* 액션 영역 */
+.user-card__actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 10px;
+}
+
+/* 비밀번호 변경 폼 */
+.user-card__pw-form {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.user-card__pw-input {
+    padding: 6px 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    font-size: 13px;
+    width: 180px;
+    background: #ffffff;
+    color: #111827;
+}
+
+.user-card__pw-input:focus {
+    outline: 2px solid #93c5fd;
+    outline-offset: -1px;
+    border-color: #1d4ed8;
+}
+
+/* 공용 액션 버튼 */
+.user-card__action-btn {
+    padding: 6px 12px;
+    border: 1px solid #1d4ed8;
+    background: #1d4ed8;
+    color: #ffffff;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.user-card__action-btn:hover {
+    background: #1e40af;
+}
+
+/* 조직 소속 변경 인라인 펼침 */
+.user-card__org-details {
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    flex: 1;
+    min-width: 220px;
+}
+
+.user-card__org-summary {
+    padding: 6px 12px;
+    cursor: pointer;
+    font-size: 13px;
+    color: #374151;
+    font-weight: 600;
+    user-select: none;
+    list-style: none;
+}
+
+.user-card__org-summary::-webkit-details-marker {
+    display: none;
+}
+
+.user-card__org-summary::before {
+    content: "▶ ";
+    font-size: 10px;
+}
+
+details[open] .user-card__org-summary::before {
+    content: "▼ ";
+}
+
+.user-card__org-form {
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    border-top: 1px solid #e5e7eb;
+}
+
+.user-card__org-tree {
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    padding: 8px 10px;
+    background: #f9fafb;
+    max-height: 240px;
+    overflow-y: auto;
+}
+
+.user-card__org-empty {
+    font-size: 13px;
+    color: #9ca3af;
+    font-style: italic;
+    margin: 0;
+}
+
+/* 계정 삭제 */
+.user-card__delete-form {
+    margin: 0;
+    padding: 0;
+    display: inline-flex;
+    align-self: center;
+}
+
+.user-card__delete-btn {
+    padding: 6px 12px;
+    border: 1px solid #ef4444;
+    background: transparent;
+    color: #ef4444;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.user-card__delete-btn:hover {
+    background: #fef2f2;
+}
+
+.user-card__delete-disabled {
+    font-size: 12px;
+    color: #d1d5db;
+    align-self: center;
+    padding: 6px 4px;
+}

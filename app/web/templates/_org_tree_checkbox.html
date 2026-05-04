@@ -1,0 +1,32 @@
+{#
+  조직 트리 체크박스 재귀 매크로 (task 00049-4에서 추출).
+
+  개인 설정 페이지(settings.html)와 관리자 사용자 관리 탭(admin/users.html) 양쪽에서
+  동일한 조직 트리 체크박스 UI를 렌더해야 하므로, 공용 매크로 파일로 분리한다.
+
+  사용법:
+      {% from "_org_tree_checkbox.html" import render_org_node %}
+      {{ render_org_node(root_node, 0, checked_ids) }}
+
+  매크로 파라미터:
+      node:        build_organization_tree 가 반환한 노드 dict.
+                   {"id": int, "name": str, "parent_id": int|None, "children": [...]}
+      depth:       현재 깊이(0부터 시작). 1 증가할 때마다 20px 들여쓰기한다.
+      checked_ids: 체크 표시할 조직 id 집합(set[int]). 현재 사용자가 속한 조직 목록.
+#}
+{% macro render_org_node(node, depth, checked_ids) %}
+<div class="org-tree-check__node" style="padding-left: {{ depth * 20 }}px">
+    <label class="org-tree-check__label">
+        <input
+            class="org-tree-check__checkbox"
+            type="checkbox"
+            name="organization_ids"
+            value="{{ node.id }}"
+            {% if node.id in checked_ids %}checked{% endif %}>
+        {{ node.name }}
+    </label>
+    {% for child in node.children %}
+        {{ render_org_node(child, depth + 1, checked_ids) }}
+    {% endfor %}
+</div>
+{% endmacro %}
