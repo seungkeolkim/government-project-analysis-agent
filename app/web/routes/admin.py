@@ -43,14 +43,36 @@ from fastapi.responses import (
 from fastapi.templating import Jinja2Templates
 from loguru import logger
 
+from sqlalchemy import select
+
+from app.auth.constants import (
+    COOKIE_HTTP_ONLY,
+    COOKIE_PATH,
+    COOKIE_SAMESITE,
+    COOKIE_SECURE,
+    SESSION_COOKIE_NAME,
+    SESSION_LIFETIME_DAYS,
+)
 from app.auth.dependencies import admin_user_required, ensure_same_origin
-from app.db.models import ScrapeRun, User
+from app.auth.service import PasswordPolicyError, change_password, create_session, delete_user
+from app.db.models import Organization, ScrapeRun, User
+from app.db.session import SessionLocal, session_scope
+from app.organizations.service import (
+    DuplicateOrganizationNameError,
+    OrganizationHasChildrenError,
+    OrganizationNotFoundError,
+    build_organization_tree,
+    create_organization,
+    delete_organization,
+    get_user_organization_ids,
+    list_all_organizations,
+    set_user_organizations,
+)
 from app.db.repository import (
     get_available_source_ids,
     get_running_scrape_run,
     list_recent_scrape_runs,
 )
-from app.db.session import session_scope
 from app.scheduler import (
     ScheduleValidationError,
     add_cron_schedule,
@@ -333,7 +355,8 @@ def scrape_control_page(
         request,
         "admin/control.html",
         {
-            "active_tab": "scrape",
+            "top_tab": "scrape_group",
+            "sub_tab": "scrape",
             "running": running_payload,
             "recent_runs": recent_payload,
             "available_sources": available_sources,
@@ -604,7 +627,8 @@ def _render_sources_yaml_page(
         request,
         "admin/sources_yaml.html",
         {
-            "active_tab": "sources",
+            "top_tab": "scrape_group",
+            "sub_tab": "sources",
             "yaml_text": yaml_text,
             "flash": flash,
             "flash_level": flash_level,
@@ -794,7 +818,8 @@ def schedule_page(
         request,
         "admin/schedule.html",
         {
-            "active_tab": "schedule",
+            "top_tab": "scrape_group",
+            "sub_tab": "schedule",
             "schedules": schedules,
             "available_sources": get_available_source_ids(),
             "scheduler_running": is_scheduler_running(),
@@ -1012,6 +1037,494 @@ def schedule_delete(
         url=_schedule_flash_url(
             f"스케줄 삭제 완료 (id={job_id}).",
             level="success",
+        ),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# [조직 구성] 탭 (task 00049-3)
+# ──────────────────────────────────────────────────────────────
+
+
+def _flatten_org_tree(nodes: list[dict], depth: int = 0) -> list[dict]:
+    """조직 트리를 select 드롭다운용 평탄한 리스트로 변환한다.
+
+    depth 에 따라 들여쓰기 prefix 를 option label 에 붙여 트리 구조를 암시한다.
+
+    Args:
+        nodes: build_organization_tree 가 반환한 중첩 dict 목록.
+        depth: 현재 노드의 깊이. 재귀 호출 시 1씩 증가한다.
+
+    Returns:
+        [{"id": int, "label": str}, ...] 평탄한 목록. 트리 순서 유지.
+    """
+    result: list[dict] = []
+    for node in nodes:
+        prefix = "　" * depth  # 전각 공백으로 depth 시각화 (HTML select 에서도 보임)
+        result.append({"id": node["id"], "label": f"{prefix}{node['name']}"})
+        result.extend(_flatten_org_tree(node["children"], depth + 1))
+    return result
+
+
+def _org_flash_url(message: str, *, level: str) -> str:
+    """/admin/organizations?flash=...&flash_level=... redirect URL 빌더."""
+    from urllib.parse import urlencode
+
+    query = urlencode({"flash": message, "flash_level": level})
+    return f"/admin/organizations?{query}"
+
+
+@router.get("/organizations", response_class=HTMLResponse)
+def organizations_page(
+    request: Request,
+    flash: Optional[str] = Query(default=None),
+    flash_level: Optional[str] = Query(default=None),
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """[조직 구성] 탭 — 조직 트리 표시 + 추가/삭제 UI.
+
+    쿼리 파라미터:
+        flash:       POST 후 redirect 시 안내 메시지. 없으면 비노출.
+        flash_level: 'success' / 'error'. 기본 'success'.
+
+    템플릿 컨텍스트:
+        top_tab:       'org_group'.
+        sub_tab:       'organizations'.
+        org_tree:      build_organization_tree 가 반환한 중첩 dict 목록.
+        flat_orgs:     select 드롭다운용 평탄한 list[{"id", "label"}].
+                       "(최상위)" 옵션은 템플릿에서 value="" 로 추가한다.
+        flash / flash_level: 상단 안내 배지.
+        current_user:  네비 + is_admin 분기용.
+    """
+    logger.debug("admin.organizations_page 진입: user_id={}", current_user.id)
+    session = SessionLocal()
+    try:
+        all_orgs = list_all_organizations(session)
+    finally:
+        session.close()
+
+    org_tree = build_organization_tree(all_orgs)
+    flat_orgs = _flatten_org_tree(org_tree)
+
+    return _templates.TemplateResponse(
+        request,
+        "admin/organizations.html",
+        {
+            "top_tab": "org_group",
+            "sub_tab": "organizations",
+            "org_tree": org_tree,
+            "flat_orgs": flat_orgs,
+            "flash": flash,
+            "flash_level": flash_level or "success",
+            "current_user": current_user,
+        },
+    )
+
+
+@router.post("/organizations/create", dependencies=[Depends(ensure_same_origin)])
+def organizations_create(
+    request: Request,
+    name: str = Form(...),
+    parent_id: Optional[int] = Form(default=None),
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """새 조직을 생성한다.
+
+    Form 필드:
+        name:      조직명. 좌우 공백은 서비스 레이어에서 제거된다.
+        parent_id: 부모 조직 PK. 공백/0/미전송이면 최상위(None)로 처리한다.
+
+    흐름:
+        1. parent_id 정규화(0 또는 미전송 → None).
+        2. create_organization 호출.
+        3. OrganizationNotFoundError / DuplicateOrganizationNameError → flash error redirect.
+        4. 성공 → flash success redirect (PRG 패턴).
+    """
+    # HTML select 에서 value="" 로 최상위를 표현하므로 0 또는 None 모두 최상위.
+    normalized_parent_id = parent_id if parent_id else None
+
+    session = SessionLocal()
+    try:
+        try:
+            create_organization(session, name=name, parent_id=normalized_parent_id)
+            session.commit()
+        except (OrganizationNotFoundError, DuplicateOrganizationNameError) as exc:
+            session.rollback()
+            logger.info(
+                "조직 생성 거부: 관리자={} name={!r} parent_id={} ({})",
+                current_user.username, name, normalized_parent_id, exc,
+            )
+            return RedirectResponse(
+                url=_org_flash_url(str(exc), level="error"),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+    finally:
+        session.close()
+
+    logger.info(
+        "조직 생성 완료: 관리자={} name={!r} parent_id={}",
+        current_user.username, name, normalized_parent_id,
+    )
+    return RedirectResponse(
+        url=_org_flash_url(f"조직 '{name}' 이(가) 추가되었습니다.", level="success"),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.post(
+    "/organizations/{org_id}/delete",
+    dependencies=[Depends(ensure_same_origin)],
+)
+def organizations_delete(
+    org_id: int,
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """조직을 삭제한다.
+
+    자식 조직이 있으면 OrganizationHasChildrenError 가 발생해 flash error redirect 한다.
+    삭제된 조직의 user_organizations 매핑은 ORM cascade 또는 DB FK 에 의해 정리된다.
+
+    Args:
+        org_id: 삭제할 조직 PK (URL 경로 파라미터).
+    """
+    session = SessionLocal()
+    org_name = f"id={org_id}"
+    try:
+        try:
+            # 삭제 전 이름을 읽어 둔다 (삭제 후에는 ORM 인스턴스를 참조할 수 없다).
+            org = session.get(Organization, org_id)
+            if org is not None:
+                org_name = org.name
+            delete_organization(session, org_id)
+            session.commit()
+        except OrganizationNotFoundError as exc:
+            session.rollback()
+            logger.info(
+                "조직 삭제 거부(없음): 관리자={} org_id={} ({})",
+                current_user.username, org_id, exc,
+            )
+            return RedirectResponse(
+                url=_org_flash_url(str(exc), level="error"),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+        except OrganizationHasChildrenError as exc:
+            session.rollback()
+            logger.info(
+                "조직 삭제 거부(자식 있음): 관리자={} org_id={} ({})",
+                current_user.username, org_id, exc,
+            )
+            return RedirectResponse(
+                url=_org_flash_url(str(exc), level="error"),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+    finally:
+        session.close()
+
+    logger.info(
+        "조직 삭제 완료: 관리자={} org_id={} name={!r}",
+        current_user.username, org_id, org_name,
+    )
+    return RedirectResponse(
+        url=_org_flash_url(f"조직 '{org_name}' 이(가) 삭제되었습니다.", level="success"),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# [사용자 관리] 탭 (task 00049-4)
+# ──────────────────────────────────────────────────────────────
+
+
+def _users_flash_url(message: str, *, level: str) -> str:
+    """/admin/users?flash=...&flash_level=... redirect URL 빌더."""
+    from urllib.parse import urlencode
+
+    query = urlencode({"flash": message, "flash_level": level})
+    return f"/admin/users?{query}"
+
+
+def _apply_admin_session_cookie(response: Response, session_id: str) -> None:
+    """응답에 세션 쿠키를 설정한다.
+
+    관리자가 자신의 비밀번호를 변경했을 때 새 세션 쿠키를 즉시 발급하기 위해 사용한다.
+    auth.routes 와 settings.py 의 _apply_session_cookie 와 동일한 로직이다.
+    """
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=session_id,
+        max_age=SESSION_LIFETIME_DAYS * 86400,
+        httponly=COOKIE_HTTP_ONLY,
+        samesite=COOKIE_SAMESITE,
+        secure=COOKIE_SECURE,
+        path=COOKIE_PATH,
+    )
+
+
+@router.get("/users", response_class=HTMLResponse)
+def users_page(
+    request: Request,
+    flash: Optional[str] = Query(default=None),
+    flash_level: Optional[str] = Query(default=None),
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """[사용자 관리] 탭 — 전체 사용자 목록 + 비밀번호 변경 / 조직 변경 / 계정 삭제 UI.
+
+    쿼리 파라미터:
+        flash:       POST 후 redirect 시 안내 메시지. 없으면 비노출.
+        flash_level: 'success' / 'error'. 기본 'success'.
+
+    템플릿 컨텍스트:
+        top_tab:       'org_group'.
+        sub_tab:       'users'.
+        users:         User 인스턴스 목록 (id ASC).
+        org_tree:      build_organization_tree 반환 중첩 dict 목록.
+        org_name_map:  {org_id: name} 조직 이름 조회 맵.
+        user_org_map:  {user_id: set[org_id]} 사용자별 조직 소속 맵.
+        flash / flash_level: 상단 안내 배지.
+        current_user:  네비 + 본인 확인 분기용.
+    """
+    logger.debug("admin.users_page 진입: user_id={}", current_user.id)
+    session = SessionLocal()
+    try:
+        users = session.execute(
+            select(User).order_by(User.id)
+        ).scalars().all()
+
+        all_orgs = list_all_organizations(session)
+        org_tree = build_organization_tree(all_orgs)
+        org_name_map: dict[int, str] = {org.id: org.name for org in all_orgs}
+
+        user_org_map: dict[int, set[int]] = {
+            user.id: set(get_user_organization_ids(session, user.id))
+            for user in users
+        }
+    finally:
+        session.close()
+
+    return _templates.TemplateResponse(
+        request,
+        "admin/users.html",
+        {
+            "top_tab": "org_group",
+            "sub_tab": "users",
+            "users": users,
+            "org_tree": org_tree,
+            "org_name_map": org_name_map,
+            "user_org_map": user_org_map,
+            "flash": flash,
+            "flash_level": flash_level or "success",
+            "current_user": current_user,
+        },
+    )
+
+
+@router.post(
+    "/users/{user_id}/password",
+    dependencies=[Depends(ensure_same_origin)],
+)
+def users_set_password(
+    user_id: int,
+    request: Request,
+    new_password: str = Form(...),
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """관리자가 대상 사용자의 비밀번호를 변경한다.
+
+    처리 순서:
+        1. 대상 사용자를 DB 에서 조회 (없으면 flash error redirect).
+        2. change_password 호출 — 정책 검증 + 해시 갱신 + 모든 세션 삭제.
+        3. 대상이 현재 관리자 본인이면 새 세션 발급 + 쿠키 갱신 (로그인 유지).
+        4. 성공 flash redirect. 본인이면 쿠키가 담긴 Response 로 반환.
+
+    사용자 원문 "비밀번호 변경은 개인이 자신의 계정 설정에서 변경한 것과 동일한 효과":
+    change_password 는 모든 세션 삭제 + 해시 갱신을 수행하므로 동일 효과.
+
+    Args:
+        user_id:      비밀번호를 변경할 사용자 PK (URL 경로 파라미터).
+        new_password: 새 비밀번호 평문 (Form).
+    """
+    session = SessionLocal()
+    try:
+        target_user = session.get(User, user_id)
+        if target_user is None:
+            return RedirectResponse(
+                url=_users_flash_url(
+                    f"사용자를 찾을 수 없습니다: user_id={user_id}", level="error"
+                ),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+
+        try:
+            change_password(session, target_user, new_password=new_password)
+        except PasswordPolicyError as exc:
+            session.rollback()
+            return RedirectResponse(
+                url=_users_flash_url(str(exc), level="error"),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+
+        # 본인 비밀번호 변경 시 새 세션 발급 (기존 세션 삭제됐으므로 쿠키 갱신 필수).
+        is_self = user_id == current_user.id
+        target_username = target_user.username  # session.close() 이전에 캡처
+        new_session_id: str | None = None
+        if is_self:
+            new_user_session = create_session(session, target_user)
+            new_session_id = new_user_session.session_id
+
+        session.commit()
+    finally:
+        session.close()
+
+    logger.info(
+        "관리자 비밀번호 변경: 관리자={} target_user_id={} is_self={}",
+        current_user.username, user_id, is_self,
+    )
+    target_label = f"본인({target_username})" if is_self else target_username
+    redirect_response = RedirectResponse(
+        url=_users_flash_url(
+            f"'{target_label}' 의 비밀번호가 변경되었습니다.", level="success"
+        ),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+    if new_session_id is not None:
+        _apply_admin_session_cookie(redirect_response, new_session_id)
+    return redirect_response
+
+
+@router.post(
+    "/users/{user_id}/delete",
+    dependencies=[Depends(ensure_same_origin)],
+)
+def users_delete(
+    user_id: int,
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """관리자가 대상 사용자 계정을 삭제한다.
+
+    제한:
+        - 본인(self) 삭제 차단: 관리자가 자신의 계정을 삭제하는 경우를 막는다.
+        - 마지막 관리자 삭제 차단: is_admin=True 인 사용자가 1명뿐이면 삭제 거부.
+
+    삭제 효과(delete_user 서비스 레이어 동일):
+        - user_sessions / announcement_user_states / relevance_judgments /
+          favorite_folders → favorite_entries / user_organizations: ORM cascade.
+        - relevance_judgment_history: 명시적 DELETE (SQLite PRAGMA 미설정 환경 보호).
+
+    Args:
+        user_id: 삭제할 사용자 PK (URL 경로 파라미터).
+    """
+    # 본인 삭제 차단
+    if user_id == current_user.id:
+        return RedirectResponse(
+            url=_users_flash_url("본인 계정은 삭제할 수 없습니다.", level="error"),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    session = SessionLocal()
+    try:
+        target_user = session.get(User, user_id)
+        if target_user is None:
+            return RedirectResponse(
+                url=_users_flash_url(
+                    f"사용자를 찾을 수 없습니다: user_id={user_id}", level="error"
+                ),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+
+        # 마지막 관리자 삭제 차단
+        if target_user.is_admin:
+            admin_count = session.execute(
+                select(User).where(User.is_admin.is_(True))
+            ).scalars().all()
+            if len(admin_count) <= 1:
+                return RedirectResponse(
+                    url=_users_flash_url(
+                        f"마지막 관리자({target_user.username})는 삭제할 수 없습니다.",
+                        level="error",
+                    ),
+                    status_code=status.HTTP_303_SEE_OTHER,
+                )
+
+        target_username = target_user.username
+        deleted = delete_user(session, user_id)
+        if not deleted:
+            return RedirectResponse(
+                url=_users_flash_url(
+                    f"사용자 삭제에 실패했습니다: user_id={user_id}", level="error"
+                ),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+        session.commit()
+    finally:
+        session.close()
+
+    logger.info(
+        "관리자 계정 삭제: 관리자={} deleted_user_id={} deleted_username={!r}",
+        current_user.username, user_id, target_username,
+    )
+    return RedirectResponse(
+        url=_users_flash_url(
+            f"사용자 '{target_username}' 계정이 삭제되었습니다.", level="success"
+        ),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.post(
+    "/users/{user_id}/organizations",
+    dependencies=[Depends(ensure_same_origin)],
+)
+def users_set_organizations(
+    user_id: int,
+    organization_ids: list[int] = Form(default=[]),
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """관리자가 대상 사용자의 조직 소속을 변경한다.
+
+    organization_ids 가 빈 리스트이면 모든 조직 소속을 해제한다.
+    존재하지 않는 organization_id 가 포함된 경우 DB FK 에 의해 IntegrityError 가
+    발생해 flash error redirect 한다.
+
+    Args:
+        user_id:          조직 소속을 변경할 사용자 PK.
+        organization_ids: 새로 소속시킬 조직 PK 목록. 빈 리스트이면 전체 해제.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    session = SessionLocal()
+    try:
+        target_user = session.get(User, user_id)
+        if target_user is None:
+            return RedirectResponse(
+                url=_users_flash_url(
+                    f"사용자를 찾을 수 없습니다: user_id={user_id}", level="error"
+                ),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+
+        target_username = target_user.username  # session.close() 이전에 캡처
+        try:
+            set_user_organizations(session, user_id, organization_ids)
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            return RedirectResponse(
+                url=_users_flash_url(
+                    "유효하지 않은 조직이 포함되어 있습니다.", level="error"
+                ),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+    finally:
+        session.close()
+
+    logger.info(
+        "관리자 조직 소속 변경: 관리자={} target_user_id={} organization_ids={}",
+        current_user.username, user_id, organization_ids,
+    )
+    return RedirectResponse(
+        url=_users_flash_url(
+            f"'{target_username}' 의 조직 소속이 변경되었습니다.", level="success"
         ),
         status_code=status.HTTP_303_SEE_OTHER,
     )

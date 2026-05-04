@@ -801,6 +801,172 @@ body.is-anonymous .announcement-title-link--read {
     gap: 24px;
 }
 
+/* ── 2-level 탭 (task 00049-3): 상위 탭 ─────────────────────── */
+
+.admin-top-tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 2px solid #e5e7eb;
+    margin-bottom: -4px; /* 하위 탭 border 와 겹쳐 이어지도록 */
+}
+
+.admin-top-tab {
+    padding: 8px 18px;
+    color: #6b7280;
+    font-size: 15px;
+    font-weight: 500;
+    border-bottom: 3px solid transparent;
+    margin-bottom: -2px;
+    transition: color 0.15s, border-color 0.15s;
+}
+
+.admin-top-tab:hover {
+    color: #1f2937;
+    text-decoration: none;
+}
+
+.admin-top-tab--active {
+    color: #1d4ed8;
+    border-bottom-color: #1d4ed8;
+    font-weight: 700;
+}
+
+/* 하위 탭의 disabled 상태 */
+.admin-tab--disabled {
+    color: #d1d5db;
+    cursor: not-allowed;
+    pointer-events: none;
+    border-bottom: 2px solid transparent;
+    padding: 8px 14px;
+    font-size: 14px;
+}
+
+/* ── 조직 트리 (task 00049-3) ─────────────────────────────────── */
+
+.org-tree {
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 12px;
+    background: #f9fafb;
+}
+
+.org-tree__node {
+    /* padding-left 는 인라인 style 로 depth 에 따라 주입된다 */
+}
+
+.org-tree__row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 4px;
+    border-radius: 4px;
+}
+
+.org-tree__row:hover {
+    background: #f3f4f6;
+}
+
+.org-tree__name {
+    flex: 1;
+    font-size: 14px;
+    color: #1f2937;
+    font-weight: 500;
+}
+
+.org-tree__child-count {
+    font-size: 12px;
+    color: #9ca3af;
+}
+
+.org-tree__delete-btn {
+    padding: 3px 10px;
+    border: 1px solid #ef4444;
+    background: transparent;
+    color: #ef4444;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.org-tree__delete-btn:hover {
+    background: #fef2f2;
+}
+
+.org-tree__delete-btn--disabled {
+    border-color: #d1d5db;
+    color: #d1d5db;
+    cursor: not-allowed;
+}
+
+.org-tree__delete-form {
+    margin: 0;
+    padding: 0;
+    display: inline-flex;
+}
+
+.org-tree__empty {
+    margin: 0;
+    font-size: 14px;
+    color: #9ca3af;
+    font-style: italic;
+}
+
+/* ── 새 조직 추가 폼 (task 00049-3) ───────────────────────────── */
+
+.org-add-form {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 12px;
+}
+
+.org-add-form__field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 14px;
+}
+
+.org-add-form__label {
+    font-weight: 600;
+    color: #374151;
+}
+
+.org-add-form__select,
+.org-add-form__input {
+    padding: 7px 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    font-size: 14px;
+    background: #ffffff;
+    color: #111827;
+    min-width: 180px;
+}
+
+.org-add-form__select:focus,
+.org-add-form__input:focus {
+    outline: 2px solid #93c5fd;
+    outline-offset: -1px;
+    border-color: #1d4ed8;
+}
+
+.org-add-form__submit {
+    padding: 7px 16px;
+    border: 1px solid #1d4ed8;
+    background: #1d4ed8;
+    color: #ffffff;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    align-self: flex-end;
+}
+
+.org-add-form__submit:hover {
+    background: #1e40af;
+}
+
 .admin-section {
     display: flex;
     flex-direction: column;
@@ -2839,4 +3005,376 @@ button.canonical-count-badge.siblings-toggle--open {
     > .fav-sidebar-item__count {
     color: #6b7280;
     font-weight: 400;
+}
+
+/* ──────────────────────────────────────────────────────────────
+ * task 00049-2 — 개인 설정 페이지 (/settings).
+ * ────────────────────────────────────────────────────────────── */
+
+/* 성공 플래시 메시지 (error 는 기존 .flash-message--error 재사용). */
+.flash-message--success {
+    background: #dcfce7;
+    color: #166534;
+    border: 1px solid #bbf7d0;
+}
+
+/* 설정 페이지 전체 래퍼 */
+.settings-wrap {
+    max-width: 560px;
+    margin: 0 auto;
+}
+
+.settings__heading {
+    margin: 0 0 24px;
+    font-size: 22px;
+    color: #111827;
+}
+
+/* 개별 설정 섹션 카드 */
+.settings-section {
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 20px 24px;
+    margin: 0 0 20px;
+}
+
+.settings-section__title {
+    margin: 0 0 16px;
+    font-size: 15px;
+    font-weight: 700;
+    color: #111827;
+}
+
+/* 설정 폼 레이아웃 */
+.settings-form {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.settings-form__field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 14px;
+    color: #374151;
+}
+
+/* 인라인 필드 (체크박스 + 라벨 가로 배치) */
+.settings-form__field--inline {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+}
+
+.settings-form__label {
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.settings-form__label--inline {
+    font-weight: 400;
+}
+
+.settings-form__input {
+    padding: 8px 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    font-size: 14px;
+    background: #ffffff;
+    color: #111827;
+}
+
+.settings-form__input:focus {
+    outline: 2px solid #93c5fd;
+    outline-offset: -1px;
+    border-color: #1d4ed8;
+}
+
+.settings-form__submit {
+    align-self: flex-start;
+    padding: 7px 16px;
+    border: 1px solid #1d4ed8;
+    background: #1d4ed8;
+    color: #ffffff;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.settings-form__submit:hover {
+    background: #1e40af;
+}
+
+/* 조직 트리 */
+.settings-org__tree {
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    padding: 10px 12px;
+    background: #f9fafb;
+    max-height: 320px;
+    overflow-y: auto;
+}
+
+.settings-org__node {
+    /* padding-left 는 인라인 style 로 depth 에 따라 주입된다 */
+}
+
+.settings-org__label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 0;
+    font-size: 14px;
+    color: #374151;
+    cursor: pointer;
+    user-select: none;
+}
+
+.settings-org__label:hover {
+    color: #111827;
+}
+
+.settings-org__checkbox {
+    margin: 0;
+    cursor: pointer;
+}
+
+.settings-org__empty {
+    margin: 0;
+    font-size: 14px;
+    color: #9ca3af;
+    font-style: italic;
+}
+
+/* 네비 사용자명 링크 — .site-nav__user 에 .site-nav__link 를 겹쳐 링크 스타일 적용.
+   기존 .site-nav__user 색(#374151)보다 링크 색이 우선하도록 명시. */
+a.site-nav__user {
+    color: #374151;
+    font-weight: 600;
+    text-decoration: none;
+}
+
+a.site-nav__user:hover {
+    color: #1d4ed8;
+    text-decoration: underline;
+}
+
+/* ──────────────────────────────────────────────────────────────
+ * task 00049-4 — 관리자 사용자 관리 탭 (/admin/users).
+ * ────────────────────────────────────────────────────────────── */
+
+/* 공용 조직 트리 체크박스 매크로(_org_tree_checkbox.html) 스타일 */
+.org-tree-check__node {
+    /* padding-left 는 인라인 style 로 depth 에 따라 주입된다 */
+}
+
+.org-tree-check__label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 0;
+    font-size: 14px;
+    color: #374151;
+    cursor: pointer;
+    user-select: none;
+}
+
+.org-tree-check__label:hover {
+    color: #111827;
+}
+
+.org-tree-check__checkbox {
+    margin: 0;
+    cursor: pointer;
+}
+
+/* 사용자 카드 */
+.user-card {
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 16px 20px;
+    margin: 0 0 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.user-card__empty {
+    color: #9ca3af;
+    font-size: 14px;
+    font-style: italic;
+}
+
+/* 기본 정보 행 */
+.user-card__info {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.user-card__username {
+    font-size: 15px;
+    font-weight: 700;
+    color: #111827;
+}
+
+.user-card__badge {
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.user-card__badge--admin {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.user-card__badge--self {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.user-card__meta {
+    font-size: 13px;
+    color: #6b7280;
+}
+
+/* 액션 영역 */
+.user-card__actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 10px;
+}
+
+/* 비밀번호 변경 폼 */
+.user-card__pw-form {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.user-card__pw-input {
+    padding: 6px 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    font-size: 13px;
+    width: 180px;
+    background: #ffffff;
+    color: #111827;
+}
+
+.user-card__pw-input:focus {
+    outline: 2px solid #93c5fd;
+    outline-offset: -1px;
+    border-color: #1d4ed8;
+}
+
+/* 공용 액션 버튼 */
+.user-card__action-btn {
+    padding: 6px 12px;
+    border: 1px solid #1d4ed8;
+    background: #1d4ed8;
+    color: #ffffff;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.user-card__action-btn:hover {
+    background: #1e40af;
+}
+
+/* 조직 소속 변경 인라인 펼침 */
+.user-card__org-details {
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    flex: 1;
+    min-width: 220px;
+}
+
+.user-card__org-summary {
+    padding: 6px 12px;
+    cursor: pointer;
+    font-size: 13px;
+    color: #374151;
+    font-weight: 600;
+    user-select: none;
+    list-style: none;
+}
+
+.user-card__org-summary::-webkit-details-marker {
+    display: none;
+}
+
+.user-card__org-summary::before {
+    content: "▶ ";
+    font-size: 10px;
+}
+
+details[open] .user-card__org-summary::before {
+    content: "▼ ";
+}
+
+.user-card__org-form {
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    border-top: 1px solid #e5e7eb;
+}
+
+.user-card__org-tree {
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    padding: 8px 10px;
+    background: #f9fafb;
+    max-height: 240px;
+    overflow-y: auto;
+}
+
+.user-card__org-empty {
+    font-size: 13px;
+    color: #9ca3af;
+    font-style: italic;
+    margin: 0;
+}
+
+/* 계정 삭제 */
+.user-card__delete-form {
+    margin: 0;
+    padding: 0;
+    display: inline-flex;
+    align-self: center;
+}
+
+.user-card__delete-btn {
+    padding: 6px 12px;
+    border: 1px solid #ef4444;
+    background: transparent;
+    color: #ef4444;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.user-card__delete-btn:hover {
+    background: #fef2f2;
+}
+
+.user-card__delete-disabled {
+    font-size: 12px;
+    color: #d1d5db;
+    align-self: center;
+    padding: 6px 4px;
 }

@@ -1,0 +1,126 @@
+{#
+  [사용자 관리] 탭 (task 00049-4).
+
+  구성:
+    1. flash 배지 — POST 후 redirect 시 쿼리 파라미터로 전달된 메시지.
+    2. 사용자 카드 목록 — id ASC, 각 카드에:
+        a. 사용자 기본 정보 (아이디, 이메일, 이메일 수신[읽기전용], 관리자 뱃지, 소속 조직)
+        b. 비밀번호 변경 폼 (새 비밀번호 단일 입력)
+        c. 조직 소속 변경 <details>/<summary> 인라인 펼침 폼
+        d. 계정 삭제 버튼 (본인 계정은 disabled 표시)
+
+  컨텍스트 규약:
+    - top_tab:       'org_group'
+    - sub_tab:       'users'
+    - users:         User 인스턴스 목록 (id ASC).
+    - org_tree:      build_organization_tree 반환 중첩 dict 목록.
+    - org_name_map:  {org_id: str} 조직 이름 조회 맵.
+    - user_org_map:  {user_id: set[org_id]} 사용자별 조직 소속 맵.
+    - flash / flash_level: 안내 배지.
+    - current_user:  네비 분기 + 본인 여부 확인용.
+#}
+{% extends "admin/base.html" %}
+{% from "_org_tree_checkbox.html" import render_org_node %}
+
+{% block admin_content %}
+
+{# ── flash 배지 ────────────────────────────────────────────── #}
+{% if flash %}
+<div class="admin-flash admin-flash--{{ flash_level | default('success') }}" role="status">
+    {{ flash }}
+</div>
+{% endif %}
+
+{# ── 사용자 목록 ──────────────────────────────────────────── #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">사용자 목록</h3>
+
+    {% if not users %}
+    <p class="user-card__empty">등록된 사용자가 없습니다.</p>
+    {% endif %}
+
+    {% for user in users %}
+    {% set user_org_ids = user_org_map.get(user.id, set()) %}
+    {% set org_names = [] %}
+    {% for org_id in user_org_ids %}
+        {% if org_name_map.get(org_id) %}
+            {% set _ = org_names.append(org_name_map[org_id]) %}
+        {% endif %}
+    {% endfor %}
+    <div class="user-card" id="user-{{ user.id }}">
+
+        {# ── 기본 정보 행 ──────────────────────────────────── #}
+        <div class="user-card__info">
+            <span class="user-card__username">{{ user.username }}</span>
+            {% if user.is_admin %}
+            <span class="user-card__badge user-card__badge--admin">관리자</span>
+            {% endif %}
+            {% if user.id == current_user.id %}
+            <span class="user-card__badge user-card__badge--self">본인</span>
+            {% endif %}
+            <span class="user-card__meta">
+                이메일: {{ user.email or '—' }}
+            </span>
+            <span class="user-card__meta">
+                이메일 수신: {% if user.email_subscribed %}✓{% else %}✗{% endif %}
+            </span>
+            <span class="user-card__meta">
+                소속: {{ org_names | join(', ') or '없음' }}
+            </span>
+        </div>
+
+        {# ── 액션 영역 ─────────────────────────────────────── #}
+        <div class="user-card__actions">
+
+            {# 비밀번호 변경 폼 #}
+            <form class="user-card__pw-form"
+                  method="post"
+                  action="/admin/users/{{ user.id }}/password">
+                <input
+                    class="user-card__pw-input"
+                    type="password"
+                    name="new_password"
+                    required
+                    placeholder="새 비밀번호">
+                <button type="submit" class="user-card__action-btn">비밀번호 변경</button>
+            </form>
+
+            {# 조직 소속 변경 인라인 펼침 #}
+            <details class="user-card__org-details">
+                <summary class="user-card__org-summary">조직 소속 변경</summary>
+                <form class="user-card__org-form"
+                      method="post"
+                      action="/admin/users/{{ user.id }}/organizations">
+                    {% if org_tree %}
+                    <div class="user-card__org-tree">
+                        {% for root in org_tree %}
+                            {{ render_org_node(root, 0, user_org_ids) }}
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <p class="user-card__org-empty">등록된 조직이 없습니다.</p>
+                    {% endif %}
+                    <button type="submit" class="user-card__action-btn">저장</button>
+                </form>
+            </details>
+
+            {# 계정 삭제 버튼 — 본인은 삭제 불가 #}
+            {% if user.id == current_user.id %}
+            <span class="user-card__delete-disabled" title="본인 계정은 삭제할 수 없습니다">
+                계정 삭제 불가
+            </span>
+            {% else %}
+            <form class="user-card__delete-form"
+                  method="post"
+                  action="/admin/users/{{ user.id }}/delete"
+                  onsubmit="return confirm('사용자 \'{{ user.username }}\' 계정을 삭제합니다.\n\n삭제된 데이터는 복구할 수 없습니다.\n(즐겨찾기, 열람 내역, 관련성 검토 내역 모두 삭제)\n\n계속하시겠습니까?')">
+                <button type="submit" class="user-card__delete-btn">계정 삭제</button>
+            </form>
+            {% endif %}
+
+        </div>{# /.user-card__actions #}
+    </div>{# /.user-card #}
+    {% endfor %}
+</section>
+
+{% endblock %}
