@@ -66,6 +66,7 @@ from app.web.routes import (
     dashboard_router,
     favorites_router,
     relevance_router,
+    settings_router,
 )
 from app.web.template_filters import register_kst_filters
 
@@ -346,6 +347,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # Phase 5b(00042-2): 대시보드 라우터(/dashboard, /dashboard/api/*) mount.
     # 비로그인도 접근 가능 — 라우터 내부에서 current_user_optional 로 분기한다.
     fastapi_app.include_router(dashboard_router)
+
+    # task 00049-2: 개인 설정 라우터(/settings, /settings/*) mount.
+    # 비로그인 GET → /login?next=/settings 리다이렉트. POST 는 401 반환.
+    fastapi_app.include_router(settings_router)
 
     # Phase 2(00025-6): shutdown 시 APScheduler 정지.
     # docker-compose 의 `restart: unless-stopped` 와 결합해, 웹 프로세스가 정상

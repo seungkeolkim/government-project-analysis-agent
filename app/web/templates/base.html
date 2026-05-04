@@ -45,7 +45,7 @@
                     {% endif %}
                     {# Phase 3b — 즐겨찾기 탭: 로그인 시에만 표시. #}
                     <a class="site-nav__link" href="/favorites">즐겨찾기</a>
-                    <span class="site-nav__user">{{ current_user.username }}</span>
+                    <a class="site-nav__user site-nav__link" href="/settings">{{ current_user.username }}</a>
                     <form class="site-nav__logout-form" method="post" action="/auth/logout">
                         <button type="submit" class="site-nav__logout-button">로그아웃</button>
                     </form>
