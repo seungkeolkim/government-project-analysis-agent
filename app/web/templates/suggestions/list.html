@@ -25,13 +25,16 @@
     </header>
 
     {% if suggestion_views %}
+    {# 모바일/좁은 뷰포트에서 컬럼 수 증가로 인한 가로 스크롤을 허용. #}
+    <div class="suggestion-list-wrapper">
     <table class="suggestion-list">
         <thead>
             <tr>
-                <th scope="col" style="width: 60%;">제목</th>
+                <th scope="col" style="width: 50%;">제목</th>
                 <th scope="col" style="width: 12%;">작성자</th>
-                <th scope="col" style="width: 14%;">작성시간</th>
-                <th scope="col" style="width: 14%;">수용 여부</th>
+                <th scope="col" style="width: 12%;">작성시간</th>
+                <th scope="col" style="width: 12%;">수용 여부</th>
+                <th scope="col" style="width: 14%;">예상 개발일</th>
             </tr>
         </thead>
         <tbody>
@@ -73,10 +76,19 @@
                         <span class="suggestion-status-badge suggestion-status-badge--pending">검토중</span>
                     {% endif %}
                 </td>
+                <td>
+                    {# 관리자 피드백 모달에서 입력한 expected_completion_date 가 목록에 그대로 노출된다. #}
+                    {% if view.expected_completion_date %}
+                        {{ view.expected_completion_date.isoformat() }}
+                    {% else %}
+                        <span class="suggestion-detail__placeholder">미입력</span>
+                    {% endif %}
+                </td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
+    </div>
 
     {# 페이지네이션 — 비관리자 화면에서 일부 row 가 가려져도 페이지 전환 자체는 가능. #}
     {% if total_pages > 1 %}

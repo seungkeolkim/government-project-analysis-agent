@@ -3426,17 +3426,24 @@ details[open] .user-card__org-summary::before {
     background: #4338ca;
 }
 
-/* 목록 테이블. */
+/* 목록 테이블 — 가로 스크롤 래퍼(컬럼 추가에 따라 좁은 뷰포트 보호). */
+.suggestion-list-wrapper {
+    overflow-x: auto;
+    margin: 0 0 16px;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+}
+
 .suggestion-list {
     width: 100%;
     border-collapse: collapse;
-    margin: 0 0 16px;
+    margin: 0;
 }
 
 .suggestion-list th,
 .suggestion-list td {
-    padding: 10px 8px;
-    border-bottom: 1px solid #e5e7eb;
+    padding: 10px 12px;
+    border: 1px solid #e5e7eb;
     font-size: 14px;
     text-align: left;
     vertical-align: middle;
@@ -3446,6 +3453,17 @@ details[open] .user-card__org-summary::before {
     background: #f9fafb;
     font-weight: 600;
     color: #374151;
+    border-bottom-width: 2px;
+}
+
+/* 짝수행 zebra stripe — 글들 사이 구분을 강화한다. */
+.suggestion-list tbody tr:nth-child(even) {
+    background: #fafafa;
+}
+
+/* hover 시 강조 — 행 단위 가독성. orphan 행은 자체 색을 우선 유지. */
+.suggestion-list tbody tr:hover {
+    background: #eef2ff;
 }
 
 .suggestion-list__title-cell a {
@@ -3499,8 +3517,10 @@ details[open] .user-card__org-summary::before {
     border-color: #c7d2fe;
 }
 
-/* 고아 글 (관리자 전용 표시) — 시각적 마커. */
-.suggestion-row--orphan {
+/* 고아 글 (관리자 전용 표시) — 시각적 마커.
+   zebra/hover 보다 우선시켜야 하므로 .suggestion-list 스코프를 함께 명시해 specificity 를 올린다. */
+.suggestion-list tbody tr.suggestion-row--orphan,
+.suggestion-list tbody tr.suggestion-row--orphan:hover {
     background: #fff7ed;
 }
 
