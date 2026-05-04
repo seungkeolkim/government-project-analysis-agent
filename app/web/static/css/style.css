@@ -582,11 +582,22 @@ code {
     flex: 0 0 auto;
 }
 
+/* task 00054 — 사용자명·계정설정·로그아웃 3요소를 감싸는 얇은 테두리 박스 */
+.site-nav__user-box {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+}
+
+/* 비클릭 사용자명 span — 링크 색상 없이 일반 텍스트로 표시 */
 .site-nav__user {
     color: #374151;
     font-weight: 600;
-    /* 너무 긴 username 에도 네비 레이아웃이 깨지지 않도록 제한. */
-    max-width: 180px;
+    /* 너무 긴 username 에도 박스 레이아웃이 깨지지 않도록 제한. */
+    max-width: 120px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -3147,19 +3158,6 @@ button.canonical-count-badge.siblings-toggle--open {
     font-size: 14px;
     color: #9ca3af;
     font-style: italic;
-}
-
-/* 네비 사용자명 링크 — .site-nav__user 에 .site-nav__link 를 겹쳐 링크 스타일 적용.
-   기존 .site-nav__user 색(#374151)보다 링크 색이 우선하도록 명시. */
-a.site-nav__user {
-    color: #374151;
-    font-weight: 600;
-    text-decoration: none;
-}
-
-a.site-nav__user:hover {
-    color: #1d4ed8;
-    text-decoration: underline;
 }
 
 /* ──────────────────────────────────────────────────────────────
