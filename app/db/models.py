@@ -507,6 +507,7 @@ class User(Base):
         announcement_states: 이 사용자의 공고별 읽음 상태 목록.
         relevance_judgments: 이 사용자의 현재 유효한 관련성 판정 목록.
         favorite_folders: 이 사용자가 만든 즐겨찾기 폴더 목록.
+        user_organizations: 이 사용자가 속한 조직 매핑 목록.
 
     보안 메모:
         password_hash 는 해시 결과 문자열만 저장한다. 해싱 알고리즘(bcrypt 또는
@@ -537,6 +538,15 @@ class User(Base):
         nullable=True,
         index=True,
         doc="이메일 알림 수신 주소. NULL 이면 이메일 알림 대상에서 제외.",
+    )
+
+    # 이메일 수신 동의 여부 — True 이면 알림 수신 대상, False 이면 수신 거부.
+    email_subscribed: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="1",
+        doc="이메일 수신 동의 여부. False 이면 email 이 있어도 발송 대상에서 제외.",
     )
 
     # 관리자 권한 플래그 — Phase 2 관리자 화면에서 게이트로 사용.
@@ -578,6 +588,13 @@ class User(Base):
     # ORM 쪽에서도 cascade="all, delete-orphan" 을 두어 ORM 플러시 경로에서 일관성 유지.
     sessions: Mapped[list[UserSession]] = relationship(
         "UserSession",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+    # task 00049: 사용자-조직 M:N 매핑. 사용자 삭제 시 매핑도 함께 제거.
+    user_organizations: Mapped[list[UserOrganization]] = relationship(
+        "UserOrganization",
         back_populates="user",
         cascade="all, delete-orphan",
         lazy="selectin",
@@ -1688,6 +1705,158 @@ class ScrapeSnapshot(Base):
         )
 
 
+# ──────────────────────────────────────────────────────────────
+# Organization / UserOrganization (task 00049 — 조직 트리 + M:N 매핑)
+# ──────────────────────────────────────────────────────────────
+
+
+class Organization(Base):
+    """조직 트리 노드.
+
+    depth 는 무제한이며 parent_id 로 트리를 구성한다.
+    루트 노드(최상위 조직)는 parent_id 가 NULL 이다.
+
+    자식이 있는 조직을 직접 삭제하면 DB FK(ON DELETE RESTRICT) 가 오류를 발생시킨다.
+    app 레벨에서는 삭제 전에 자식 존재 여부를 먼저 확인하고
+    OrganizationHasChildrenError 를 던져 친절한 메시지를 제공한다.
+
+    루트(parent_id IS NULL) 간 동명 체크는 SQLite 의 NULL 비교 특성상
+    UNIQUE 제약으로 막을 수 없으므로 app 레벨 SELECT 체크로 보강한다
+    (FavoriteFolder 동일 패턴 — models.py 주석 참조).
+
+    관계:
+        parent: 부모 조직 (None 이면 루트).
+        children: 직속 자식 조직 목록.
+        user_organizations: 이 조직에 속한 사용자 매핑 목록.
+    """
+
+    __tablename__ = "organizations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    parent_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "organizations.id",
+            name="fk_organizations_parent_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+        index=True,
+        doc="부모 조직 PK. NULL 이면 루트(최상위).",
+    )
+
+    name: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        doc="조직명.",
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        doc="조직이 생성된 시각(UTC).",
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+        doc="레코드가 마지막으로 갱신된 시각(UTC).",
+    )
+
+    # self-referential: remote_side=[id] 로 "parent_id → id" 방향을 명시한다.
+    parent: Mapped[Organization | None] = relationship(
+        "Organization",
+        remote_side="Organization.id",
+        back_populates="children",
+        foreign_keys="[Organization.parent_id]",
+        lazy="select",
+    )
+    children: Mapped[list[Organization]] = relationship(
+        "Organization",
+        back_populates="parent",
+        foreign_keys="[Organization.parent_id]",
+        lazy="selectin",
+    )
+    user_organizations: Mapped[list[UserOrganization]] = relationship(
+        "UserOrganization",
+        back_populates="organization",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현을 반환한다."""
+        return (
+            f"<Organization id={self.id} name={self.name!r} parent_id={self.parent_id}>"
+        )
+
+
+class UserOrganization(Base):
+    """사용자 ↔ 조직 M:N junction.
+
+    사용자는 0개 이상의 조직에 속할 수 있다.
+    사용자 삭제(CASCADE) 또는 조직 삭제(CASCADE) 시 이 매핑 row 도 자동 제거된다.
+
+    UNIQUE(user_id, organization_id) 로 중복 매핑 방지.
+    """
+
+    __tablename__ = "user_organizations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "users.id",
+            name="fk_user_organizations_user_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+        doc="소속 사용자 PK.",
+    )
+
+    organization_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "organizations.id",
+            name="fk_user_organizations_organization_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+        doc="소속 조직 PK.",
+    )
+
+    user: Mapped[User] = relationship(
+        "User",
+        back_populates="user_organizations",
+    )
+    organization: Mapped[Organization] = relationship(
+        "Organization",
+        back_populates="user_organizations",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "organization_id",
+            name="uq_user_organizations_user_org",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현을 반환한다."""
+        return (
+            f"<UserOrganization id={self.id} user_id={self.user_id} "
+            f"organization_id={self.organization_id}>"
+        )
+
+
 __all__ = [
     "Base",
     "Announcement",
@@ -1699,6 +1868,7 @@ __all__ = [
     "DeltaAttachment",
     "FavoriteEntry",
     "FavoriteFolder",
+    "Organization",
     "RelevanceJudgment",
     "RelevanceJudgmentHistory",
     "ScrapeRun",
@@ -1707,6 +1877,7 @@ __all__ = [
     "SCRAPE_RUN_TERMINAL_STATUSES",
     "SCRAPE_RUN_TRIGGERS",
     "User",
+    "UserOrganization",
     "UserSession",
     "as_utc",
 ]

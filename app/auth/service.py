@@ -28,6 +28,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+
 from app.auth.constants import (
     BCRYPT_ROUNDS,
     EMAIL_LIGHT_PATTERN,
@@ -37,7 +38,7 @@ from app.auth.constants import (
     SESSION_TOKEN_BYTES,
     USERNAME_PATTERN,
 )
-from app.db.models import User, UserSession, as_utc
+from app.db.models import RelevanceJudgmentHistory, User, UserSession, as_utc
 
 
 # ──────────────────────────────────────────────────────────────
@@ -447,15 +448,137 @@ def delete_session(session: Session, session_id: str) -> None:
         logger.info("세션 삭제: session_id_prefix={!r}", session_id[:8])
 
 
+# ──────────────────────────────────────────────────────────────
+# 사용자 자기정보 변경 / 계정 삭제
+# ──────────────────────────────────────────────────────────────
+
+
+def change_password(
+    session: Session,
+    user: User,
+    *,
+    new_password: str,
+) -> None:
+    """사용자 비밀번호를 변경하고 해당 사용자의 모든 세션을 삭제한다.
+
+    호출자(라우트)는 이 함수 반환 후 즉시 새 세션을 발급하여 쿠키에 심어야 한다.
+    모든 세션 삭제는 다른 기기 강제 로그아웃을 구현한다.
+
+    Args:
+        session: 호출자 세션.
+        user: 비밀번호를 변경할 사용자 (flush 된 상태, id 할당됨).
+        new_password: 새 비밀번호 평문.
+
+    Raises:
+        PasswordPolicyError: 새 비밀번호가 정책을 만족하지 못함.
+    """
+    validate_password(new_password)
+    user.password_hash = hash_password(new_password)
+
+    # 이 사용자의 모든 세션 삭제 — 다른 기기 강제 로그아웃 표준 패턴.
+    session.execute(
+        delete(UserSession).where(UserSession.user_id == user.id)
+    )
+    session.flush()
+    logger.info("비밀번호 변경: user_id={} (모든 세션 삭제됨)", user.id)
+
+
+def change_email(
+    session: Session,
+    user: User,
+    *,
+    new_email: str | None,
+) -> None:
+    """사용자 이메일 주소를 변경한다.
+
+    빈 문자열은 None 으로 처리하여 이메일 수신 주소를 제거한다.
+    commit 은 호출자 책임.
+
+    Args:
+        session: 호출자 세션.
+        user: 이메일을 변경할 사용자.
+        new_email: 새 이메일 주소. None 또는 빈 문자열이면 주소를 제거.
+
+    Raises:
+        ValueError: 이메일 형식 오류.
+    """
+    normalized = _normalize_optional_email(new_email)
+    user.email = normalized
+    session.flush()
+    logger.info("이메일 변경: user_id={} email={!r}", user.id, normalized)
+
+
+def change_email_subscribed(
+    session: Session,
+    user: User,
+    *,
+    subscribed: bool,
+) -> None:
+    """이메일 수신 동의 여부를 변경한다.
+
+    commit 은 호출자 책임.
+
+    Args:
+        session: 호출자 세션.
+        user: 변경할 사용자.
+        subscribed: True 이면 수신 동의, False 이면 수신 거부.
+    """
+    user.email_subscribed = subscribed
+    session.flush()
+    logger.info("이메일 수신 설정 변경: user_id={} subscribed={}", user.id, subscribed)
+
+
+def delete_user(session: Session, user_id: int) -> bool:
+    """사용자와 연관된 모든 데이터를 삭제한다.
+
+    삭제 대상:
+        - user_sessions / announcement_user_states / relevance_judgments /
+          favorite_folders → favorite_entries / user_organizations:
+            User ORM cascade='all, delete-orphan' 관계로 session.delete(user) 시 함께 제거.
+        - relevance_judgment_history:
+            이 프로젝트는 SQLite 연결에 PRAGMA foreign_keys=ON 을 설정하지 않으므로
+            DB FK CASCADE 가 강제되지 않고, User 모델에도 ORM 관계가 없다.
+            SQLite 환경 보호를 위해 session.delete(user) 직전에 명시적으로 DELETE 한다.
+
+    commit 은 호출자 책임.
+
+    Args:
+        session: 호출자 세션.
+        user_id: 삭제할 사용자 PK.
+
+    Returns:
+        삭제가 실제로 수행되었으면 True, 해당 user_id 가 없으면 False.
+    """
+    user = session.get(User, user_id)
+    if user is None:
+        logger.warning("delete_user: 존재하지 않는 user_id={}", user_id)
+        return False
+
+    # SQLite 에서 PRAGMA foreign_keys=ON 이 설정되지 않아 DB CASCADE 가 강제되지 않으므로
+    # ORM 관계가 없는 relevance_judgment_history 를 명시적으로 먼저 삭제한다.
+    session.execute(
+        delete(RelevanceJudgmentHistory).where(RelevanceJudgmentHistory.user_id == user_id)
+    )
+
+    session.delete(user)
+    session.flush()
+    logger.info("사용자 삭제: user_id={} username={!r}", user_id, user.username)
+    return True
+
+
 __all__ = [
     "DuplicateUsernameError",
     "InvalidCredentialsError",
     "PasswordPolicyError",
     "UsernamePolicyError",
     "authenticate",
+    "change_email",
+    "change_email_subscribed",
+    "change_password",
     "create_session",
     "create_user",
     "delete_session",
+    "delete_user",
     "get_active_session",
     "hash_password",
     "validate_password",
