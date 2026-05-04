@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import date
 from math import ceil
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from loguru import logger
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import (
+    admin_user_required,
     current_user_optional,
     current_user_required,
     ensure_same_origin,
@@ -43,6 +45,7 @@ from app.auth.service import hash_password
 from app.db.models import User
 from app.db.session import SessionLocal
 from app.suggestions import (
+    AcceptanceStatus,
     SuggestionsSessionLocal,
     apply_orphan_policy_to_comments,
     apply_orphan_policy_to_suggestions,
@@ -55,6 +58,7 @@ from app.suggestions import (
     is_orphan_author,
     list_comments_by_suggestion_id,
     list_suggestions,
+    update_suggestion_acceptance,
 )
 from app.web.template_filters import register_kst_filters
 
@@ -600,6 +604,126 @@ def create_comment_route(
     # PRG: 작성 후 뷰어로 303 리다이렉트 (새로고침 중복 INSERT 방지).
     return RedirectResponse(
         url=f"/suggestions/{suggestion.id}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# 관리자 수용 여부 모달 저장 (00051-5)
+# ──────────────────────────────────────────────────────────────
+
+
+# 관리자 사유 텍스트 길이 상한 — 게시글 본문보다 짧게 두어 \"한 줄 결정 사유\"
+# 수준의 입력을 유도한다. 일반 댓글 본문 상한과 동일.
+_ACCEPTANCE_REASON_MAX_LENGTH: int = 2000
+
+
+@router.post(
+    "/suggestions/{suggestion_id}/acceptance",
+    dependencies=[Depends(ensure_same_origin), Depends(admin_user_required)],
+    response_class=RedirectResponse,
+    response_model=None,
+)
+def update_acceptance_route(
+    suggestion_id: int,
+    acceptance_status_value: str = Form(..., alias="acceptance_status"),
+    acceptance_reason: str | None = Form(default=None),
+    expected_completion_date: str | None = Form(default=None),
+    suggestions_session: Session = Depends(_suggestions_db_session),
+) -> RedirectResponse:
+    """관리자 수용 여부 체크/수정 모달 저장 (POST /suggestions/{id}/acceptance).
+
+    가이던스 그대로 — \"수용 여부 체크/수정\" 단일 버튼이 신규/재수정 두 흐름을
+    모두 처리한다. 본 라우트는 그 단일 엔드포인트로, 모달 폼이 그대로 POST 한다.
+
+    권한:
+        ``admin_user_required`` dependency 가 비로그인 401 / 비관리자 403 을 사전
+        차단한다. 관리자 전용 경로라 사용자 modify 턴의 \"고아\" 방어로직 영향이
+        없으며, 고아 글에 대해서도 관리자는 자유롭게 수용여부를 갱신할 수 있다
+        (e2e: \"고아 글 → 관리자 진입 → 수용여부 변경\" 흐름 확인).
+
+    Form 필드:
+        - ``acceptance_status``: \"검토중\" / \"수용\" / \"일부수용\" / \"거절\" 중 하나.
+        - ``acceptance_reason``: 사유 텍스트 (선택). 빈 문자열은 ``None`` 으로 정규화.
+            거절 선택 시에도 사유 입력은 자유 — 가이던스 \"사유 필드 자체는 항상
+            보존\".
+        - ``expected_completion_date``: ``YYYY-MM-DD`` 형식. 수용/일부수용 일 때만
+            의미 있으며, 그 외 상태에서는 입력값과 무관하게 ``None`` 으로 강제된다
+            (사용자 원문: \"수용·일부 수용일 경우 캘린더를 통해 ... 입력\").
+
+    Returns:
+        303 리다이렉트 (``Location: /suggestions/{id}``) — PRG 패턴.
+
+    Raises:
+        HTTPException(400): 잘못된 status 값, 사유 길이 초과, 또는 잘못된 날짜 형식.
+        HTTPException(404): 게시글이 존재하지 않음.
+    """
+    # ── status 정규화 ────────────────────────────────────────────────────
+    # AcceptanceStatus enum 의 value("검토중"/"수용"/"일부수용"/"거절") 와 1:1 매칭.
+    try:
+        normalized_status = AcceptanceStatus(acceptance_status_value)
+    except ValueError as exc:
+        allowed_values = ", ".join(member.value for member in AcceptanceStatus)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"수용 여부 값이 올바르지 않습니다. 허용: {allowed_values}",
+        ) from exc
+
+    # ── 사유 정규화 (선택 필드, 빈 입력은 None) ────────────────────────────
+    reason_normalized = (acceptance_reason or "").strip()
+    if not reason_normalized:
+        reason_normalized = None
+    elif len(reason_normalized) > _ACCEPTANCE_REASON_MAX_LENGTH:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"사유가 너무 깁니다 (최대 {_ACCEPTANCE_REASON_MAX_LENGTH}자).",
+        )
+
+    # ── 예상 완료일 정규화 ────────────────────────────────────────────────
+    # 수용/일부수용 일 때만 의미. 그 외 상태에서는 사용자가 어떤 값을 보내든
+    # None 으로 강제해, 거절 → 수용 → 거절 같은 재수정 흐름에서도 stale date 가
+    # 남지 않도록 한다.
+    completion_date_normalized: date | None = None
+    if normalized_status in (AcceptanceStatus.ACCEPTED, AcceptanceStatus.PARTIAL):
+        date_input = (expected_completion_date or "").strip()
+        if date_input:
+            try:
+                completion_date_normalized = date.fromisoformat(date_input)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="예상 완료일 형식이 올바르지 않습니다 (YYYY-MM-DD).",
+                ) from exc
+
+    # ── DB 갱신 ──────────────────────────────────────────────────────────
+    try:
+        result = update_suggestion_acceptance(
+            suggestions_session,
+            suggestion_id=suggestion_id,
+            acceptance_status=normalized_status,
+            acceptance_reason=reason_normalized,
+            expected_completion_date=completion_date_normalized,
+        )
+        if result is None:
+            # 게시글이 사라진 경우 — 라우트 단에서 명시적으로 404.
+            # rollback 은 finally 블록 격이지만 본 분기에서는 row 변경이 없어 무해.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="해당 건의사항을 찾을 수 없습니다.",
+            )
+        suggestions_session.commit()
+    except HTTPException:
+        # 404 분기 — 트랜잭션 변경 없으므로 rollback 으로 충분.
+        suggestions_session.rollback()
+        raise
+    except Exception:
+        suggestions_session.rollback()
+        raise
+
+    # PRG: 저장 후 뷰어로 303 — 새로고침 시 중복 갱신 방지(idempotent 라 무해
+    # 하지만 관성상 PRG 유지).
+    return RedirectResponse(
+        url=f"/suggestions/{suggestion_id}",
         status_code=status.HTTP_303_SEE_OTHER,
     )
 

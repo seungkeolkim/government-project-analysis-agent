@@ -12,11 +12,12 @@
     - :func:`get_suggestion_by_id` — GET /suggestions/{id} 뷰어 페이지용 (00051-3).
     - :func:`list_comments_by_suggestion_id` — 뷰어 하단 댓글 목록 조회 (00051-4).
     - :func:`create_suggestion_comment` — POST 댓글 작성 처리용 (00051-4).
-
-관리자 모달 처리는 후속 subtask(00051-5) 에서 본 모듈에 추가될 예정.
+    - :func:`update_suggestion_acceptance` — 관리자 수용 여부 모달 저장 (00051-5).
 """
 
 from __future__ import annotations
+
+from datetime import date
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -192,6 +193,51 @@ def create_suggestion_comment(
     return comment
 
 
+def update_suggestion_acceptance(
+    session: Session,
+    *,
+    suggestion_id: int,
+    acceptance_status: AcceptanceStatus,
+    acceptance_reason: str | None,
+    expected_completion_date: date | None,
+) -> Suggestion | None:
+    """관리자 수용 여부 모달 저장 — 게시글의 수용 관련 3 필드를 한 번에 갱신한다.
+
+    사용자 원문: \"수용 여부 체크/수정 이라는 버튼과 모달을 만들어서 한 번에 입력하도록 하자\".
+
+    각 필드 의미:
+        - ``acceptance_status``: 수용 / 일부 수용 / 거절 / 검토중. 라우트 단에서
+          AcceptanceStatus enum 으로 정규화된 값이 들어온다.
+        - ``acceptance_reason``: 관리자 사유. 빈 입력은 ``None`` 으로 정규화 권장
+          (라우트 책임). 길이 제한도 라우트 책임.
+        - ``expected_completion_date``: 수용/일부수용 시에만 의미 있다. 거절/검토중
+          이 들어오면 라우트가 ``None`` 으로 강제해 본 함수에 넘긴다.
+
+    트랜잭션 commit 은 호출자가 책임진다. ``add`` 가 아니라 기존 row 의 in-place
+    update 라 ``flush()`` 만 호출한다. ``updated_at`` 은 모델 ``onupdate`` 가
+    자동으로 갱신한다.
+
+    Args:
+        session: 건의사항 DB ORM 세션.
+        suggestion_id: 갱신 대상 게시글 PK.
+        acceptance_status: 새 수용 상태.
+        acceptance_reason: 새 사유 (또는 ``None``).
+        expected_completion_date: 새 예상 완료일 (또는 ``None``).
+
+    Returns:
+        갱신된 ``Suggestion`` 인스턴스. 게시글이 존재하지 않으면 ``None`` 을
+        반환해 호출자가 404 분기를 책임지도록 한다.
+    """
+    suggestion = session.get(Suggestion, suggestion_id)
+    if suggestion is None:
+        return None
+    suggestion.acceptance_status = acceptance_status
+    suggestion.acceptance_reason = acceptance_reason
+    suggestion.expected_completion_date = expected_completion_date
+    session.flush()
+    return suggestion
+
+
 __all__ = [
     "count_suggestions",
     "list_suggestions",
@@ -199,4 +245,5 @@ __all__ = [
     "get_suggestion_by_id",
     "list_comments_by_suggestion_id",
     "create_suggestion_comment",
+    "update_suggestion_acceptance",
 ]

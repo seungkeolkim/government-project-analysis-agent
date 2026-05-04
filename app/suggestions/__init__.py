@@ -39,6 +39,7 @@ from app.suggestions.repository import (
     get_suggestion_by_id,
     list_comments_by_suggestion_id,
     list_suggestions,
+    update_suggestion_acceptance,
 )
 from app.suggestions.service import (
     SuggestionCommentView,
@@ -73,6 +74,7 @@ __all__ = [
     "get_suggestion_by_id",
     "list_comments_by_suggestion_id",
     "create_suggestion_comment",
+    "update_suggestion_acceptance",
     "SuggestionView",
     "SuggestionCommentView",
     "apply_orphan_policy_to_suggestions",
