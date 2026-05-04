@@ -58,13 +58,15 @@ class Settings(BaseSettings):
         description="SQLAlchemy 접속 문자열.",
     )
 
-    # 건의사항 게시판은 메인 DB(app.sqlite3) 가 reset 되어도 게시글 데이터가
-    # 보존되도록 별도 파일에 저장한다(task 00051). 두 DB 사이에는 cross-DB FK 가
-    # 불가능하므로 작성자 동기화는 app.suggestions.author_validity 가 batch 쿼리로
-    # 수행한다.
+    # 게시판 DB (task 00051 건의사항, task 00056 공지사항)는 메인 DB(app.sqlite3) 가
+    # reset 되어도 게시글 데이터가 보존되도록 별도 파일(boards.sqlite3)에 저장한다.
+    # 두 DB 사이에는 cross-DB FK 가 불가능하므로 작성자 동기화는
+    # app.suggestions.author_validity 가 batch 쿼리로 수행한다.
+    # (task 00056) 파일명을 suggestions.sqlite3 → boards.sqlite3 로 변경.
+    # 기존 파일이 있으면 startup 시 migrate_suggestions_to_boards() 가 이름을 바꾼다.
     suggestions_db_url: str = Field(
-        default=f"sqlite:///{(PROJECT_ROOT / 'data' / 'db' / 'suggestions.sqlite3').as_posix()}",
-        description="건의사항 게시판 전용 SQLAlchemy 접속 문자열. 메인 DB 와 격리.",
+        default=f"sqlite:///{(PROJECT_ROOT / 'data' / 'db' / 'boards.sqlite3').as_posix()}",
+        description="게시판(건의사항·공지사항) 전용 SQLAlchemy 접속 문자열. 메인 DB 와 격리.",
     )
 
     # ──────────────────────────────────────────────────────────────

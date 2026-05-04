@@ -50,6 +50,7 @@ from app.suggestions.service import (
     apply_orphan_policy_to_suggestions,
     is_orphan_author,
 )
+from app.suggestions.migration import migrate_suggestions_to_boards
 from app.suggestions.session import (
     SuggestionsSessionLocal,
     get_suggestions_engine,
@@ -59,6 +60,7 @@ from app.suggestions.session import (
 )
 
 __all__ = [
+    "migrate_suggestions_to_boards",
     "Base",
     "AcceptanceStatus",
     "Suggestion",

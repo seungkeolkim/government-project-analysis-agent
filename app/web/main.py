@@ -56,7 +56,7 @@ from app.db.session import SessionLocal
 from app.logging_setup import configure_logging
 from app.scheduler import start_scheduler, stop_scheduler
 from app.scrape_control import cleanup_stale_running_runs
-from app.suggestions import init_suggestions_db
+from app.suggestions import init_suggestions_db, migrate_suggestions_to_boards
 from app.web.observability import (
     install_request_logging_middleware,
     install_unhandled_exception_handler,
@@ -249,7 +249,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     effective_settings.ensure_runtime_paths()
     init_db()
 
-    # task 00051 — 건의사항 게시판 별도 DB 의 테이블을 멱등하게 보장한다.
+    # task 00056 — suggestions.sqlite3 → boards.sqlite3 원자적 이름 변경.
+    # 반드시 get_suggestions_engine() lru_cache 첫 호출(init_suggestions_db) 직전에
+    # 실행되어야 엔진이 신규 경로(boards.sqlite3)로 처음 생성된다.
+    migrate_suggestions_to_boards()
+
+    # task 00051 — 게시판 별도 DB 의 테이블을 멱등하게 보장한다.
     # 메인 DB(init_db, Alembic) 와 별개의 SQLite 파일이며, 메인 DB reset 시에도
     # 영향을 받지 않는다. create_all 기반이라 반복 호출 안전(이미 존재하면 무시).
     init_suggestions_db()
