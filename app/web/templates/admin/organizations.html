@@ -109,6 +109,31 @@
     {% endif %}
 </section>
 
+{# ── 조직 트리 Import / Export ──────────────────────────────── #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">조직 트리 가져오기 / 내보내기</h3>
+    <div class="org-io-actions">
+        <a href="/admin/organizations/export"
+           class="org-io-actions__export-btn">
+            Export (JSON 다운로드)
+        </a>
+        <form class="org-io-actions__import-form"
+              method="post"
+              action="/admin/organizations/import"
+              enctype="multipart/form-data"
+              onsubmit="return confirm('현재 조직 트리 전체가 업로드한 파일로 교체됩니다. 계속하시겠습니까?')">
+            <label class="org-io-actions__import-label" for="org-import-file">Import JSON</label>
+            <input class="org-io-actions__file-input"
+                   id="org-import-file"
+                   type="file"
+                   name="file"
+                   accept=".json"
+                   required>
+            <button type="submit" class="org-io-actions__import-btn">Import</button>
+        </form>
+    </div>
+</section>
+
 {# ── 새 조직 추가 폼 ────────────────────────────────────────── #}
 <section class="admin-section">
     <h3 class="admin-section__heading">새 조직 추가</h3>

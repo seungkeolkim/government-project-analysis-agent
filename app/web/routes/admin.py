@@ -32,7 +32,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
@@ -57,6 +57,10 @@ from app.auth.dependencies import admin_user_required, ensure_same_origin
 from app.auth.service import PasswordPolicyError, change_password, create_session, delete_user
 from app.db.models import Organization, ScrapeRun, User
 from app.db.session import SessionLocal, session_scope
+from app.organizations.io import (
+    export_organization_tree_json,
+    import_organization_tree_json,
+)
 from app.organizations.service import (
     DuplicateOrganizationNameError,
     OrganizationHasChildrenError,
@@ -110,6 +114,9 @@ RECENT_RUN_LIMIT: int = 20
 # 로그 파일 응답 최대 크기 (bytes). 너무 긴 로그가 UI 를 마비시키지 않도록.
 # 현재는 파일 전체를 반환하지만 상한을 두어 안전망을 확보한다.
 LOG_FILE_MAX_BYTES: int = 1_000_000  # 1MB
+
+# 조직 트리 import 허용 최대 파일 크기 (bytes). 조직 트리 규모를 고려해 1MB 로 설정한다.
+_IMPORT_MAX_FILE_SIZE: int = 1_048_576  # 1MB
 
 # 관리자 템플릿 루트. Phase 1b 인증 템플릿과 같은 디렉터리를 공유한다.
 _ADMIN_TEMPLATES_DIR: Path = Path(__file__).resolve().parent.parent / "templates"
@@ -1122,6 +1129,105 @@ def organizations_page(
             "flash_level": flash_level or "success",
             "current_user": current_user,
         },
+    )
+
+
+@router.get("/organizations/export")
+def organizations_export(
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """조직 트리를 pretty-print JSON 파일로 다운로드한다.
+
+    파일명은 KST 타임스탬프를 포함한 ASCII 문자열로 지정한다
+    (브라우저 Content-Disposition 헤더가 ASCII 만 안전하게 처리하므로).
+    """
+    from datetime import datetime, timedelta, timezone
+
+    session = SessionLocal()
+    try:
+        json_content = export_organization_tree_json(session)
+    finally:
+        session.close()
+
+    kst = timezone(timedelta(hours=9))
+    timestamp = datetime.now(kst).strftime("%Y%m%d_%H%M%S")
+    filename = f"organizations_{timestamp}.json"
+
+    logger.info(
+        "조직 트리 export: 관리자={} filename={}", current_user.username, filename
+    )
+    return Response(
+        content=json_content,
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
+
+
+@router.post(
+    "/organizations/import",
+    dependencies=[Depends(ensure_same_origin)],
+)
+async def organizations_import(
+    file: UploadFile = File(...),
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """JSON 파일을 업로드하여 조직 트리 전체를 교체한다.
+
+    처리 흐름:
+        1. 파일 크기 검사 (1MB 초과 시 error flash redirect).
+        2. import_organization_tree_json 호출 (트랜잭션).
+        3. 성공 → 통계 포함 success flash redirect.
+        4. ValueError / DuplicateOrganizationNameError → error flash redirect.
+
+    import 실패 시 전체 롤백 — session.rollback() 으로 보장.
+    """
+    content = await file.read()
+    if len(content) > _IMPORT_MAX_FILE_SIZE:
+        return RedirectResponse(
+            url=_org_flash_url(
+                f"파일 크기가 너무 큽니다 (최대 1MB). 현재: {len(content) // 1024}KB",
+                level="error",
+            ),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    json_text = content.decode("utf-8", errors="replace")
+
+    session = SessionLocal()
+    try:
+        try:
+            stats = import_organization_tree_json(session, json_text)
+            session.commit()
+        except (ValueError, DuplicateOrganizationNameError) as exc:
+            session.rollback()
+            logger.info(
+                "조직 트리 import 거부: 관리자={} ({})",
+                current_user.username, exc,
+            )
+            return RedirectResponse(
+                url=_org_flash_url(f"Import 실패: {exc}", level="error"),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+    finally:
+        session.close()
+
+    total = stats["total_organizations"]
+    dropped = stats["dropped_user_org_count"]
+    affected = stats["affected_user_count"]
+
+    flash_msg = f"조직 트리 import 완료: 총 {total}개 조직 등록."
+    if dropped > 0:
+        flash_msg += f" (사용자-조직 매핑 {dropped}건 정리, {affected}명 영향)"
+
+    logger.info(
+        "조직 트리 import 완료: 관리자={} total={} dropped={} affected={}",
+        current_user.username, total, dropped, affected,
+    )
+    return RedirectResponse(
+        url=_org_flash_url(flash_msg, level="success"),
+        status_code=status.HTTP_303_SEE_OTHER,
     )
 
 

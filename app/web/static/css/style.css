@@ -978,6 +978,67 @@ body.is-anonymous .announcement-title-link--read {
     background: #1e40af;
 }
 
+/* ── 조직 트리 Import / Export (task 00058-2) ─────────────────── */
+
+.org-io-actions {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.org-io-actions__export-btn {
+    padding: 7px 16px;
+    border: 1px solid #1d4ed8;
+    background: #1d4ed8;
+    color: #ffffff;
+    border-radius: 4px;
+    font-size: 14px;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+.org-io-actions__export-btn:hover {
+    background: #1e40af;
+}
+
+.org-io-actions__import-form {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 0;
+}
+
+.org-io-actions__import-label {
+    font-size: 14px;
+    font-weight: 600;
+    color: #374151;
+    white-space: nowrap;
+}
+
+.org-io-actions__file-input {
+    font-size: 13px;
+    color: #374151;
+}
+
+.org-io-actions__import-btn {
+    padding: 7px 16px;
+    border: 1px solid #059669;
+    background: #059669;
+    color: #ffffff;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.org-io-actions__import-btn:hover {
+    background: #047857;
+}
+
 .admin-section {
     display: flex;
     flex-direction: column;
