@@ -44,13 +44,22 @@ from fastapi.templating import Jinja2Templates
 from loguru import logger
 
 from app.auth.dependencies import admin_user_required, ensure_same_origin
-from app.db.models import ScrapeRun, User
+from app.db.models import Organization, ScrapeRun, User
+from app.db.session import SessionLocal, session_scope
+from app.organizations.service import (
+    DuplicateOrganizationNameError,
+    OrganizationHasChildrenError,
+    OrganizationNotFoundError,
+    build_organization_tree,
+    create_organization,
+    delete_organization,
+    list_all_organizations,
+)
 from app.db.repository import (
     get_available_source_ids,
     get_running_scrape_run,
     list_recent_scrape_runs,
 )
-from app.db.session import session_scope
 from app.scheduler import (
     ScheduleValidationError,
     add_cron_schedule,
@@ -333,7 +342,8 @@ def scrape_control_page(
         request,
         "admin/control.html",
         {
-            "active_tab": "scrape",
+            "top_tab": "scrape_group",
+            "sub_tab": "scrape",
             "running": running_payload,
             "recent_runs": recent_payload,
             "available_sources": available_sources,
@@ -604,7 +614,8 @@ def _render_sources_yaml_page(
         request,
         "admin/sources_yaml.html",
         {
-            "active_tab": "sources",
+            "top_tab": "scrape_group",
+            "sub_tab": "sources",
             "yaml_text": yaml_text,
             "flash": flash,
             "flash_level": flash_level,
@@ -794,7 +805,8 @@ def schedule_page(
         request,
         "admin/schedule.html",
         {
-            "active_tab": "schedule",
+            "top_tab": "scrape_group",
+            "sub_tab": "schedule",
             "schedules": schedules,
             "available_sources": get_available_source_ids(),
             "scheduler_running": is_scheduler_running(),
@@ -1013,6 +1025,195 @@ def schedule_delete(
             f"스케줄 삭제 완료 (id={job_id}).",
             level="success",
         ),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# [조직 구성] 탭 (task 00049-3)
+# ──────────────────────────────────────────────────────────────
+
+
+def _flatten_org_tree(nodes: list[dict], depth: int = 0) -> list[dict]:
+    """조직 트리를 select 드롭다운용 평탄한 리스트로 변환한다.
+
+    depth 에 따라 들여쓰기 prefix 를 option label 에 붙여 트리 구조를 암시한다.
+
+    Args:
+        nodes: build_organization_tree 가 반환한 중첩 dict 목록.
+        depth: 현재 노드의 깊이. 재귀 호출 시 1씩 증가한다.
+
+    Returns:
+        [{"id": int, "label": str}, ...] 평탄한 목록. 트리 순서 유지.
+    """
+    result: list[dict] = []
+    for node in nodes:
+        prefix = "　" * depth  # 전각 공백으로 depth 시각화 (HTML select 에서도 보임)
+        result.append({"id": node["id"], "label": f"{prefix}{node['name']}"})
+        result.extend(_flatten_org_tree(node["children"], depth + 1))
+    return result
+
+
+def _org_flash_url(message: str, *, level: str) -> str:
+    """/admin/organizations?flash=...&flash_level=... redirect URL 빌더."""
+    from urllib.parse import urlencode
+
+    query = urlencode({"flash": message, "flash_level": level})
+    return f"/admin/organizations?{query}"
+
+
+@router.get("/organizations", response_class=HTMLResponse)
+def organizations_page(
+    request: Request,
+    flash: Optional[str] = Query(default=None),
+    flash_level: Optional[str] = Query(default=None),
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """[조직 구성] 탭 — 조직 트리 표시 + 추가/삭제 UI.
+
+    쿼리 파라미터:
+        flash:       POST 후 redirect 시 안내 메시지. 없으면 비노출.
+        flash_level: 'success' / 'error'. 기본 'success'.
+
+    템플릿 컨텍스트:
+        top_tab:       'org_group'.
+        sub_tab:       'organizations'.
+        org_tree:      build_organization_tree 가 반환한 중첩 dict 목록.
+        flat_orgs:     select 드롭다운용 평탄한 list[{"id", "label"}].
+                       "(최상위)" 옵션은 템플릿에서 value="" 로 추가한다.
+        flash / flash_level: 상단 안내 배지.
+        current_user:  네비 + is_admin 분기용.
+    """
+    logger.debug("admin.organizations_page 진입: user_id={}", current_user.id)
+    session = SessionLocal()
+    try:
+        all_orgs = list_all_organizations(session)
+    finally:
+        session.close()
+
+    org_tree = build_organization_tree(all_orgs)
+    flat_orgs = _flatten_org_tree(org_tree)
+
+    return _templates.TemplateResponse(
+        request,
+        "admin/organizations.html",
+        {
+            "top_tab": "org_group",
+            "sub_tab": "organizations",
+            "org_tree": org_tree,
+            "flat_orgs": flat_orgs,
+            "flash": flash,
+            "flash_level": flash_level or "success",
+            "current_user": current_user,
+        },
+    )
+
+
+@router.post("/organizations/create", dependencies=[Depends(ensure_same_origin)])
+def organizations_create(
+    request: Request,
+    name: str = Form(...),
+    parent_id: Optional[int] = Form(default=None),
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """새 조직을 생성한다.
+
+    Form 필드:
+        name:      조직명. 좌우 공백은 서비스 레이어에서 제거된다.
+        parent_id: 부모 조직 PK. 공백/0/미전송이면 최상위(None)로 처리한다.
+
+    흐름:
+        1. parent_id 정규화(0 또는 미전송 → None).
+        2. create_organization 호출.
+        3. OrganizationNotFoundError / DuplicateOrganizationNameError → flash error redirect.
+        4. 성공 → flash success redirect (PRG 패턴).
+    """
+    # HTML select 에서 value="" 로 최상위를 표현하므로 0 또는 None 모두 최상위.
+    normalized_parent_id = parent_id if parent_id else None
+
+    session = SessionLocal()
+    try:
+        try:
+            create_organization(session, name=name, parent_id=normalized_parent_id)
+            session.commit()
+        except (OrganizationNotFoundError, DuplicateOrganizationNameError) as exc:
+            session.rollback()
+            logger.info(
+                "조직 생성 거부: 관리자={} name={!r} parent_id={} ({})",
+                current_user.username, name, normalized_parent_id, exc,
+            )
+            return RedirectResponse(
+                url=_org_flash_url(str(exc), level="error"),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+    finally:
+        session.close()
+
+    logger.info(
+        "조직 생성 완료: 관리자={} name={!r} parent_id={}",
+        current_user.username, name, normalized_parent_id,
+    )
+    return RedirectResponse(
+        url=_org_flash_url(f"조직 '{name}' 이(가) 추가되었습니다.", level="success"),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.post(
+    "/organizations/{org_id}/delete",
+    dependencies=[Depends(ensure_same_origin)],
+)
+def organizations_delete(
+    org_id: int,
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """조직을 삭제한다.
+
+    자식 조직이 있으면 OrganizationHasChildrenError 가 발생해 flash error redirect 한다.
+    삭제된 조직의 user_organizations 매핑은 ORM cascade 또는 DB FK 에 의해 정리된다.
+
+    Args:
+        org_id: 삭제할 조직 PK (URL 경로 파라미터).
+    """
+    session = SessionLocal()
+    org_name = f"id={org_id}"
+    try:
+        try:
+            # 삭제 전 이름을 읽어 둔다 (삭제 후에는 ORM 인스턴스를 참조할 수 없다).
+            org = session.get(Organization, org_id)
+            if org is not None:
+                org_name = org.name
+            delete_organization(session, org_id)
+            session.commit()
+        except OrganizationNotFoundError as exc:
+            session.rollback()
+            logger.info(
+                "조직 삭제 거부(없음): 관리자={} org_id={} ({})",
+                current_user.username, org_id, exc,
+            )
+            return RedirectResponse(
+                url=_org_flash_url(str(exc), level="error"),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+        except OrganizationHasChildrenError as exc:
+            session.rollback()
+            logger.info(
+                "조직 삭제 거부(자식 있음): 관리자={} org_id={} ({})",
+                current_user.username, org_id, exc,
+            )
+            return RedirectResponse(
+                url=_org_flash_url(str(exc), level="error"),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+    finally:
+        session.close()
+
+    logger.info(
+        "조직 삭제 완료: 관리자={} org_id={} name={!r}",
+        current_user.username, org_id, org_name,
+    )
+    return RedirectResponse(
+        url=_org_flash_url(f"조직 '{org_name}' 이(가) 삭제되었습니다.", level="success"),
         status_code=status.HTTP_303_SEE_OTHER,
     )
 

@@ -1,0 +1,106 @@
+{#
+  [조직 구성] 탭 (task 00049-3).
+
+  구성:
+    1. flash 배지 — POST 후 redirect 시 쿼리 파라미터로 전달된 메시지.
+    2. 조직 트리 — 재귀 매크로로 depth-indent + 삭제 버튼 렌더.
+       자식이 있는 노드는 삭제 버튼 disabled. 하위 N개 카운트 표시.
+    3. 신규 조직 추가 폼 — 부모 선택(select) + 이름 입력.
+
+  컨텍스트 규약:
+    - top_tab:    'org_group'
+    - sub_tab:    'organizations'
+    - org_tree:   build_organization_tree 반환 중첩 dict 목록.
+    - flat_orgs:  select 드롭다운용 [{"id": int, "label": str}] 평탄 목록.
+    - flash / flash_level: 안내 배지 내용.
+    - current_user: 네비 분기용.
+#}
+{% extends "admin/base.html" %}
+
+{% block admin_content %}
+
+{# ── flash 배지 ────────────────────────────────────────────── #}
+{% if flash %}
+<div class="admin-flash admin-flash--{{ flash_level | default('success') }}" role="status">
+    {{ flash }}
+</div>
+{% endif %}
+
+{# ──────────────────────────────────────────────────────────
+   재귀 매크로 — 조직 트리 노드를 depth-indent + 삭제 버튼으로 렌더한다.
+   depth 가 1 증가할 때마다 20px 들여쓰기한다.
+   자식이 있는 노드는 삭제 버튼을 disabled 로 표시한다.
+#}
+{% macro render_org_node(node, depth) %}
+<div class="org-tree__node" style="padding-left: {{ depth * 20 }}px">
+    <div class="org-tree__row">
+        <span class="org-tree__name">{{ node.name }}</span>
+        {% if node.children %}
+            <span class="org-tree__child-count">하위 {{ node.children | length }}개</span>
+            <button
+                class="org-tree__delete-btn org-tree__delete-btn--disabled"
+                type="button"
+                disabled
+                title="하위 조직을 먼저 삭제해야 합니다">삭제</button>
+        {% else %}
+            <form class="org-tree__delete-form"
+                  method="post"
+                  action="/admin/organizations/{{ node.id }}/delete"
+                  onsubmit="return confirm('조직 \'{{ node.name }}\' 을(를) 삭제합니다. 계속하시겠습니까?')">
+                <button type="submit" class="org-tree__delete-btn">삭제</button>
+            </form>
+        {% endif %}
+    </div>
+    {% for child in node.children %}
+        {{ render_org_node(child, depth + 1) }}
+    {% endfor %}
+</div>
+{% endmacro %}
+
+{# ── 조직 트리 섹션 ─────────────────────────────────────────── #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">조직 트리</h3>
+
+    {% if org_tree %}
+    <div class="org-tree">
+        {% for root in org_tree %}
+            {{ render_org_node(root, 0) }}
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="org-tree__empty">등록된 조직이 없습니다.</p>
+    {% endif %}
+</section>
+
+{# ── 새 조직 추가 폼 ────────────────────────────────────────── #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">새 조직 추가</h3>
+
+    <form class="org-add-form" method="post" action="/admin/organizations/create">
+        <div class="org-add-form__field">
+            <label class="org-add-form__label" for="org-parent-id">상위 조직</label>
+            <select class="org-add-form__select" id="org-parent-id" name="parent_id">
+                <option value="">(최상위 — 루트)</option>
+                {% for org in flat_orgs %}
+                <option value="{{ org.id }}">{{ org.label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="org-add-form__field">
+            <label class="org-add-form__label" for="org-name">조직명</label>
+            <input
+                class="org-add-form__input"
+                id="org-name"
+                type="text"
+                name="name"
+                required
+                placeholder="추가할 조직명을 입력하세요"
+                maxlength="120">
+        </div>
+
+        <button type="submit" class="org-add-form__submit">추가</button>
+    </form>
+</section>
+
+{% endblock %}

@@ -801,6 +801,172 @@ body.is-anonymous .announcement-title-link--read {
     gap: 24px;
 }
 
+/* ── 2-level 탭 (task 00049-3): 상위 탭 ─────────────────────── */
+
+.admin-top-tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 2px solid #e5e7eb;
+    margin-bottom: -4px; /* 하위 탭 border 와 겹쳐 이어지도록 */
+}
+
+.admin-top-tab {
+    padding: 8px 18px;
+    color: #6b7280;
+    font-size: 15px;
+    font-weight: 500;
+    border-bottom: 3px solid transparent;
+    margin-bottom: -2px;
+    transition: color 0.15s, border-color 0.15s;
+}
+
+.admin-top-tab:hover {
+    color: #1f2937;
+    text-decoration: none;
+}
+
+.admin-top-tab--active {
+    color: #1d4ed8;
+    border-bottom-color: #1d4ed8;
+    font-weight: 700;
+}
+
+/* 하위 탭의 disabled 상태 */
+.admin-tab--disabled {
+    color: #d1d5db;
+    cursor: not-allowed;
+    pointer-events: none;
+    border-bottom: 2px solid transparent;
+    padding: 8px 14px;
+    font-size: 14px;
+}
+
+/* ── 조직 트리 (task 00049-3) ─────────────────────────────────── */
+
+.org-tree {
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 12px;
+    background: #f9fafb;
+}
+
+.org-tree__node {
+    /* padding-left 는 인라인 style 로 depth 에 따라 주입된다 */
+}
+
+.org-tree__row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 4px;
+    border-radius: 4px;
+}
+
+.org-tree__row:hover {
+    background: #f3f4f6;
+}
+
+.org-tree__name {
+    flex: 1;
+    font-size: 14px;
+    color: #1f2937;
+    font-weight: 500;
+}
+
+.org-tree__child-count {
+    font-size: 12px;
+    color: #9ca3af;
+}
+
+.org-tree__delete-btn {
+    padding: 3px 10px;
+    border: 1px solid #ef4444;
+    background: transparent;
+    color: #ef4444;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.org-tree__delete-btn:hover {
+    background: #fef2f2;
+}
+
+.org-tree__delete-btn--disabled {
+    border-color: #d1d5db;
+    color: #d1d5db;
+    cursor: not-allowed;
+}
+
+.org-tree__delete-form {
+    margin: 0;
+    padding: 0;
+    display: inline-flex;
+}
+
+.org-tree__empty {
+    margin: 0;
+    font-size: 14px;
+    color: #9ca3af;
+    font-style: italic;
+}
+
+/* ── 새 조직 추가 폼 (task 00049-3) ───────────────────────────── */
+
+.org-add-form {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 12px;
+}
+
+.org-add-form__field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 14px;
+}
+
+.org-add-form__label {
+    font-weight: 600;
+    color: #374151;
+}
+
+.org-add-form__select,
+.org-add-form__input {
+    padding: 7px 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    font-size: 14px;
+    background: #ffffff;
+    color: #111827;
+    min-width: 180px;
+}
+
+.org-add-form__select:focus,
+.org-add-form__input:focus {
+    outline: 2px solid #93c5fd;
+    outline-offset: -1px;
+    border-color: #1d4ed8;
+}
+
+.org-add-form__submit {
+    padding: 7px 16px;
+    border: 1px solid #1d4ed8;
+    background: #1d4ed8;
+    color: #ffffff;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    align-self: flex-end;
+}
+
+.org-add-form__submit:hover {
+    background: #1e40af;
+}
+
 .admin-section {
     display: flex;
     flex-direction: column;
