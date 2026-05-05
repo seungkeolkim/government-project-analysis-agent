@@ -36,6 +36,13 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
+      # HOST_UID/HOST_GID 를 빌드 ARG 로 전달해 Dockerfile Layer 5a 의 useradd 가
+      # 호스트 유저와 동일한 UID:GID 로 /etc/passwd 엔트리를 생성하도록 한다.
+      # 이 값이 누락되면 기본값(1000) 으로 빌드되어 다른 UID 의 호스트에서
+      # "I have no name!" 문제가 재발한다.
+      args:
+        HOST_UID: "${HOST_UID:-1000}"
+        HOST_GID: "${HOST_GID:-1000}"
     image: iris-agent:dev
     container_name: iris-agent-web
     # 컨테이너를 호스트 유저 UID:GID 로 실행해 생성 파일(SQLite DB·다운로드·로그 등) 의
@@ -115,6 +122,11 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
+      # scraper 단독 빌드 경로에서도 app 서비스와 동일한 UID:GID 로
+      # /etc/passwd 엔트리가 생성되도록 동일한 args 를 명시한다.
+      args:
+        HOST_UID: "${HOST_UID:-1000}"
+        HOST_GID: "${HOST_GID:-1000}"
     # app 서비스와 동일한 이미지를 재사용하여 빌드 시간을 절약한다.
     image: iris-agent:dev
     container_name: iris-agent-scraper

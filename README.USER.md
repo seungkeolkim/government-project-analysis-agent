@@ -38,6 +38,10 @@ cp .env.example .env
 # 컨테이너 실행 유저 설정 — 생성 파일 owner 를 호스트 유저로 맞추기 위해 필수 (§2)
 echo "HOST_UID=$(id -u)" >> .env
 echo "HOST_GID=$(id -g)" >> .env
+# 아래 두 값은 호스트마다 다르므로 .env.example 의 기본값을 그대로 쓰면
+# docker.sock 접근이 실패한다 — 반드시 실제 값으로 채울 것
+echo "HOST_DOCKER_GID=$(getent group docker | cut -d: -f3)" >> .env
+echo "HOST_PROJECT_DIR=$(pwd)" >> .env
 # 필요 시 .env 편집 (DB_URL, REQUEST_DELAY_SEC 등)
 
 # 2) sources.yaml 생성 (template 에서 복사, 이미 존재하면 덮어쓰지 않음)
