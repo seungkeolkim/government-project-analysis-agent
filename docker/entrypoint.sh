@@ -12,6 +12,15 @@
 
 set -eu
 
+# 빌드 시 HOST_UID 가 주입되지 않았거나 다른 장비에서 --no-cache 없이 이미지를 재사용한 경우,
+# 현재 UID 에 대응하는 /etc/passwd 엔트리가 없어 whoami 가 실패하고
+# 프롬프트에 "I have no name!" 이 표시된다. 자동 패치는 root 권한 없이 불가능하므로
+# 명확한 경고 메시지만 출력하고 기동은 계속한다.
+if ! id -nu "$(id -u)" >/dev/null 2>&1; then
+    printf '[entrypoint] WARNING: 현재 UID(%s) 에 대응하는 /etc/passwd 엔트리가 없습니다.\n' "$(id -u)" >&2
+    printf '[entrypoint] HOST_UID 변경 후 docker compose build 를 실행했는지 확인하세요.\n' >&2
+fi
+
 SOURCES_YAML_MOUNT="${SOURCES_YAML_MOUNT:-/run/config/sources.yaml}"
 SOURCES_YAML_TEMPLATE="/app/sources.yaml.template"
 

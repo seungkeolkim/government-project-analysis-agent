@@ -34,6 +34,12 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 
+# 컨테이너 실행 유저 UID/GID (docker-compose.yml 의 build.args 로 주입).
+# 기본값 1000 은 python:3.12-slim 베이스에서 미점유이지만,
+# 향후 베이스 이미지 변경에 대비해 이후 Layer 5a 에서 idempotent useradd 로 처리한다.
+ARG HOST_UID=1000
+ARG HOST_GID=1000
+
 # 컨테이너 내부 작업 디렉터리. 파이썬 패키지 `app` 는 /app/app 에 위치하게 된다.
 WORKDIR /app
 
@@ -154,6 +160,23 @@ COPY docker-compose.yml ./
 # 엔트리포인트 스크립트.
 # sources.yaml per-run copy 격리 및 SOURCES_CONFIG_PATH 주입을 담당한다.
 COPY docker/entrypoint.sh /app/entrypoint.sh
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Layer 5a — 컨테이너 실행 유저 생성 (호스트 UID/GID 대응).
+# ─────────────────────────────────────────────────────────────────────────────
+# 호스트의 UID:GID 로 컨테이너가 기동될 때 /etc/passwd 에 엔트리가 없으면
+# `whoami` 가 실패하고 프롬프트에 "I have no name!" 이 표시된다.
+#
+# idempotent 분기: 이미 해당 GID/UID 가 존재하면 그대로 사용 (베이스 이미지 변경 대비).
+#   -M : home 디렉터리 생성 생략 (HOME=/app 이미 존재)
+#   -N : 동명 primary group 생성 생략 (위에서 groupadd 한 GID 를 primary 로 사용)
+RUN set -eux; \
+    if ! getent group "${HOST_GID}" >/dev/null; then \
+        groupadd -g "${HOST_GID}" appuser; \
+    fi; \
+    if ! getent passwd "${HOST_UID}" >/dev/null; then \
+        useradd -u "${HOST_UID}" -g "${HOST_GID}" -d /app -s /bin/bash -M -N appuser; \
+    fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layer 5 — 런타임 디렉터리 및 권한.
