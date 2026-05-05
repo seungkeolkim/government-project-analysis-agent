@@ -170,6 +170,11 @@ code {
     background: #ffffff;
 }
 
+/* 펼침/접힘 시 비제목 컬럼 폭 변동 방지: 고정 레이아웃으로 브라우저 자동 재계산 차단 */
+.list-table {
+    table-layout: fixed;
+}
+
 .list-table th,
 .list-table td,
 .attachments-table th,
@@ -194,7 +199,10 @@ code {
 }
 
 .list-table .col-title {
+    /* table-layout: fixed 환경에서 width 미지정 → 나머지 폭 자동 흡수 */
     min-width: 280px;
+    /* 제목이 길어도 고정된 폭 안에서 줄바꿈하여 다른 컬럼 침범 방지 */
+    overflow-wrap: anywhere;
 }
 
 .list-table .col-attachments,
@@ -210,6 +218,12 @@ code {
 
 .list-table .col-agency {
     width: 180px;
+}
+
+/* 소스 컬럼 너비 고정: 펼침/접힘 후에도 배지가 줄바꿈되지 않도록 */
+.list-table .col-source {
+    width: 80px;
+    text-align: center;
 }
 
 .empty-row {
@@ -545,6 +559,8 @@ code {
 
 .group-member-list__link {
     flex: 1;
+    /* flex 기본 min-width: auto 로 인해 white-space: nowrap 텍스트가 부모(col-title) 폭을 밀어내는 현상 방지 */
+    min-width: 0;
     color: #374151;
     overflow: hidden;
     text-overflow: ellipsis;
