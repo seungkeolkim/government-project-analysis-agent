@@ -103,7 +103,14 @@ from app.sources.yaml_editor import (
     load_sources_yaml_text,
     save_sources_yaml_text,
 )
+from app.config import get_settings
 from app.timezone import format_kst
+from app.web.access_log_stats import (
+    aggregate_daily_stats,
+    aggregate_ip_history,
+    get_recent_raw_rows,
+    iter_log_records_for_days,
+)
 from app.web.template_filters import register_kst_filters
 
 # ──────────────────────────────────────────────────────────────
@@ -1788,6 +1795,49 @@ def users_set_organizations(
             f"'{target_username}' 의 조직 소속이 변경되었습니다.", level="success"
         ),
         status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.get("/usage", response_class=HTMLResponse)
+def admin_usage_page(
+    request: Request,
+    current_user: User = Depends(admin_user_required),
+) -> HTMLResponse:
+    """이용 통계 탭 — 일별 접근 통계 / IP 방문 이력 / 오늘 최근 원본 로그."""
+    settings = get_settings()
+    log_dir = settings.access_log_dir
+    gap_minutes = settings.access_history_session_gap_minutes
+
+    flash: str | None = None
+    flash_level: str | None = None
+    daily_stats: list[dict] = []
+    ip_history: list[dict] = []
+    recent_rows: list[dict] = []
+
+    try:
+        all_records = list(iter_log_records_for_days(log_dir, days=7))
+        daily_stats = aggregate_daily_stats(all_records, days=7)
+        ip_history = aggregate_ip_history(all_records, gap_minutes=gap_minutes)
+        recent_rows = get_recent_raw_rows(log_dir, limit=50)
+    except Exception as exc:
+        logger.warning("이용 통계 로그 집계 실패: {}: {}", type(exc).__name__, exc)
+        flash = "로그 파일을 읽는 중 오류가 발생했습니다."
+        flash_level = "error"
+
+    return _templates.TemplateResponse(
+        request,
+        "admin/usage.html",
+        {
+            "top_tab": "usage_group",
+            "sub_tab": "usage",
+            "current_user": current_user,
+            "daily_stats": daily_stats,
+            "ip_history": ip_history,
+            "recent_rows": recent_rows,
+            "gap_minutes": gap_minutes,
+            "flash": flash,
+            "flash_level": flash_level,
+        },
     )
 
 
