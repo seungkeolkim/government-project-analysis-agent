@@ -59,6 +59,7 @@ class SuggestionView:
         acceptance_status: 관리자 수용 상태 (검토중/수용/일부수용/거절).
         created_at: 작성 시각(UTC). KST 표시는 템플릿 필터가 처리한다.
         expected_completion_date: 관리자 입력 예상 완료일.
+        comment_count: 게시글에 달린 댓글 수. 목록 페이지 [N] 표시용.
     """
 
     suggestion_id: int
@@ -70,6 +71,7 @@ class SuggestionView:
     acceptance_status: AcceptanceStatus
     created_at: datetime
     expected_completion_date: date | None
+    comment_count: int
 
 
 def is_orphan_author(
@@ -103,6 +105,7 @@ def apply_orphan_policy_to_suggestions(
     alive_user_ids: set[int],
     *,
     is_admin: bool,
+    comment_count_map: dict[int, int],
 ) -> list[SuggestionView]:
     """건의사항 목록에 고아 글 노출/마스킹 정책을 적용한다.
 
@@ -120,6 +123,8 @@ def apply_orphan_policy_to_suggestions(
         alive_user_ids: ``get_alive_user_ids`` 결과.
         is_admin: 현재 사용자가 관리자(``is_admin=True``)인지 여부. 비로그인은 False
             로 호출한다(비로그인 = 비관리자).
+        comment_count_map: ``count_comments_by_suggestion_ids`` 결과.
+            댓글이 없는 게시글은 키가 없으며, 조회 시 ``.get(id, 0)`` 으로 처리한다.
 
     Returns:
         ``SuggestionView`` 리스트. 비관리자 호출에서는 길이가 입력보다 짧을 수 있다.
@@ -146,6 +151,7 @@ def apply_orphan_policy_to_suggestions(
                 acceptance_status=suggestion.acceptance_status,
                 created_at=suggestion.created_at,
                 expected_completion_date=suggestion.expected_completion_date,
+                comment_count=comment_count_map.get(suggestion.id, 0),
             )
         )
     return views

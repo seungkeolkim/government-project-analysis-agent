@@ -50,6 +50,7 @@ from app.suggestions import (
     SuggestionsSessionLocal,
     apply_orphan_policy_to_comments,
     apply_orphan_policy_to_suggestions,
+    count_comments_by_suggestion_ids,
     count_suggestions,
     create_suggestion,
     create_suggestion_comment,
@@ -253,11 +254,16 @@ def list_suggestions_page(
     author_user_ids = {s.author_user_id for s in suggestions}
     alive_user_ids = get_alive_user_ids(main_session, author_user_ids)
 
+    # 현재 페이지 게시글들의 댓글 수 batch 조회 — GROUP BY 단일 쿼리(N+1 금지).
+    suggestion_ids = [s.id for s in suggestions]
+    comment_count_map = count_comments_by_suggestion_ids(suggestions_session, suggestion_ids)
+
     # 정책 적용: 비관리자 → 고아 글 제외, 관리자 → 고아 글 마스킹 포함.
     suggestion_views = apply_orphan_policy_to_suggestions(
         suggestions,
         alive_user_ids,
         is_admin=is_admin,
+        comment_count_map=comment_count_map,
     )
 
     # 전체 건수는 정책 적용 전 raw count 를 그대로 노출한다 — 비관리자에게도
