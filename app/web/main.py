@@ -338,7 +338,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     register_kst_filters(templates)
 
     fastapi_app = FastAPI(
-        title="사업공고 로컬 열람",
+        title="정부과제 공고 수집 시스템",
         description="로컬에 적재된 사업공고를 조회한다.",
         version="0.1.0",
         docs_url="/docs",
