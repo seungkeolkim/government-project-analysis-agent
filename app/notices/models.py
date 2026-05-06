@@ -97,6 +97,14 @@ class Notice(Base):
         doc="레코드 마지막 갱신 시각(UTC).",
     )
 
+    # 소프트 삭제 시각 (UTC). NULL이면 활성 레코드.
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+        doc="소프트 삭제 시각(UTC). NULL이면 활성 레코드, 값이 있으면 삭제된 레코드.",
+    )
+
     def __repr__(self) -> str:
         """디버깅 편의용 문자열 표현을 반환한다."""
         return f"<Notice id={self.id} title={self.title[:20]!r}>"

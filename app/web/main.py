@@ -57,6 +57,7 @@ from app.logging_setup import configure_logging
 from app.scheduler import start_scheduler, stop_scheduler
 from app.scrape_control import cleanup_stale_running_runs
 from app.suggestions import (
+    ensure_deleted_at_columns,
     ensure_suggestion_comment_updated_at_column,
     init_suggestions_db,
     migrate_suggestions_to_boards,
@@ -263,6 +264,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # 없으면 멱등하게 ALTER + backfill 한다. 신규 환경(boards.sqlite3 없음)에서는
     # 아래 init_suggestions_db() 의 create_all 이 컬럼 포함 테이블을 한 번에 만든다.
     ensure_suggestion_comment_updated_at_column()
+
+    # task 00069 — 기존 boards.sqlite3 의 세 테이블(suggestions, suggestion_comments,
+    # notices)에 deleted_at 컬럼이 없으면 멱등하게 ALTER ADD COLUMN 한다. 신규 환경에서는
+    # 아래 init_suggestions_db() 의 create_all 이 컬럼 포함 테이블을 한 번에 만든다.
+    ensure_deleted_at_columns()
 
     # task 00051 — 게시판 별도 DB 의 테이블을 멱등하게 보장한다.
     # 메인 DB(init_db, Alembic) 와 별개의 SQLite 파일이며, 메인 DB reset 시에도

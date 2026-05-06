@@ -202,4 +202,83 @@ def ensure_suggestion_comment_updated_at_column() -> None:
         conn.close()
 
 
-__all__ = ["migrate_suggestions_to_boards", "ensure_suggestion_comment_updated_at_column"]
+def ensure_deleted_at_columns() -> None:
+    """기존 boards.sqlite3 의 세 테이블에 deleted_at 컬럼이 없으면 추가한다.
+
+    대상 테이블: suggestions, suggestion_comments, notices
+
+    신규 환경(boards.sqlite3 없음)에서는 init_suggestions_db() 의 create_all 이
+    deleted_at 포함 테이블을 한 번에 만들어주므로, 본 함수는 "기존 boards.sqlite3 가
+    있는데 deleted_at 컬럼이 빠진" 운영 환경의 무중단 마이그레이션 전용이다.
+
+    ## 처리 순서 (테이블별)
+    1. PRAGMA table_info 로 deleted_at 컬럼 존재 여부 확인.
+    2. 테이블 자체가 없으면 SKIP — init_suggestions_db() 의 create_all 이 처리한다.
+    3. 없으면 ADD COLUMN (nullable TIMESTAMP) 수행.
+    4. 이미 있으면 NOOP — 멱등성 보장.
+    5. 기존 row 는 deleted_at = NULL 로 유지 (삭제 안됨 상태, backfill 불필요).
+
+    ## SQLite ALTER TABLE 특성
+    deleted_at 은 nullable 이므로 NOT NULL + DEFAULT 제약 없이 ADD COLUMN 이 가능하다.
+    """
+    settings = get_settings()
+    boards_path = _resolve_sqlite_path(settings.suggestions_db_url)
+
+    if not boards_path.exists():
+        # 신규 환경 — init_suggestions_db() 가 create_all 로 처리하므로 스킵
+        logger.info(
+            "ensure deleted_at columns: boards DB 없음 — 신규 환경으로 간주, 건너뜀 ({})",
+            boards_path,
+        )
+        return
+
+    # 소프트 삭제 컬럼을 추가할 대상 테이블 목록
+    target_tables = ["suggestions", "suggestion_comments", "notices"]
+
+    conn = sqlite3.connect(str(boards_path))
+    try:
+        for table_name in target_tables:
+            rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+
+            if not rows:
+                # 테이블이 아직 없으면 SKIP — init_suggestions_db() 가 create_all 로 처리한다
+                logger.info(
+                    "ensure deleted_at column: 테이블 없음, 건너뜀 ({}, {})",
+                    boards_path,
+                    table_name,
+                )
+                continue
+
+            existing_columns = {row[1] for row in rows}  # row[1] = 컬럼명
+
+            if "deleted_at" in existing_columns:
+                logger.info(
+                    "ensure deleted_at column: 이미 존재함 — NOOP ({}, {})",
+                    boards_path,
+                    table_name,
+                )
+                continue
+
+            logger.info(
+                "ensure deleted_at column: {} 에 deleted_at 컬럼 추가 시작 ({})",
+                table_name,
+                boards_path,
+            )
+            conn.execute(
+                f"ALTER TABLE {table_name} ADD COLUMN deleted_at TIMESTAMP"
+            )
+            conn.commit()
+            logger.info(
+                "ensure deleted_at column: 완료 — {}.deleted_at 추가 ({})",
+                table_name,
+                boards_path,
+            )
+    finally:
+        conn.close()
+
+
+__all__ = [
+    "migrate_suggestions_to_boards",
+    "ensure_suggestion_comment_updated_at_column",
+    "ensure_deleted_at_columns",
+]

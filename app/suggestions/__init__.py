@@ -55,6 +55,7 @@ from app.suggestions.service import (
     is_orphan_author,
 )
 from app.suggestions.migration import (
+    ensure_deleted_at_columns,
     ensure_suggestion_comment_updated_at_column,
     migrate_suggestions_to_boards,
 )
@@ -69,6 +70,7 @@ from app.suggestions.session import (
 __all__ = [
     "migrate_suggestions_to_boards",
     "ensure_suggestion_comment_updated_at_column",
+    "ensure_deleted_at_columns",
     "Base",
     "AcceptanceStatus",
     "Suggestion",
