@@ -63,6 +63,7 @@ from app.suggestions import (
     init_suggestions_db,
     migrate_suggestions_to_boards,
 )
+from app.web.access_log import install_access_history_middleware
 from app.web.observability import (
     install_request_logging_middleware,
     install_unhandled_exception_handler,
@@ -360,6 +361,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # app/web/observability.py 참조).
     install_request_logging_middleware(fastapi_app)
     install_unhandled_exception_handler(fastapi_app)
+
+    # task 00073-1 — IP 접근 이력 로그 미들웨어.
+    # install_request_logging_middleware 보다 나중에 등록해 Starlette 미들웨어 스택에서
+    # 바깥쪽(먼저 실행)으로 배치된다. call_next 반환 후 status_code 를 읽어 기록.
+    install_access_history_middleware(fastapi_app)
 
     # Phase 1b: 인증 라우터(register/login/logout/me) 를 mount 한다.
     # 기존 라우트와 충돌하지 않으며, /auth/* 와 /login, /register 를 노출한다.
