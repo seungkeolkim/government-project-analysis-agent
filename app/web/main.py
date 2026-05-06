@@ -56,7 +56,11 @@ from app.db.session import SessionLocal
 from app.logging_setup import configure_logging
 from app.scheduler import start_scheduler, stop_scheduler
 from app.scrape_control import cleanup_stale_running_runs
-from app.suggestions import init_suggestions_db, migrate_suggestions_to_boards
+from app.suggestions import (
+    ensure_suggestion_comment_updated_at_column,
+    init_suggestions_db,
+    migrate_suggestions_to_boards,
+)
 from app.web.observability import (
     install_request_logging_middleware,
     install_unhandled_exception_handler,
@@ -254,6 +258,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # 반드시 get_suggestions_engine() lru_cache 첫 호출(init_suggestions_db) 직전에
     # 실행되어야 엔진이 신규 경로(boards.sqlite3)로 처음 생성된다.
     migrate_suggestions_to_boards()
+
+    # task 00068 — 기존 boards.sqlite3 에 suggestion_comments.updated_at 컬럼이
+    # 없으면 멱등하게 ALTER + backfill 한다. 신규 환경(boards.sqlite3 없음)에서는
+    # 아래 init_suggestions_db() 의 create_all 이 컬럼 포함 테이블을 한 번에 만든다.
+    ensure_suggestion_comment_updated_at_column()
 
     # task 00051 — 게시판 별도 DB 의 테이블을 멱등하게 보장한다.
     # 메인 DB(init_db, Alembic) 와 별개의 SQLite 파일이며, 메인 DB reset 시에도

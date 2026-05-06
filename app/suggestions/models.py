@@ -289,6 +289,15 @@ class SuggestionComment(Base):
         doc="댓글 작성 시각(UTC).",
     )
 
+    # 마지막 갱신 시각 (UTC). 작성 시 created_at 과 동일, 본문 수정 시 onupdate 로 자동 갱신.
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+        doc="댓글 마지막 갱신 시각(UTC). 작성 시 created_at 과 동일, 본문 수정 시 onupdate 로 자동 갱신.",
+    )
+
     # 역관계 (Suggestion.comments 와 대응)
     suggestion: Mapped[Suggestion] = relationship(
         "Suggestion",

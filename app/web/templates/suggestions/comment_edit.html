@@ -15,8 +15,8 @@
       /suggestions/{sid}/comments/{cid}/edit 에 전송.
       라우트가 ensure_same_origin 으로 CSRF 를 방어한다.
     - textarea 안의 기존 본문은 Jinja2 자동 escape 적용 — |safe 사용 금지.
-    - "수정됨" 라벨 미제공: 모델에 updated_at 컬럼이 없어 Alembic migration 없이
-      추가할 수 없으므로 본 task 범위 외(00064-2 가이던스 명시).
+    - updated_at 컬럼은 도입되었으나(task 00068) 화면 표시는 미제공 —
+      게시글(Suggestion)의 updated_at 표시 정책과 일관되게 백엔드 갱신만 수행한다.
 #}
 {% extends "base.html" %}
 

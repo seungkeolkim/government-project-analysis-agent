@@ -364,8 +364,8 @@ def update_suggestion_comment(
     """댓글 본문을 in-place 갱신한다 (00064-1).
 
     ``body`` 필드만 변경하며 ``suggestion_id`` / ``author_user_id`` /
-    ``created_at`` 은 절대 건드리지 않는다. 모델에 ``updated_at`` 컬럼이 없으므로
-    ``onupdate`` 자동 갱신도 발생하지 않는다(migration 회피 — 가이던스).
+    ``created_at`` 은 절대 건드리지 않는다. ``updated_at`` 은 모델 onupdate 가
+    자동으로 갱신한다.
 
     트랜잭션 commit 은 호출자(라우트) 책임이다. ``flush()`` 만 수행한다.
 
