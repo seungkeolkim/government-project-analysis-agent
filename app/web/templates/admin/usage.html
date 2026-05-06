@@ -1,0 +1,112 @@
+{#
+  이용 통계 탭 (task 00073-3).
+
+  3개 패널:
+    1. 최근 7일 일별 접근 통계 (날짜 내림차순)
+    2. IP별 방문 이력 (최근 방문 순)
+    3. 오늘 최근 원본 로그 (최신 50건, 최신 순)
+#}
+{% extends "admin/base.html" %}
+
+{% block admin_content %}
+
+{% if flash %}
+<div class="admin-flash admin-flash--{{ flash_level or 'error' }}" role="alert">
+    {{ flash }}
+</div>
+{% endif %}
+
+{# ── 패널 1: 일별 접근 통계 ────────────────────────────────── #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">최근 7일 일별 접근 통계</h3>
+    {% if daily_stats %}
+    <table class="admin-table">
+        <thead>
+            <tr>
+                <th>날짜</th>
+                <th>총 요청 수</th>
+                <th>고유 IP 수</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in daily_stats | reverse %}
+            <tr>
+                <td>{{ row.date }}</td>
+                <td>{{ row.total_requests }}</td>
+                <td>{{ row.unique_ips }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="admin-usage-empty">집계 데이터가 없습니다.</p>
+    {% endif %}
+</section>
+
+{# ── 패널 2: IP별 방문 이력 ────────────────────────────────── #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">IP별 방문 이력 <small>(세션 비활성 {{ gap_minutes }}분 기준)</small></h3>
+    {% if ip_history %}
+    <table class="admin-table">
+        <thead>
+            <tr>
+                <th>IP 주소</th>
+                <th>최초 접근</th>
+                <th>최근 접근</th>
+                <th>총 요청</th>
+                <th>방문 횟수</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in ip_history %}
+            <tr>
+                <td>{{ row.ip_address }}</td>
+                <td>{{ row.first_seen }}</td>
+                <td>{{ row.last_seen }}</td>
+                <td>{{ row.total_requests }}</td>
+                <td>{{ row.visits }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="admin-usage-empty">방문 이력이 없습니다.</p>
+    {% endif %}
+</section>
+
+{# ── 패널 3: 오늘 최근 원본 로그 ──────────────────────────── #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">오늘 최근 원본 로그 (최신 50건)</h3>
+    {% if recent_rows %}
+    <table class="admin-table admin-usage-raw-table">
+        <thead>
+            <tr>
+                <th>접근 시각</th>
+                <th>IP</th>
+                <th>메서드</th>
+                <th>경로</th>
+                <th>상태</th>
+                <th>사용자 ID</th>
+                <th>User-Agent</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in recent_rows %}
+            <tr>
+                <td>{{ row.accessed_at }}</td>
+                <td>{{ row.ip_address }}</td>
+                <td>{{ row.method }}</td>
+                <td>{{ row.path }}</td>
+                <td>{{ row.status_code }}</td>
+                <td>{{ row.user_id }}</td>
+                <td title="{{ row.user_agent }}">{{ row.user_agent[:80] }}{% if row.user_agent | length > 80 %}…{% endif %}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="admin-usage-empty">오늘 접근 이력이 없습니다.</p>
+    {% endif %}
+</section>
+
+{% endblock %}
