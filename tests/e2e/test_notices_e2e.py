@@ -242,7 +242,7 @@ def test_admin_can_delete_notice(e2e_page: Page, e2e_server: str) -> None:
 
     # confirm dialog 수락 후 삭제
     e2e_page.on("dialog", lambda dialog: dialog.accept())
-    e2e_page.click("button.suggestion-form__delete-button")
+    e2e_page.click("button.suggestion-detail__owner-action--delete")
 
     # 목록 페이지로 리다이렉트 확인
     e2e_page.wait_for_url(lambda url: url.rstrip("/").endswith("/notices"), timeout=5000)

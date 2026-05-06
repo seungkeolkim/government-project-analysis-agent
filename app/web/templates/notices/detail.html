@@ -57,11 +57,17 @@
         </div>
 
         {% if is_admin %}
-        <footer class="suggestion-detail__actions">
-            <a class="suggestion-form__submit" href="/notices/{{ notice.id }}/edit">수정</a>
-            <form method="post" action="/notices/{{ notice.id }}/delete"
+        <footer class="suggestion-detail__owner-actions">
+            <a class="suggestion-detail__owner-action suggestion-detail__owner-action--edit"
+               href="/notices/{{ notice.id }}/edit">수정</a>
+            <form method="post"
+                  action="/notices/{{ notice.id }}/delete"
+                  class="suggestion-detail__owner-action-form"
                   onsubmit="return confirm('이 공지사항을 삭제하시겠습니까?')">
-                <button type="submit" class="suggestion-form__delete-button">삭제</button>
+                <button type="submit"
+                        class="suggestion-detail__owner-action suggestion-detail__owner-action--delete">
+                    삭제
+                </button>
             </form>
         </footer>
         {% endif %}
