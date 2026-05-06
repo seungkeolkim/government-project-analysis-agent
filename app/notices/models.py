@@ -88,13 +88,12 @@ class Notice(Base):
         doc="공지사항 작성 시각(UTC).",
     )
 
-    # 마지막 갱신 시각 (수정 시 갱신)
-    updated_at: Mapped[datetime] = mapped_column(
+    # 마지막 갱신 시각. 최초 작성 시 NULL, 수정 시에만 onupdate 로 채워진다.
+    updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
-        nullable=False,
-        default=_utcnow,
+        nullable=True,
         onupdate=_utcnow,
-        doc="레코드 마지막 갱신 시각(UTC).",
+        doc="레코드 마지막 갱신 시각(UTC). NULL이면 수정 이력 없음.",
     )
 
     # 소프트 삭제 시각 (UTC). NULL이면 활성 레코드.

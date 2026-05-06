@@ -127,7 +127,8 @@ def create_notice(
         author_name=author_name,
         title=title,
         body=body,
-        # created_at / updated_at 은 모델 default(_utcnow) 가 채운다.
+        # created_at 은 모델 default(_utcnow) 가 채운다.
+        # updated_at 은 INSERT 시 NULL (수정 이력 없음 초기값).
     )
     session.add(notice)
     session.flush()

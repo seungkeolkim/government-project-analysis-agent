@@ -57,6 +57,7 @@ from app.suggestions.service import (
 from app.suggestions.migration import (
     ensure_deleted_at_columns,
     ensure_suggestion_comment_updated_at_column,
+    ensure_updated_at_initial_null_backfill,
     migrate_suggestions_to_boards,
 )
 from app.suggestions.session import (
@@ -71,6 +72,7 @@ __all__ = [
     "migrate_suggestions_to_boards",
     "ensure_suggestion_comment_updated_at_column",
     "ensure_deleted_at_columns",
+    "ensure_updated_at_initial_null_backfill",
     "Base",
     "AcceptanceStatus",
     "Suggestion",

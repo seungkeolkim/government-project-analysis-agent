@@ -202,13 +202,12 @@ class Suggestion(Base):
         doc="게시글 작성 시각(UTC).",
     )
 
-    # 마지막 갱신 시각 (관리자 수용여부 수정 등으로 갱신)
-    updated_at: Mapped[datetime] = mapped_column(
+    # 마지막 갱신 시각. 최초 작성 시 NULL, 수정 시에만 onupdate 로 채워진다.
+    updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
-        nullable=False,
-        default=_utcnow,
+        nullable=True,
         onupdate=_utcnow,
-        doc="레코드 마지막 갱신 시각(UTC).",
+        doc="레코드 마지막 갱신 시각(UTC). NULL이면 수정 이력 없음.",
     )
 
     # 소프트 삭제 시각 (UTC). NULL이면 활성 레코드.
@@ -297,13 +296,12 @@ class SuggestionComment(Base):
         doc="댓글 작성 시각(UTC).",
     )
 
-    # 마지막 갱신 시각 (UTC). 작성 시 created_at 과 동일, 본문 수정 시 onupdate 로 자동 갱신.
-    updated_at: Mapped[datetime] = mapped_column(
+    # 마지막 갱신 시각. 최초 작성 시 NULL, 본문 수정 시에만 onupdate 로 채워진다.
+    updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
-        nullable=False,
-        default=_utcnow,
+        nullable=True,
         onupdate=_utcnow,
-        doc="댓글 마지막 갱신 시각(UTC). 작성 시 created_at 과 동일, 본문 수정 시 onupdate 로 자동 갱신.",
+        doc="댓글 마지막 갱신 시각(UTC). NULL이면 수정 이력 없음.",
     )
 
     # 소프트 삭제 시각 (UTC). NULL이면 활성 레코드.

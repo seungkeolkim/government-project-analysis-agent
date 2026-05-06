@@ -43,7 +43,7 @@
                 <dt>작성시간</dt>
                 <dd>{{ notice.created_at | kst_format }}</dd>
             </div>
-            {% if notice.updated_at != notice.created_at %}
+            {% if notice.updated_at is not none %}
             <div class="suggestion-detail__meta-row">
                 <dt>최종 수정</dt>
                 <dd>{{ notice.updated_at | kst_format }}</dd>
@@ -55,6 +55,9 @@
             {# Jinja2 자동 escape — |safe 사용 금지. 줄바꿈은 CSS pre-wrap 으로 보존. #}
             {{ notice.body }}
         </div>
+        {% if notice.updated_at is not none %}
+        <p class="edited-marker">{{ notice.updated_at | kst_format }}에 수정됨</p>
+        {% endif %}
 
         {% if is_admin %}
         <footer class="suggestion-detail__owner-actions">

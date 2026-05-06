@@ -145,7 +145,8 @@ def create_suggestion(
         is_secret=is_secret,
         author_name=author_name,
         contact_email=contact_email,
-        # acceptance_status / created_at / updated_at 는 모델 default 가 채운다.
+        # acceptance_status / created_at 은 모델 default 가 채운다.
+        # updated_at 은 INSERT 시 NULL (수정 이력 없음 초기값).
         # acceptance_status default = AcceptanceStatus.PENDING ("검토중").
         acceptance_status=AcceptanceStatus.PENDING,
     )
@@ -210,6 +211,7 @@ def create_suggestion_comment(
         author_user_id=author_user_id,
         body=body,
         # created_at 은 모델 default(_utcnow) 가 채운다.
+        # updated_at 은 INSERT 시 NULL (수정 이력 없음 초기값).
     )
     session.add(comment)
     session.flush()

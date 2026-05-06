@@ -4364,3 +4364,11 @@ details[open] .user-card__org-summary::before {
     color: #9ca3af;
     cursor: not-allowed;
 }
+
+/* 글/댓글 수정 시각 표시 — updated_at 이 NOT NULL 일 때만 렌더 (task 00072). */
+.edited-marker {
+    margin: 6px 0 0;
+    font-size: 11px;
+    color: #9ca3af;
+    line-height: 1.4;
+}

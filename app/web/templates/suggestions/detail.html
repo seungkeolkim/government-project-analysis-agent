@@ -141,6 +141,9 @@
         <section class="suggestion-detail__section suggestion-detail__section--body">
             <h4 class="suggestion-detail__section-title">본문</h4>
             <div class="suggestion-detail__body">{{ suggestion.body }}</div>
+            {% if suggestion.updated_at is not none %}
+            <p class="edited-marker">{{ suggestion.updated_at | kst_format }}에 수정됨</p>
+            {% endif %}
         </section>
 
         {#
@@ -361,6 +364,9 @@
                     {% endif %}
                 </div>
                 <div class="suggestion-comment__body">{{ view.body }}</div>
+                {% if view.updated_at is not none %}
+                <p class="edited-marker">{{ view.updated_at | kst_format }}에 수정됨</p>
+                {% endif %}
                 {# 댓글 작성자 본인에게만 수정·삭제 버튼 노출 (00064-2).
                    라우트 5단 게이트가 실제 권한을 차단하지만, UI 단에서도 숨겨
                    "보이는데 못 누르는" 혼란을 방지한다.
