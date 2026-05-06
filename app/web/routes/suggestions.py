@@ -47,6 +47,7 @@ from app.db.session import SessionLocal
 from app.suggestions import (
     AcceptanceStatus,
     Suggestion,
+    SuggestionComment,
     SuggestionsSessionLocal,
     apply_orphan_policy_to_comments,
     apply_orphan_policy_to_suggestions,
@@ -55,14 +56,17 @@ from app.suggestions import (
     create_suggestion,
     create_suggestion_comment,
     delete_suggestion,
+    delete_suggestion_comment,
     get_alive_user_ids,
     get_alive_user_username_map,
+    get_comment_by_id,
     get_suggestion_by_id,
     is_orphan_author,
     list_comments_by_suggestion_id,
     list_suggestions,
     update_suggestion,
     update_suggestion_acceptance,
+    update_suggestion_comment,
 )
 from app.web.template_filters import register_kst_filters
 
@@ -510,6 +514,7 @@ def view_suggestion_page(
         raw_comments,
         alive_username_map,
         is_admin=is_admin,
+        current_user_id=current_user.id if current_user is not None else None,
     )
 
     return _templates.TemplateResponse(
@@ -1006,6 +1011,293 @@ def delete_suggestion_route(
     # 글이 사라졌으니 뷰어가 아니라 목록으로 보낸다.
     return RedirectResponse(
         url="/suggestions",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# 댓글 수정·삭제 (00064-1)
+# ──────────────────────────────────────────────────────────────
+
+
+def _apply_comment_owner_edit_gates(
+    main_session: Session,
+    suggestions_session: Session,
+    *,
+    suggestion_id: int,
+    comment_id: int,
+    current_user: User,
+) -> tuple[Suggestion, SuggestionComment]:
+    """댓글 수정·삭제 라우트가 공통으로 적용해야 하는 5단 게이트.
+
+    글 수정·삭제 게이트(``_apply_owner_edit_gates``) 와 정책을 일관되게 맞추되,
+    마지막 두 단(d, e) 은 댓글 전용으로 새로 명시한다 — 댓글 작성자와 글
+    작성자는 다를 수 있으므로 기존 헬퍼를 재사용하면 권한이 잘못 검증된다.
+
+    적용 순서:
+        a. 부모 게시글 존재 (404)
+        b. 부모 게시글 고아 — 비관리자에게는 게시글 존재 자체를 노출하지 않음 (404).
+        c. 부모 게시글 비밀글 — 비-작성자(게시글)/비-관리자 접근 (403).
+        d. 댓글 존재 + 부모 게시글 소속 확인 — 다른 게시글의 댓글 ID 면 404.
+        e. 댓글 작성자 본인 — 관리자라도 본인 댓글 아니면 403.
+
+    Args:
+        main_session: 메인 DB 세션 (cross-DB 고아 판정용).
+        suggestions_session: 건의사항 DB 세션 (게시글·댓글 조회용).
+        suggestion_id: 부모 게시글 PK.
+        comment_id: 대상 댓글 PK.
+        current_user: 로그인 사용자 (필수).
+
+    Returns:
+        5단 게이트를 통과한 ``(Suggestion, SuggestionComment)`` 튜플.
+
+    Raises:
+        HTTPException(404): 게시글/댓글이 없거나, 고아 글에 비관리자 접근,
+            또는 댓글이 해당 게시글에 속하지 않음.
+        HTTPException(403): 비밀글 비-작성자(게시글)/비-관리자, 또는 비-댓글-작성자.
+    """
+    # ── 게이트 a: 부모 게시글 존재 ────────────────────────────────────────
+    suggestion = get_suggestion_by_id(suggestions_session, suggestion_id)
+    if suggestion is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="해당 건의사항을 찾을 수 없습니다.",
+        )
+
+    is_admin = bool(current_user.is_admin)
+    # 비밀글 게이트(c)에서 게시글 작성자인지 판정하기 위해 미리 계산한다.
+    is_suggestion_owner = bool(
+        suggestion.author_user_id is not None
+        and current_user.id == suggestion.author_user_id
+    )
+
+    # ── 게이트 b: 부모 게시글 고아 ────────────────────────────────────────
+    alive_user_ids = get_alive_user_ids(main_session, [suggestion.author_user_id])
+    is_orphan = is_orphan_author(suggestion.author_user_id, alive_user_ids)
+    if is_orphan and not is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="해당 건의사항을 찾을 수 없습니다.",
+        )
+
+    # ── 게이트 c: 부모 게시글 비밀글 ─────────────────────────────────────
+    # 댓글 작성자가 게시글 작성자와 다를 수 있다. 비밀글의 경우 게시글 작성자 본인
+    # 또는 관리자만 댓글 접근이 가능하다 — 기존 댓글 작성 라우트와 동일 정책.
+    if suggestion.is_secret and not is_admin and not is_suggestion_owner:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="비밀글은 작성자 본인 또는 관리자만 열람할 수 있습니다.",
+        )
+
+    # ── 게이트 d: 댓글 존재 + 부모 게시글 소속 확인 ───────────────────────
+    comment = get_comment_by_id(suggestions_session, comment_id)
+    if comment is None or comment.suggestion_id != suggestion_id:
+        # 댓글이 없거나 다른 게시글 소속인 경우 모두 404 로 통일한다 — 다른 글의
+        # 댓글 ID 를 주입해도 존재를 노출하지 않는다.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="해당 댓글을 찾을 수 없습니다.",
+        )
+
+    # ── 게이트 e: 댓글 작성자 본인 ────────────────────────────────────────
+    # 관리자라도 본인 댓글이 아니면 수정·삭제 불가 — 글 수정·삭제와 동일 정책.
+    is_comment_owner = (
+        comment.author_user_id is not None
+        and comment.author_user_id == current_user.id
+    )
+    if not is_comment_owner:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="자신이 작성한 댓글만 수정·삭제할 수 있습니다.",
+        )
+
+    return suggestion, comment
+
+
+@router.get(
+    "/suggestions/{suggestion_id}/comments/{comment_id}/edit",
+    response_class=HTMLResponse,
+    response_model=None,
+)
+def edit_comment_page(
+    request: Request,
+    suggestion_id: int,
+    comment_id: int,
+    main_session: Session = Depends(_main_db_session),
+    suggestions_session: Session = Depends(_suggestions_db_session),
+    current_user: User = Depends(current_user_required),
+) -> HTMLResponse:
+    """댓글 수정 폼 페이지 (GET /suggestions/{sid}/comments/{cid}/edit).
+
+    5단 게이트 통과 후 ``suggestions/comment_edit.html`` 을 렌더한다.
+    폼에는 기존 댓글 본문이 prefill 된다.
+
+    Args:
+        request: FastAPI Request (Jinja2 컨텍스트용).
+        suggestion_id: 부모 게시글 PK.
+        comment_id: 수정 대상 댓글 PK.
+        main_session: 메인 DB 세션 (cross-DB 고아 판정용).
+        suggestions_session: 건의사항 DB 세션.
+        current_user: 로그인 사용자 (필수). 비로그인은 401 (dependency).
+
+    Returns:
+        ``suggestions/comment_edit.html`` 렌더 결과.
+
+    Raises:
+        HTTPException(401): 비로그인.
+        HTTPException(404): 게시글/댓글 없음, 고아 글 비관리자, 소속 불일치.
+        HTTPException(403): 비밀글 비-작성자/비-관리자, 또는 비-댓글-작성자.
+    """
+    suggestion, comment = _apply_comment_owner_edit_gates(
+        main_session,
+        suggestions_session,
+        suggestion_id=suggestion_id,
+        comment_id=comment_id,
+        current_user=current_user,
+    )
+
+    return _templates.TemplateResponse(
+        request,
+        "suggestions/comment_edit.html",
+        {
+            "current_user": current_user,
+            "suggestion": suggestion,
+            "comment": comment,
+        },
+    )
+
+
+@router.post(
+    "/suggestions/{suggestion_id}/comments/{comment_id}/edit",
+    dependencies=[Depends(ensure_same_origin)],
+    response_class=RedirectResponse,
+    response_model=None,
+)
+def update_comment_route(
+    suggestion_id: int,
+    comment_id: int,
+    body: str = Form(...),
+    main_session: Session = Depends(_main_db_session),
+    suggestions_session: Session = Depends(_suggestions_db_session),
+    current_user: User = Depends(current_user_required),
+) -> RedirectResponse:
+    """댓글 수정 처리 (POST /suggestions/{sid}/comments/{cid}/edit).
+
+    5단 게이트 통과 후 댓글 본문을 갱신한다. 수정 가능 필드는 ``body`` 만이며,
+    나머지(``suggestion_id`` / ``author_user_id`` / ``created_at``) 는 repository
+    시그니처가 body 만 받도록 좁혀져 있어 변경되지 않는다.
+
+    Form 필드:
+        - ``body``: 필수, ≤2000자.
+
+    Returns:
+        303 리다이렉트 (``Location: /suggestions/{sid}``) — PRG.
+
+    Raises:
+        HTTPException(401): 비로그인.
+        HTTPException(404): 게시글/댓글 없음, 고아 글 비관리자, 소속 불일치.
+        HTTPException(403): 비밀글 비-작성자/비-관리자, 또는 비-댓글-작성자.
+        HTTPException(400): 빈 본문 또는 길이 초과.
+    """
+    # ── 입력 검증 ─────────────────────────────────────────────────────────
+    body_normalized = _validate_required_text(
+        body, field_label="댓글 본문", max_length=_COMMENT_BODY_MAX_LENGTH
+    )
+
+    # ── 5단 게이트 ────────────────────────────────────────────────────────
+    _apply_comment_owner_edit_gates(
+        main_session,
+        suggestions_session,
+        suggestion_id=suggestion_id,
+        comment_id=comment_id,
+        current_user=current_user,
+    )
+
+    # ── UPDATE (트랜잭션은 라우트 끝에서 명시 commit) ──────────────────────
+    try:
+        result = update_suggestion_comment(
+            suggestions_session,
+            comment_id=comment_id,
+            body=body_normalized,
+        )
+        if result is None:
+            # 게이트 통과와 갱신 사이에 row 가 사라진 race — 보수적으로 404.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="해당 댓글을 찾을 수 없습니다.",
+            )
+        suggestions_session.commit()
+    except HTTPException:
+        suggestions_session.rollback()
+        raise
+    except Exception:
+        suggestions_session.rollback()
+        raise
+
+    # PRG: 수정 후 게시글 뷰어로 복귀.
+    return RedirectResponse(
+        url=f"/suggestions/{suggestion_id}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.post(
+    "/suggestions/{suggestion_id}/comments/{comment_id}/delete",
+    dependencies=[Depends(ensure_same_origin)],
+    response_class=RedirectResponse,
+    response_model=None,
+)
+def delete_comment_route(
+    suggestion_id: int,
+    comment_id: int,
+    main_session: Session = Depends(_main_db_session),
+    suggestions_session: Session = Depends(_suggestions_db_session),
+    current_user: User = Depends(current_user_required),
+) -> RedirectResponse:
+    """댓글 삭제 처리 (POST /suggestions/{sid}/comments/{cid}/delete).
+
+    5단 게이트 통과 후 댓글을 삭제한다. 성공 시 게시글 뷰어로 303 리다이렉트한다.
+
+    Returns:
+        303 리다이렉트 (``Location: /suggestions/{sid}``) — PRG.
+
+    Raises:
+        HTTPException(401): 비로그인.
+        HTTPException(404): 게시글/댓글 없음, 고아 글 비관리자, 소속 불일치.
+        HTTPException(403): 비밀글 비-작성자/비-관리자, 또는 비-댓글-작성자.
+    """
+    # ── 5단 게이트 ────────────────────────────────────────────────────────
+    _apply_comment_owner_edit_gates(
+        main_session,
+        suggestions_session,
+        suggestion_id=suggestion_id,
+        comment_id=comment_id,
+        current_user=current_user,
+    )
+
+    # ── DELETE (트랜잭션은 라우트 끝에서 명시 commit) ──────────────────────
+    try:
+        deleted = delete_suggestion_comment(
+            suggestions_session,
+            comment_id=comment_id,
+        )
+        if not deleted:
+            # 게이트 통과 직후 사라진 race 케이스.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="해당 댓글을 찾을 수 없습니다.",
+            )
+        suggestions_session.commit()
+    except HTTPException:
+        suggestions_session.rollback()
+        raise
+    except Exception:
+        suggestions_session.rollback()
+        raise
+
+    # PRG: 삭제 후 게시글 뷰어로 복귀.
+    return RedirectResponse(
+        url=f"/suggestions/{suggestion_id}",
         status_code=status.HTTP_303_SEE_OTHER,
     )
 

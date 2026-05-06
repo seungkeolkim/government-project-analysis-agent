@@ -15,6 +15,8 @@
     - :func:`update_suggestion_acceptance` — 관리자 수용 여부 모달 저장 (00051-5).
     - :func:`update_suggestion` / :func:`delete_suggestion` — 작성자 본인의 글
       수정·삭제 (00052-4).
+    - :func:`get_comment_by_id` / :func:`update_suggestion_comment` /
+      :func:`delete_suggestion_comment` — 댓글 수정·삭제 (00064-1).
 """
 
 from __future__ import annotations
@@ -334,6 +336,76 @@ def delete_suggestion(session: Session, *, suggestion_id: int) -> bool:
     return True
 
 
+def get_comment_by_id(
+    session: Session,
+    comment_id: int,
+) -> SuggestionComment | None:
+    """주어진 PK 의 ``SuggestionComment`` row 를 조회한다. 없으면 ``None`` 반환.
+
+    댓글 수정·삭제 라우트의 게이트 헬퍼에서 댓글 존재 확인 및 부모 게시글
+    소속 여부를 검증하는 데 사용한다.
+
+    Args:
+        session: 건의사항 DB ORM 세션.
+        comment_id: ``suggestion_comments.id`` 값.
+
+    Returns:
+        해당 row 의 ``SuggestionComment`` 인스턴스 또는 ``None``.
+    """
+    return session.get(SuggestionComment, comment_id)
+
+
+def update_suggestion_comment(
+    session: Session,
+    *,
+    comment_id: int,
+    body: str,
+) -> SuggestionComment | None:
+    """댓글 본문을 in-place 갱신한다 (00064-1).
+
+    ``body`` 필드만 변경하며 ``suggestion_id`` / ``author_user_id`` /
+    ``created_at`` 은 절대 건드리지 않는다. 모델에 ``updated_at`` 컬럼이 없으므로
+    ``onupdate`` 자동 갱신도 발생하지 않는다(migration 회피 — 가이던스).
+
+    트랜잭션 commit 은 호출자(라우트) 책임이다. ``flush()`` 만 수행한다.
+
+    Args:
+        session: 건의사항 DB ORM 세션.
+        comment_id: 갱신 대상 댓글 PK.
+        body: 새 댓글 본문 (필수).
+
+    Returns:
+        갱신된 ``SuggestionComment`` 인스턴스. 댓글이 존재하지 않으면 ``None``.
+    """
+    comment = session.get(SuggestionComment, comment_id)
+    if comment is None:
+        return None
+    comment.body = body
+    session.flush()
+    return comment
+
+
+def delete_suggestion_comment(session: Session, *, comment_id: int) -> bool:
+    """댓글을 삭제한다 (00064-1).
+
+    트랜잭션 commit 은 호출자 책임. ``session.delete(...)`` + ``flush()`` 까지만
+    수행한다. 부모 게시글 및 소속 확인은 호출자(게이트 헬퍼) 가 사전에 수행한다.
+
+    Args:
+        session: 건의사항 DB ORM 세션.
+        comment_id: 삭제 대상 댓글 PK.
+
+    Returns:
+        실제로 삭제됐으면 ``True``, 이미 존재하지 않았으면 ``False``.
+    """
+    comment = session.get(SuggestionComment, comment_id)
+    if comment is None:
+        return False
+    session.delete(comment)
+    session.flush()
+    return True
+
+
 __all__ = [
     "count_suggestions",
     "count_comments_by_suggestion_ids",
@@ -345,4 +417,7 @@ __all__ = [
     "update_suggestion_acceptance",
     "update_suggestion",
     "delete_suggestion",
+    "get_comment_by_id",
+    "update_suggestion_comment",
+    "delete_suggestion_comment",
 ]
