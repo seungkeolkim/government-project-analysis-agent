@@ -428,7 +428,7 @@ CSRF 토큰은 쓰지 않는다 (로컬 전제). 대신 **POST 요청만** `Orig
 ```jinja
 <div class="container site-header__inner">
     <div class="site-header__brand">
-        <h1 class="site-title"><a href="/">사업공고 로컬 열람</a></h1>
+        <h1 class="site-title"><a href="/">정부과제 공고 수집 시스템</a></h1>
         <p class="site-subtitle">수집된 사업공고를 소스별로 조회한다.</p>
     </div>
     <nav class="site-nav" aria-label="사용자">
