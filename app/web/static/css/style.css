@@ -4162,34 +4162,32 @@ details[open] .user-card__org-summary::before {
     word-break: break-word;
 }
 
-/* 댓글 owner 수정·삭제 액션 영역 (task 00064-2).
-   글 owner-action 보다 살짝 작은 폰트/패딩으로 댓글 카드 크기에 맞게 조정한다.
-   색상 팔레트는 .suggestion-detail__owner-action 과 동일하게 유지해 시각 일관성 확보. */
+/* 댓글 owner 수정·삭제 액션 영역 — 본문 owner-action 과 동일 스타일로 통일 (task 00067). */
 .suggestion-comment__owner-actions {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
+    gap: 8px;
     justify-content: flex-end;
     align-items: center;
-    margin: 8px 0 0;
-    padding: 6px 0 0;
-    border-top: 1px solid #f3f4f6;
+    margin: 16px 0 0;
+    padding: 12px 0 0;
+    border-top: 1px solid #e5e7eb;
 }
 
 /* 삭제 폼을 인라인 표시해 수정 링크와 같은 행에 정렬한다. */
 .suggestion-comment__owner-action-form {
     margin: 0;
     padding: 0;
-    display: inline-flex;
+    display: inline-block;
 }
 
-/* 공통 버튼/링크 스타일 — 글 owner-action 보다 약간 소형(패딩·폰트). */
+/* 공통 버튼/링크 스타일 — .suggestion-detail__owner-action 과 동일. */
 .suggestion-comment__owner-action {
     display: inline-block;
-    padding: 4px 10px;
-    font-size: 12px;
+    padding: 6px 14px;
+    font-size: 13px;
     font-weight: 600;
-    border-radius: 5px;
+    border-radius: 6px;
     border: 1px solid #d1d5db;
     background: #ffffff;
     color: #1f2937;
