@@ -967,9 +967,9 @@ def delete_suggestion_route(
 ) -> RedirectResponse:
     """건의사항 삭제 처리 (POST /suggestions/{id}/delete) — 작성자 본인 전용.
 
-    동일한 4단 게이트를 적용한 뒤 게시글을 삭제한다. 소속 댓글은 모델
-    cascade(``all, delete-orphan`` + DB ``ON DELETE CASCADE``) 로 함께 정리된다.
-    성공 시 목록 페이지(``/suggestions``) 로 303 리다이렉트한다.
+    동일한 4단 게이트를 적용한 뒤 게시글을 소프트 삭제한다. 소속 댓글도 동일
+    deleted_at 타임스탬프로 소프트 삭제한다. 성공 시 목록 페이지(``/suggestions``)
+    로 303 리다이렉트한다.
 
     Returns:
         303 리다이렉트 (``Location: /suggestions``) — PRG.
