@@ -361,6 +361,23 @@
                     {% endif %}
                 </div>
                 <div class="suggestion-comment__body">{{ view.body }}</div>
+                {# 댓글 작성자 본인에게만 수정·삭제 버튼 노출 (00064-2).
+                   라우트 5단 게이트가 실제 권한을 차단하지만, UI 단에서도 숨겨
+                   "보이는데 못 누르는" 혼란을 방지한다.
+                   |safe 절대 금지 — view.body 는 사용자 입력이므로 자동 escape 유지. #}
+                {% if view.is_owner %}
+                <div class="suggestion-comment__owner-actions">
+                    <a class="suggestion-comment__owner-action suggestion-comment__owner-action--edit"
+                       href="/suggestions/{{ suggestion.id }}/comments/{{ view.comment_id }}/edit">수정</a>
+                    <form method="post"
+                          action="/suggestions/{{ suggestion.id }}/comments/{{ view.comment_id }}/delete"
+                          class="suggestion-comment__owner-action-form"
+                          onsubmit="return confirm('정말 댓글을 삭제하시겠습니까?')">
+                        <button type="submit"
+                                class="suggestion-comment__owner-action suggestion-comment__owner-action--delete">삭제</button>
+                    </form>
+                </div>
+                {% endif %}
             </li>
             {% endfor %}
         </ul>

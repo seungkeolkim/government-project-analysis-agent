@@ -1,0 +1,68 @@
+{#
+  댓글 수정 폼 페이지 (task 00064-2).
+
+  컨텍스트 (라우트 edit_comment_page 가 주입):
+    - current_user: User       — 로그인 보장(라우트 dependency).
+    - suggestion:   Suggestion — 부모 게시글(5단 게이트를 통과한).
+    - comment:      SuggestionComment — 수정 대상 댓글(prefill 대상).
+
+  렌더 정책:
+    - 본 페이지는 라우트의 5단 게이트를 통과한 댓글 작성자 본인에게만 도달한다.
+      비-작성자는 403/404 로 차단되어 여기까지 오지 않는다 — 별도 권한 분기 불요.
+    - 수정 가능 필드는 body 하나뿐. suggestion_id / author_user_id / created_at
+      은 라우트·repository 양쪽에서 변경되지 않도록 제한되어 있다.
+    - POST 는 application/x-www-form-urlencoded 로
+      /suggestions/{sid}/comments/{cid}/edit 에 전송.
+      라우트가 ensure_same_origin 으로 CSRF 를 방어한다.
+    - textarea 안의 기존 본문은 Jinja2 자동 escape 적용 — |safe 사용 금지.
+    - "수정됨" 라벨 미제공: 모델에 updated_at 컬럼이 없어 Alembic migration 없이
+      추가할 수 없으므로 본 task 범위 외(00064-2 가이던스 명시).
+#}
+{% extends "base.html" %}
+
+{% block page_title %}댓글 수정 · {{ suggestion.title }}{% endblock %}
+
+{% block content %}
+<section class="suggestions-page">
+    <header class="suggestions-page__heading">
+        <h2 class="suggestions-page__title">댓글 수정</h2>
+        <a class="suggestion-form__cancel" href="/suggestions/{{ suggestion.id }}">게시글로 돌아가기</a>
+    </header>
+
+    {# 부모 게시글 메타 — 어느 게시글의 댓글을 수정하는지 맥락을 제공한다. #}
+    <div class="suggestion-comment-edit__context">
+        <span class="suggestion-comment-edit__context-label">원본 게시글</span>
+        <a class="suggestion-comment-edit__context-link"
+           href="/suggestions/{{ suggestion.id }}">{{ suggestion.title }}</a>
+    </div>
+
+    <div class="suggestion-comment-edit__meta">
+        <span class="suggestion-comment-edit__meta-label">댓글 작성 시각</span>
+        <span class="suggestion-comment-edit__meta-value">{{ comment.created_at | kst_format }}</span>
+    </div>
+
+    <form class="suggestion-form suggestion-comment-edit__form"
+          method="post"
+          action="/suggestions/{{ suggestion.id }}/comments/{{ comment.id }}/edit">
+
+        <div class="suggestion-form__row">
+            <label class="suggestion-form__label" for="comment-body">댓글 내용 *</label>
+            {# textarea 안의 기존 본문은 Jinja2 자동 escape 가 적용되며,
+               줄바꿈은 textarea 가 그대로 보존한다(|safe 사용 금지). #}
+            <textarea
+                class="suggestion-form__textarea suggestion-comment-edit__textarea"
+                id="comment-body"
+                name="body"
+                required
+                maxlength="2000"
+            >{{ comment.body }}</textarea>
+            <small class="suggestion-form__hint">최대 2000자</small>
+        </div>
+
+        <div class="suggestion-form__actions">
+            <button type="submit" class="suggestion-form__submit">저장</button>
+            <a href="/suggestions/{{ suggestion.id }}" class="suggestion-form__cancel">취소</a>
+        </div>
+    </form>
+</section>
+{% endblock %}
