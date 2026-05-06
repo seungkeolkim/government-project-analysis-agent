@@ -24,10 +24,10 @@ from __future__ import annotations
 from collections.abc import Iterable
 from datetime import date
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from app.suggestions.models import AcceptanceStatus, Suggestion, SuggestionComment
+from app.suggestions.models import AcceptanceStatus, Suggestion, SuggestionComment, _utcnow
 
 
 def get_suggestion_by_id(session: Session, suggestion_id: int) -> Suggestion | None:
@@ -37,6 +37,9 @@ def get_suggestion_by_id(session: Session, suggestion_id: int) -> Suggestion | N
     ``None`` 을 반환하면 ``HTTPException(404)`` 를 던지고, 인스턴스를 받으면
     이어서 (a) 고아 게이트 → (b) 비밀글 게이트 순서로 권한 검사를 수행한다.
 
+    소프트 삭제된 게시글(``deleted_at IS NOT NULL``) 은 ``None`` 으로 반환해
+    라우트가 404 로 응답하도록 한다.
+
     Args:
         session: 건의사항 DB ORM 세션.
         suggestion_id: ``suggestions.id`` 값.
@@ -44,7 +47,12 @@ def get_suggestion_by_id(session: Session, suggestion_id: int) -> Suggestion | N
     Returns:
         해당 row 의 ``Suggestion`` 인스턴스 또는 ``None``.
     """
-    return session.get(Suggestion, suggestion_id)
+    return session.execute(
+        select(Suggestion).where(
+            Suggestion.id == suggestion_id,
+            Suggestion.deleted_at.is_(None),
+        )
+    ).scalar_one_or_none()
 
 
 def count_suggestions(session: Session) -> int:
@@ -58,10 +66,16 @@ def count_suggestions(session: Session) -> int:
     Args:
         session: 건의사항 DB ORM 세션.
 
+    소프트 삭제된 게시글(``deleted_at IS NOT NULL``) 은 카운트에서 제외한다.
+
     Returns:
-        ``suggestions`` 테이블의 총 row 수.
+        ``suggestions`` 테이블에서 삭제되지 않은 row 수.
     """
-    return int(session.execute(select(func.count(Suggestion.id))).scalar_one())
+    return int(
+        session.execute(
+            select(func.count(Suggestion.id)).where(Suggestion.deleted_at.is_(None))
+        ).scalar_one()
+    )
 
 
 def list_suggestions(
@@ -85,6 +99,7 @@ def list_suggestions(
     """
     rows = session.execute(
         select(Suggestion)
+        .where(Suggestion.deleted_at.is_(None))
         .order_by(Suggestion.created_at.desc(), Suggestion.id.desc())
         .limit(limit)
         .offset(offset)
@@ -159,7 +174,10 @@ def list_comments_by_suggestion_id(
     """
     rows = session.execute(
         select(SuggestionComment)
-        .where(SuggestionComment.suggestion_id == suggestion_id)
+        .where(
+            SuggestionComment.suggestion_id == suggestion_id,
+            SuggestionComment.deleted_at.is_(None),
+        )
         .order_by(SuggestionComment.created_at.asc(), SuggestionComment.id.asc())
     ).scalars().all()
     return list(rows)
@@ -233,7 +251,13 @@ def update_suggestion_acceptance(
         갱신된 ``Suggestion`` 인스턴스. 게시글이 존재하지 않으면 ``None`` 을
         반환해 호출자가 404 분기를 책임지도록 한다.
     """
-    suggestion = session.get(Suggestion, suggestion_id)
+    # 소프트 삭제된 게시글은 존재하지 않는 것으로 처리한다.
+    suggestion = session.execute(
+        select(Suggestion).where(
+            Suggestion.id == suggestion_id,
+            Suggestion.deleted_at.is_(None),
+        )
+    ).scalar_one_or_none()
     if suggestion is None:
         return None
     suggestion.acceptance_status = acceptance_status
@@ -273,7 +297,13 @@ def update_suggestion(
         갱신된 ``Suggestion`` 인스턴스. 게시글이 존재하지 않으면 ``None`` 을
         반환해 호출자가 404 분기를 책임지도록 한다.
     """
-    suggestion = session.get(Suggestion, suggestion_id)
+    # 소프트 삭제된 게시글은 존재하지 않는 것으로 처리한다.
+    suggestion = session.execute(
+        select(Suggestion).where(
+            Suggestion.id == suggestion_id,
+            Suggestion.deleted_at.is_(None),
+        )
+    ).scalar_one_or_none()
     if suggestion is None:
         return None
     suggestion.title = title
@@ -307,31 +337,54 @@ def count_comments_by_suggestion_ids(
 
     rows = session.execute(
         select(SuggestionComment.suggestion_id, func.count(SuggestionComment.id))
-        .where(SuggestionComment.suggestion_id.in_(ids))
+        .where(
+            SuggestionComment.suggestion_id.in_(ids),
+            SuggestionComment.deleted_at.is_(None),
+        )
         .group_by(SuggestionComment.suggestion_id)
     ).all()
     return {suggestion_id: count for suggestion_id, count in rows}
 
 
 def delete_suggestion(session: Session, *, suggestion_id: int) -> bool:
-    """건의사항 게시글을 삭제한다 (00052-4).
+    """건의사항 게시글을 소프트 삭제한다 (00052-4, 00069-2).
 
-    소속 댓글은 모델의 ``cascade=\"all, delete-orphan\"`` + DB 레벨
-    ``ON DELETE CASCADE`` 로 함께 정리된다. 트랜잭션 commit 은 호출자 책임.
-    ``session.delete(...)`` + ``flush()`` 까지만 수행한다.
+    ``deleted_at`` 컬럼에 현재 UTC 시각을 기록하는 in-place UPDATE 를 수행한다.
+    소속 댓글도 동일 타임스탬프로 소프트 삭제한다 — ORM relationship cascade 는
+    소프트 삭제를 자동 처리하지 않으므로 명시적 UPDATE 한 번으로 처리한다.
+    트랜잭션 commit 은 호출자 책임. ``flush()`` 까지만 수행한다.
 
     Args:
         session: 건의사항 DB ORM 세션.
-        suggestion_id: 삭제 대상 게시글 PK.
+        suggestion_id: 소프트 삭제 대상 게시글 PK.
 
     Returns:
-        실제로 삭제됐으면 ``True``, 게시글이 이미 존재하지 않았다면 ``False``
-        — 호출자가 404 vs 정상 흐름을 분기할 수 있도록 한다.
+        실제로 소프트 삭제됐으면 ``True``, 게시글이 이미 존재하지 않거나
+        이미 소프트 삭제된 경우 ``False`` — 호출자가 404 vs 정상 흐름을
+        분기할 수 있도록 한다.
     """
-    suggestion = session.get(Suggestion, suggestion_id)
+    suggestion = session.execute(
+        select(Suggestion).where(
+            Suggestion.id == suggestion_id,
+            Suggestion.deleted_at.is_(None),
+        )
+    ).scalar_one_or_none()
     if suggestion is None:
         return False
-    session.delete(suggestion)
+
+    now = _utcnow()
+    suggestion.deleted_at = now
+
+    # 소속 댓글도 동일 타임스탬프로 소프트 삭제 (기존 ON DELETE CASCADE 동등성 유지).
+    # 이미 소프트 삭제된 댓글은 건드리지 않는다(멱등).
+    session.execute(
+        update(SuggestionComment)
+        .where(
+            SuggestionComment.suggestion_id == suggestion_id,
+            SuggestionComment.deleted_at.is_(None),
+        )
+        .values(deleted_at=now)
+    )
     session.flush()
     return True
 
@@ -345,6 +398,9 @@ def get_comment_by_id(
     댓글 수정·삭제 라우트의 게이트 헬퍼에서 댓글 존재 확인 및 부모 게시글
     소속 여부를 검증하는 데 사용한다.
 
+    소프트 삭제된 댓글(``deleted_at IS NOT NULL``) 은 ``None`` 으로 반환해
+    라우트가 404 로 응답하도록 한다.
+
     Args:
         session: 건의사항 DB ORM 세션.
         comment_id: ``suggestion_comments.id`` 값.
@@ -352,7 +408,12 @@ def get_comment_by_id(
     Returns:
         해당 row 의 ``SuggestionComment`` 인스턴스 또는 ``None``.
     """
-    return session.get(SuggestionComment, comment_id)
+    return session.execute(
+        select(SuggestionComment).where(
+            SuggestionComment.id == comment_id,
+            SuggestionComment.deleted_at.is_(None),
+        )
+    ).scalar_one_or_none()
 
 
 def update_suggestion_comment(
@@ -377,7 +438,13 @@ def update_suggestion_comment(
     Returns:
         갱신된 ``SuggestionComment`` 인스턴스. 댓글이 존재하지 않으면 ``None``.
     """
-    comment = session.get(SuggestionComment, comment_id)
+    # 소프트 삭제된 댓글은 존재하지 않는 것으로 처리한다.
+    comment = session.execute(
+        select(SuggestionComment).where(
+            SuggestionComment.id == comment_id,
+            SuggestionComment.deleted_at.is_(None),
+        )
+    ).scalar_one_or_none()
     if comment is None:
         return None
     comment.body = body
@@ -386,22 +453,29 @@ def update_suggestion_comment(
 
 
 def delete_suggestion_comment(session: Session, *, comment_id: int) -> bool:
-    """댓글을 삭제한다 (00064-1).
+    """댓글을 소프트 삭제한다 (00064-1, 00069-2).
 
-    트랜잭션 commit 은 호출자 책임. ``session.delete(...)`` + ``flush()`` 까지만
-    수행한다. 부모 게시글 및 소속 확인은 호출자(게이트 헬퍼) 가 사전에 수행한다.
+    ``deleted_at`` 컬럼에 현재 UTC 시각을 기록하는 in-place UPDATE 를 수행한다.
+    트랜잭션 commit 은 호출자 책임. ``flush()`` 까지만 수행한다.
+    부모 게시글 및 소속 확인은 호출자(게이트 헬퍼) 가 사전에 수행한다.
 
     Args:
         session: 건의사항 DB ORM 세션.
-        comment_id: 삭제 대상 댓글 PK.
+        comment_id: 소프트 삭제 대상 댓글 PK.
 
     Returns:
-        실제로 삭제됐으면 ``True``, 이미 존재하지 않았으면 ``False``.
+        실제로 소프트 삭제됐으면 ``True``, 이미 존재하지 않거나 이미 소프트
+        삭제된 경우 ``False``.
     """
-    comment = session.get(SuggestionComment, comment_id)
+    comment = session.execute(
+        select(SuggestionComment).where(
+            SuggestionComment.id == comment_id,
+            SuggestionComment.deleted_at.is_(None),
+        )
+    ).scalar_one_or_none()
     if comment is None:
         return False
-    session.delete(comment)
+    comment.deleted_at = _utcnow()
     session.flush()
     return True
 

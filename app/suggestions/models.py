@@ -211,6 +211,14 @@ class Suggestion(Base):
         doc="레코드 마지막 갱신 시각(UTC).",
     )
 
+    # 소프트 삭제 시각 (UTC). NULL이면 활성 레코드.
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+        doc="소프트 삭제 시각(UTC). NULL이면 활성 레코드, 값이 있으면 삭제된 레코드.",
+    )
+
     # 댓글과의 1:N 관계. 게시글 삭제 시 댓글도 함께 정리한다.
     comments: Mapped[list[SuggestionComment]] = relationship(
         "SuggestionComment",
@@ -296,6 +304,14 @@ class SuggestionComment(Base):
         default=_utcnow,
         onupdate=_utcnow,
         doc="댓글 마지막 갱신 시각(UTC). 작성 시 created_at 과 동일, 본문 수정 시 onupdate 로 자동 갱신.",
+    )
+
+    # 소프트 삭제 시각 (UTC). NULL이면 활성 레코드.
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+        doc="소프트 삭제 시각(UTC). NULL이면 활성 레코드, 값이 있으면 삭제된 레코드.",
     )
 
     # 역관계 (Suggestion.comments 와 대응)

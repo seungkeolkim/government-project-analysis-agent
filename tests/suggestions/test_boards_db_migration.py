@@ -1,4 +1,4 @@
-"""boards DB 파일명 마이그레이션 헬퍼 단위 테스트 (task 00056).
+"""boards DB 파일명 마이그레이션 헬퍼 단위 테스트 (task 00056, 00069).
 
 검증 시나리오:
 1. legacy 만 존재 → boards 로 이름 변경되고 legacy 는 사라짐 (멱등: 재실행 no-op)
@@ -16,7 +16,12 @@ from pathlib import Path
 
 import pytest
 
-from app.suggestions.migration import migrate_suggestions_to_boards
+import app.notices.models  # noqa: F401 — Notice 를 Base.metadata 에 등록 (create_all 에 notices 테이블 포함)
+
+from app.suggestions.migration import (
+    ensure_deleted_at_columns,
+    migrate_suggestions_to_boards,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -184,3 +189,135 @@ def test_neither_exists_noop(db_dir: Path) -> None:
 
     assert not legacy.exists(), "새 파일이 생성되어선 안 된다"
     assert not boards.exists(), "새 파일이 생성되어선 안 된다"
+
+
+# ---------------------------------------------------------------------------
+# ensure_deleted_at_columns 테스트 (task 00069)
+# ---------------------------------------------------------------------------
+
+
+# 세 테이블 모두 동일한 케이스를 검증한다.
+_ALL_TABLES = ["suggestions", "suggestion_comments", "notices"]
+
+
+@pytest.fixture()
+def existing_db_without_deleted_at(db_dir: Path) -> Path:
+    """deleted_at 컬럼 없이 세 테이블이 존재하는 boards.sqlite3 를 생성하는 fixture.
+
+    운영 환경에서 deleted_at 컬럼 추가 전에 이미 boards.sqlite3 가 있던 상황을 시뮬레이션한다.
+    """
+    boards = db_dir / "boards.sqlite3"
+    conn = sqlite3.connect(str(boards))
+    conn.execute(
+        "CREATE TABLE suggestions ("
+        "  id INTEGER PRIMARY KEY,"
+        "  title TEXT NOT NULL,"
+        "  body TEXT NOT NULL,"
+        "  created_at TIMESTAMP NOT NULL"
+        ")"
+    )
+    conn.execute(
+        "CREATE TABLE suggestion_comments ("
+        "  id INTEGER PRIMARY KEY,"
+        "  suggestion_id INTEGER NOT NULL,"
+        "  body TEXT NOT NULL,"
+        "  created_at TIMESTAMP NOT NULL"
+        ")"
+    )
+    conn.execute(
+        "CREATE TABLE notices ("
+        "  id INTEGER PRIMARY KEY,"
+        "  title TEXT NOT NULL,"
+        "  body TEXT NOT NULL,"
+        "  created_at TIMESTAMP NOT NULL"
+        ")"
+    )
+    conn.commit()
+    conn.close()
+    return db_dir
+
+
+# ---------------------------------------------------------------------------
+# 케이스 (a): 신규 boards.sqlite3 — init_suggestions_db() 가 deleted_at 포함 생성
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("table_name", _ALL_TABLES)
+def test_new_db_has_deleted_at_column(db_dir: Path, table_name: str) -> None:
+    """신규 환경에서 init_suggestions_db() 호출 시 세 테이블 모두 deleted_at 컬럼이 포함된다."""
+    from app.suggestions.session import init_suggestions_db
+
+    # boards.sqlite3 가 없는 신규 환경
+    boards = db_dir / "boards.sqlite3"
+    assert not boards.exists(), "사전 조건: boards.sqlite3 가 없어야 한다"
+
+    init_suggestions_db()
+
+    assert boards.exists(), "init_suggestions_db() 후 boards.sqlite3 가 생성되어야 한다"
+
+    conn = sqlite3.connect(str(boards))
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    conn.close()
+
+    column_names = {row[1] for row in rows}
+    assert "deleted_at" in column_names, (
+        f"신규 DB 의 {table_name} 테이블에 deleted_at 컬럼이 있어야 한다"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 케이스 (b): 기존 DB — deleted_at 없음 → 헬퍼 호출 → 컬럼 추가됨
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("table_name", _ALL_TABLES)
+def test_ensure_deleted_at_adds_column_to_existing_db(
+    existing_db_without_deleted_at: Path, table_name: str
+) -> None:
+    """deleted_at 없이 존재하는 테이블에 ensure_deleted_at_columns() 호출 시 컬럼이 추가된다."""
+    db_dir = existing_db_without_deleted_at
+    boards = db_dir / "boards.sqlite3"
+
+    # 호출 전: deleted_at 없음을 확인
+    conn = sqlite3.connect(str(boards))
+    before_cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    conn.close()
+    assert "deleted_at" not in before_cols, "사전 조건: 아직 deleted_at 컬럼이 없어야 한다"
+
+    ensure_deleted_at_columns()
+
+    # 호출 후: deleted_at 추가됨
+    conn = sqlite3.connect(str(boards))
+    after_cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    conn.close()
+    assert "deleted_at" in after_cols, (
+        f"ensure_deleted_at_columns() 후 {table_name} 에 deleted_at 컬럼이 있어야 한다"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 케이스 (c): 이미 deleted_at 존재 → NOOP (재호출해도 오류 없음)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("table_name", _ALL_TABLES)
+def test_ensure_deleted_at_noop_when_column_exists(
+    existing_db_without_deleted_at: Path, table_name: str
+) -> None:
+    """이미 deleted_at 컬럼이 있으면 ensure_deleted_at_columns() 재호출이 NOOP 이고 오류 없다."""
+    db_dir = existing_db_without_deleted_at
+
+    # 첫 번째 호출 — 컬럼 추가
+    ensure_deleted_at_columns()
+
+    # 두 번째 호출 — NOOP (이미 존재)
+    ensure_deleted_at_columns()
+
+    boards = db_dir / "boards.sqlite3"
+    conn = sqlite3.connect(str(boards))
+    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    conn.close()
+
+    assert "deleted_at" in cols, (
+        f"NOOP 재호출 후에도 {table_name} 에 deleted_at 컬럼이 유지되어야 한다"
+    )

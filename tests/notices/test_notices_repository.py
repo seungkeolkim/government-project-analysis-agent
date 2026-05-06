@@ -270,8 +270,8 @@ def test_update_notice_not_found_returns_none(boards_session: Session) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_delete_notice_returns_true_and_removes_row(boards_session: Session) -> None:
-    """delete_notice 가 True 를 반환하고 row 를 제거한다."""
+def test_delete_notice_returns_true_and_hides_row(boards_session: Session) -> None:
+    """delete_notice 가 True 를 반환하고 소프트 삭제 후 조회 시 None 을 반환한다."""
     notice = _make_notice(boards_session, title="삭제 대상")
     notice_id = notice.id
 
@@ -286,6 +286,75 @@ def test_delete_notice_not_found_returns_false(boards_session: Session) -> None:
     """존재하지 않는 id 로 delete 하면 False 를 반환한다."""
     result = delete_notice(boards_session, notice_id=99999)
     assert result is False
+
+
+def test_delete_notice_sets_deleted_at(boards_session: Session) -> None:
+    """delete_notice 가 deleted_at 을 설정한다."""
+    notice = _make_notice(boards_session, title="deleted_at 확인")
+
+    delete_notice(boards_session, notice_id=notice.id)
+    boards_session.commit()
+
+    boards_session.refresh(notice)
+    assert notice.deleted_at is not None
+
+
+def test_delete_notice_already_deleted_returns_false(boards_session: Session) -> None:
+    """이미 소프트 삭제된 공지사항에 delete_notice 를 재호출하면 False 를 반환한다."""
+    notice = _make_notice(boards_session, title="재삭제 시도")
+
+    delete_notice(boards_session, notice_id=notice.id)
+    boards_session.commit()
+
+    result = delete_notice(boards_session, notice_id=notice.id)
+    assert result is False
+
+
+# ---------------------------------------------------------------------------
+# 소프트 삭제 필터: list / count / get / update
+# ---------------------------------------------------------------------------
+
+
+def test_list_notices_excludes_deleted(boards_session: Session) -> None:
+    """list_notices 가 소프트 삭제된 공지사항을 목록에서 제외한다."""
+    active = _make_notice(boards_session, title="활성 공지")
+    deleted = _make_notice(boards_session, title="삭제된 공지")
+    delete_notice(boards_session, notice_id=deleted.id)
+    boards_session.commit()
+
+    results = list_notices(boards_session, limit=10, offset=0)
+    ids = {n.id for n in results}
+    assert active.id in ids
+    assert deleted.id not in ids
+
+
+def test_count_notices_excludes_deleted(boards_session: Session) -> None:
+    """count_notices 가 소프트 삭제된 공지사항을 카운트에서 제외한다."""
+    _make_notice(boards_session, title="활성 공지")
+    deleted = _make_notice(boards_session, title="삭제된 공지")
+    delete_notice(boards_session, notice_id=deleted.id)
+    boards_session.commit()
+
+    assert count_notices(boards_session) == 1
+
+
+def test_get_notice_by_id_deleted_returns_none(boards_session: Session) -> None:
+    """소프트 삭제된 공지사항은 get_notice_by_id 가 None 을 반환한다."""
+    notice = _make_notice(boards_session, title="삭제될 공지")
+    delete_notice(boards_session, notice_id=notice.id)
+    boards_session.commit()
+
+    assert get_notice_by_id(boards_session, notice.id) is None
+
+
+def test_update_notice_deleted_returns_none(boards_session: Session) -> None:
+    """소프트 삭제된 공지사항에 update_notice 를 호출하면 None 을 반환한다."""
+    notice = _make_notice(boards_session, title="수정 시도 대상")
+    delete_notice(boards_session, notice_id=notice.id)
+    boards_session.commit()
+
+    result = update_notice(boards_session, notice_id=notice.id, title="새 제목", body="새 본문")
+    assert result is None
 
 
 # ---------------------------------------------------------------------------
