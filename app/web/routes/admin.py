@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any, Optional
 
@@ -76,6 +77,7 @@ from app.organizations.service import (
     set_user_organizations,
 )
 from app.db.repository import (
+    count_scrape_runs,
     get_available_source_ids,
     get_running_scrape_run,
     list_recent_scrape_runs,
@@ -110,6 +112,9 @@ from app.web.template_filters import register_kst_filters
 
 # 최근 이력 기본 개수. UI 폴링 응답에도 동일 값을 사용한다.
 RECENT_RUN_LIMIT: int = 20
+
+# 최근 이력 페이지네이션 — 한 페이지당 표시 건수.
+RECENT_RUN_PAGE_SIZE: int = 10
 
 # 로그 파일 응답 최대 크기 (bytes). 너무 긴 로그가 UI 를 마비시키지 않도록.
 # 현재는 파일 전체를 반환하지만 상한을 두어 안전망을 확보한다.
@@ -320,6 +325,7 @@ def admin_root() -> Response:
 @router.get("/scrape", response_class=HTMLResponse)
 def scrape_control_page(
     request: Request,
+    page: int = Query(default=1, ge=1),
     flash: Optional[str] = Query(default=None),
     flash_level: Optional[str] = Query(default=None),
     current_user: User = Depends(admin_user_required),
@@ -327,13 +333,18 @@ def scrape_control_page(
     """[수집 제어] 탭 — 현재 상태, 시작/중단 폼, 최근 이력.
 
     쿼리 파라미터:
+        page:        최근 이력 페이지 번호 (1-based, 기본 1).
         flash:       POST 후 redirect 시 안내 메시지. 없으면 비노출.
         flash_level: 'success' / 'error'. CSS 배지 색 분기용. 기본 'success'.
 
     템플릿 컨텍스트:
         active_tab:       탭 활성 표시 용 ('scrape').
         running:          현재 running ScrapeRun 의 직렬화 dict 또는 None.
-        recent_runs:      최근 ScrapeRun 직렬화 리스트 (최신순).
+        recent_runs:      최근 ScrapeRun 직렬화 리스트 (최신순, 현재 페이지).
+        page:             현재 페이지 번호.
+        page_size:        페이지당 표시 건수.
+        total:            전체 ScrapeRun 수.
+        total_pages:      전체 페이지 수.
         available_sources: sources.yaml 에서 읽은 등록 소스 id 목록.
         flash / flash_level: 상단 안내 배지.
         current_user:     상단 네비 + is_admin 조건 분기용.
@@ -342,23 +353,33 @@ def scrape_control_page(
     # admin_user_required 이전 단계(쿠키/세션/User 로드) 문제, 있으나 그 다음
     # DB 조회 / 템플릿 렌더에서 터졌다면 해당 구간 문제로 범위를 좁힐 수 있다.
     logger.debug(
-        "admin.scrape_control_page 진입: user_id={} has_flash={}",
+        "admin.scrape_control_page 진입: user_id={} page={} has_flash={}",
         current_user.id,
+        page,
         flash is not None,
     )
     with session_scope() as session:
+        total = count_scrape_runs(session)
+        total_pages = max(1, math.ceil(total / RECENT_RUN_PAGE_SIZE))
+        # page 가 범위를 벗어나면 마지막 페이지로 클램프
+        page = min(page, total_pages)
+        offset = (page - 1) * RECENT_RUN_PAGE_SIZE
         running_row = get_running_scrape_run(session)
-        recent_rows = list_recent_scrape_runs(session, limit=RECENT_RUN_LIMIT)
+        recent_rows = list_recent_scrape_runs(
+            session, limit=RECENT_RUN_PAGE_SIZE, offset=offset
+        )
         running_payload = _serialize_scrape_run(running_row) if running_row else None
         recent_payload = [_serialize_scrape_run(row) for row in recent_rows]
 
     # sources.yaml 기반 등록 소스 목록. 변경 시 자동 반영 (session 과 무관).
     available_sources = get_available_source_ids()
     logger.debug(
-        "admin.scrape_control_page DB 조회 완료: running={} recent_count={} sources_count={}",
+        "admin.scrape_control_page DB 조회 완료: running={} recent_count={} sources_count={} page={}/{}",
         running_payload is not None,
         len(recent_payload),
         len(available_sources),
+        page,
+        total_pages,
     )
 
     return _templates.TemplateResponse(
@@ -369,6 +390,10 @@ def scrape_control_page(
             "sub_tab": "scrape",
             "running": running_payload,
             "recent_runs": recent_payload,
+            "page": page,
+            "page_size": RECENT_RUN_PAGE_SIZE,
+            "total": total,
+            "total_pages": total_pages,
             "available_sources": available_sources,
             "flash": flash,
             "flash_level": flash_level or "success",
@@ -383,7 +408,9 @@ def scrape_control_page(
 
 
 @router.get("/scrape/status", response_class=JSONResponse)
-def scrape_status() -> JSONResponse:
+def scrape_status(
+    page: int = Query(default=1, ge=1),
+) -> JSONResponse:
     """5초 폴링으로 현재 running 상태 + 최근 이력을 갱신해서 돌려준다.
 
     사용자 원문 '5초 폴링으로 상태 갱신 (SSE 과함)' 에 따라 JSON 엔드포인트만
@@ -393,16 +420,27 @@ def scrape_status() -> JSONResponse:
     {
       \"running\": { id, started_at, status, trigger, source_counts, pid, ... } | null,
       \"recent\":  [ { id, started_at, ended_at, status, trigger, source_counts, ... }, ... ],
-      \"poll_interval_ms\": 5000
+      \"poll_interval_ms\": 5000,
+      \"page\": 1,
+      \"page_size\": 10,
+      \"total\": 25,
+      \"total_pages\": 3
     }
     ```
 
-    guidance: stdout 마지막 N 줄 포함은 본 subtask 범위 밖 — source_counts /
-    started_at / status 만 노출한다.
+    쿼리 파라미터:
+        page: 최근 이력 페이지 번호 (1-based, 기본 1). JS 폴링이 현재 보는 페이지를 전달.
     """
     with session_scope() as session:
+        total = count_scrape_runs(session)
+        total_pages = max(1, math.ceil(total / RECENT_RUN_PAGE_SIZE))
+        # page 가 범위를 벗어나면 마지막 페이지로 클램프
+        page = min(page, total_pages)
+        offset = (page - 1) * RECENT_RUN_PAGE_SIZE
         running_row = get_running_scrape_run(session)
-        recent_rows = list_recent_scrape_runs(session, limit=RECENT_RUN_LIMIT)
+        recent_rows = list_recent_scrape_runs(
+            session, limit=RECENT_RUN_PAGE_SIZE, offset=offset
+        )
         running_payload = _serialize_scrape_run(running_row) if running_row else None
         recent_payload = [_serialize_scrape_run(row) for row in recent_rows]
 
@@ -411,6 +449,10 @@ def scrape_status() -> JSONResponse:
             "running": running_payload,
             "recent": recent_payload,
             "poll_interval_ms": 5000,
+            "page": page,
+            "page_size": RECENT_RUN_PAGE_SIZE,
+            "total": total,
+            "total_pages": total_pages,
         }
     )
 
@@ -1752,5 +1794,6 @@ def users_set_organizations(
 __all__ = [
     "LOG_FILE_MAX_BYTES",
     "RECENT_RUN_LIMIT",
+    "RECENT_RUN_PAGE_SIZE",
     "router",
 ]

@@ -2115,6 +2115,7 @@ def list_recent_scrape_runs(
     session: Session,
     *,
     limit: int = 20,
+    offset: int = 0,
 ) -> list[ScrapeRun]:
     """최근 ScrapeRun 을 started_at 내림차순으로 반환한다.
 
@@ -2123,19 +2124,40 @@ def list_recent_scrape_runs(
     Args:
         session: 호출자 세션.
         limit:   반환할 최대 row 수. 양의 정수.
+        offset:  건너뛸 row 수. 0 이상.
 
     Returns:
         최근 ``ScrapeRun`` 목록 (최신순). 데이터가 없으면 빈 리스트.
     """
     if limit <= 0:
         raise ValueError(f"limit 는 양의 정수여야 합니다: {limit!r}")
+    if offset < 0:
+        raise ValueError(f"offset 는 0 이상이어야 합니다: {offset!r}")
     return list(
         session.execute(
             select(ScrapeRun)
             .order_by(ScrapeRun.started_at.desc())
             .limit(limit)
+            .offset(offset)
         ).scalars()
     )
+
+
+def count_scrape_runs(session: Session) -> int:
+    """ScrapeRun 전체 row 수를 반환한다.
+
+    페이지네이션 total_pages 계산에 쓴다.
+
+    Args:
+        session: 호출자 세션.
+
+    Returns:
+        ScrapeRun 전체 row 수. 데이터가 없으면 0.
+    """
+    result = session.execute(
+        select(func.count()).select_from(ScrapeRun)
+    ).scalar_one()
+    return int(result)
 
 
 def create_scrape_run(
@@ -2631,6 +2653,7 @@ __all__ = [
     "delete_relevance_judgment",
     "get_running_scrape_run",
     "list_recent_scrape_runs",
+    "count_scrape_runs",
     "create_scrape_run",
     "set_scrape_run_pid",
     "finalize_scrape_run",
