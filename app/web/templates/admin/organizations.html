@@ -28,12 +28,12 @@
 
 {# ──────────────────────────────────────────────────────────
    재귀 매크로 — 조직 트리 노드를 depth-indent + 삭제/이름변경/이동 버튼으로 렌더한다.
-   depth 가 1 증가할 때마다 20px 들여쓰기한다.
+   depth 가 1 증가할 때마다 40px 들여쓰기한다.
    자식이 있는 노드는 삭제 버튼을 disabled 로 표시한다.
    flat_orgs 는 이동 form 의 부모 선택 select 에 사용한다.
 #}
 {% macro render_org_node(node, depth, flat_orgs) %}
-<div class="org-tree__node" style="padding-left: {{ depth * 20 }}px">
+<div class="org-tree__node" style="padding-left: {{ depth * 40 }}px">
     <div class="org-tree__row">
         <span class="org-tree__name">{{ node.name }}</span>
         {% if node.children %}
