@@ -173,6 +173,9 @@ class SuggestionCommentView:
             - alive 작성자: 메인 DB users.username 값(렌더 시점 조회).
             - 고아 댓글: ``None`` 으로 마스킹 (관리자 전용 경로에서만 노출됨).
         created_at: 댓글 작성 시각(UTC). KST 표시는 템플릿 필터가 처리한다.
+        is_owner: 현재 로그인 사용자가 이 댓글의 작성자인지 여부 (00064-1).
+            비로그인 또는 작성자가 아니면 False. 템플릿에서 수정·삭제 버튼
+            노출 여부를 결정하는 데 사용한다.
     """
 
     comment_id: int
@@ -180,6 +183,7 @@ class SuggestionCommentView:
     is_orphan: bool
     display_author_name: str | None
     created_at: datetime
+    is_owner: bool
 
 
 def apply_orphan_policy_to_comments(
@@ -187,6 +191,7 @@ def apply_orphan_policy_to_comments(
     alive_user_username_map: dict[int, str],
     *,
     is_admin: bool,
+    current_user_id: int | None = None,
 ) -> list[SuggestionCommentView]:
     """댓글 목록에 고아 댓글 노출/마스킹 정책을 적용한다.
 
@@ -206,6 +211,8 @@ def apply_orphan_policy_to_comments(
         alive_user_username_map: ``get_alive_user_username_map`` 결과 dict.
             살아있는 user id 만 키로 포함되어 있다.
         is_admin: 현재 사용자가 관리자 (``is_admin=True``) 인지. 비로그인은 False.
+        current_user_id: 현재 로그인 사용자의 메인 DB ``users.id`` 값 (00064-1).
+            비로그인이면 ``None`` — 모든 댓글의 ``is_owner`` 가 False 로 채워진다.
 
     Returns:
         ``SuggestionCommentView`` 리스트. 비관리자 호출에서는 길이가 입력보다 짧을
@@ -230,6 +237,13 @@ def apply_orphan_policy_to_comments(
             # author_user_id 가 None 인 경우는 is_orphan=True 분기에서 이미 처리됨.
             display_author_name = alive_user_username_map[comment.author_user_id]
 
+        # 비로그인(current_user_id is None) 이면 항상 False. 고아 댓글에서도
+        # author_user_id 가 None 이므로 정수 비교가 매칭되지 않아 안전하다.
+        is_owner = (
+            current_user_id is not None
+            and comment.author_user_id == current_user_id
+        )
+
         views.append(
             SuggestionCommentView(
                 comment_id=comment.id,
@@ -237,6 +251,7 @@ def apply_orphan_policy_to_comments(
                 is_orphan=is_orphan,
                 display_author_name=display_author_name,
                 created_at=comment.created_at,
+                is_owner=is_owner,
             )
         )
     return views
