@@ -5,7 +5,9 @@
   동일 구조의 테이블을 JS 가 교체 렌더하므로, 컬럼 구성을 JS 쪽과 맞춘다.
 
   컨텍스트 규약:
-    - recent_runs: 직렬화된 ScrapeRun dict 의 리스트 (최신순).
+    - recent_runs:  직렬화된 ScrapeRun dict 의 리스트 (최신순, 현재 페이지).
+    - page:         현재 페이지 번호 (1-based). 없으면 1 로 폴백.
+    - total_pages:  전체 페이지 수. 없으면 1 로 폴백.
 #}
 {% if recent_runs and recent_runs | length > 0 %}
 <table class="admin-table">
@@ -58,6 +60,26 @@
         {% endfor %}
     </tbody>
 </table>
+
+{# 페이지네이션 nav — total_pages <= 1 이면 렌더하지 않는다 #}
+{% set _page = page | default(1) %}
+{% set _total_pages = total_pages | default(1) %}
+{% if _total_pages > 1 %}
+<nav class="suggestion-pagination" aria-label="페이지 이동">
+    {% if _page > 1 %}
+        <a href="?page={{ _page - 1 }}">이전</a>
+    {% else %}
+        <span>이전</span>
+    {% endif %}
+    <span class="is-current">{{ _page }} / {{ _total_pages }}</span>
+    {% if _page < _total_pages %}
+        <a href="?page={{ _page + 1 }}">다음</a>
+    {% else %}
+        <span>다음</span>
+    {% endif %}
+</nav>
+{% endif %}
+
 {% else %}
 <p class="admin-state__muted">아직 실행 이력이 없습니다.</p>
 {% endif %}
