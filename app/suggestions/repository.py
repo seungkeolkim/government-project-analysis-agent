@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import date
 
 from sqlalchemy import func, select
@@ -280,6 +281,36 @@ def update_suggestion(
     return suggestion
 
 
+def count_comments_by_suggestion_ids(
+    session: Session,
+    suggestion_ids: Iterable[int],
+) -> dict[int, int]:
+    """주어진 게시글 id 목록의 댓글 수를 batch 조회한다 (N+1 금지 — GROUP BY 단일 쿼리).
+
+    댓글 수가 0인 게시글은 결과 dict 키에 포함되지 않는다.
+    호출자는 ``.get(id, 0)`` 으로 안전하게 해석한다는 계약.
+
+    Args:
+        session: 건의사항 DB ORM 세션.
+        suggestion_ids: 댓글 수를 구할 게시글 PK 시퀀스.
+            중복이 있어도 set 정규화로 안전하게 처리된다.
+
+    Returns:
+        ``{suggestion_id: comment_count}`` dict.
+        댓글이 0건인 게시글은 결과에 키가 없다 — 호출자가 ``.get(id, 0)`` 으로 조회할 것.
+    """
+    ids = set(suggestion_ids)
+    if not ids:
+        return {}
+
+    rows = session.execute(
+        select(SuggestionComment.suggestion_id, func.count(SuggestionComment.id))
+        .where(SuggestionComment.suggestion_id.in_(ids))
+        .group_by(SuggestionComment.suggestion_id)
+    ).all()
+    return {suggestion_id: count for suggestion_id, count in rows}
+
+
 def delete_suggestion(session: Session, *, suggestion_id: int) -> bool:
     """건의사항 게시글을 삭제한다 (00052-4).
 
@@ -305,6 +336,7 @@ def delete_suggestion(session: Session, *, suggestion_id: int) -> bool:
 
 __all__ = [
     "count_suggestions",
+    "count_comments_by_suggestion_ids",
     "list_suggestions",
     "create_suggestion",
     "get_suggestion_by_id",

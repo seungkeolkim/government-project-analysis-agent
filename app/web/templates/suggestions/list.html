@@ -48,6 +48,9 @@
                     {% else %}
                         <a href="/suggestions/{{ view.suggestion_id }}">{{ view.title }}</a>
                     {% endif %}
+                    {% if view.comment_count > 0 %}
+                        <span class="suggestion-list__comment-count">[{{ view.comment_count }}]</span>
+                    {% endif %}
                     {% if view.is_orphan %}
                         {# 관리자에게만 보이는 row 이므로 안전. #}
                         <span class="suggestion-orphan-note">작성자 정보 없음</span>

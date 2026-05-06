@@ -33,6 +33,7 @@ from app.suggestions.models import (
     SuggestionComment,
 )
 from app.suggestions.repository import (
+    count_comments_by_suggestion_ids,
     count_suggestions,
     create_suggestion,
     create_suggestion_comment,
@@ -73,6 +74,7 @@ __all__ = [
     "get_alive_user_ids",
     "get_alive_user_username_map",
     "count_suggestions",
+    "count_comments_by_suggestion_ids",
     "list_suggestions",
     "create_suggestion",
     "get_suggestion_by_id",

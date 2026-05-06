@@ -3585,6 +3585,13 @@ details[open] .user-card__org-summary::before {
     text-decoration: underline;
 }
 
+/* 제목 옆 댓글 수 라벨 — 댓글이 1개 이상인 경우에만 노출. */
+.suggestion-list__comment-count {
+    color: #6b7280;
+    font-size: 0.85em;
+    margin-left: 6px;
+}
+
 /* 비밀글 표시(자물쇠 prefix). */
 .suggestion-list__secret-prefix {
     color: #9ca3af;
