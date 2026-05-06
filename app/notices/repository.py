@@ -22,6 +22,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.notices.models import Notice
+from app.suggestions.models import _utcnow
 
 
 def get_notice_by_id(session: Session, notice_id: int) -> Notice | None:
@@ -36,7 +37,12 @@ def get_notice_by_id(session: Session, notice_id: int) -> Notice | None:
     Returns:
         해당 row 의 ``Notice`` 인스턴스 또는 ``None``.
     """
-    return session.get(Notice, notice_id)
+    return session.execute(
+        select(Notice).where(
+            Notice.id == notice_id,
+            Notice.deleted_at.is_(None),
+        )
+    ).scalar_one_or_none()
 
 
 def count_notices(session: Session) -> int:
@@ -50,7 +56,11 @@ def count_notices(session: Session) -> int:
     Returns:
         ``notices`` 테이블의 총 row 수.
     """
-    return int(session.execute(select(func.count(Notice.id))).scalar_one())
+    return int(
+        session.execute(
+            select(func.count(Notice.id)).where(Notice.deleted_at.is_(None))
+        ).scalar_one()
+    )
 
 
 def list_notices(
@@ -75,6 +85,7 @@ def list_notices(
     rows = (
         session.execute(
             select(Notice)
+            .where(Notice.deleted_at.is_(None))
             .order_by(Notice.created_at.desc(), Notice.id.desc())
             .limit(limit)
             .offset(offset)
@@ -144,7 +155,12 @@ def update_notice(
     Returns:
         갱신된 ``Notice`` 인스턴스. 게시글이 존재하지 않으면 ``None`` 반환.
     """
-    notice = session.get(Notice, notice_id)
+    notice = session.execute(
+        select(Notice).where(
+            Notice.id == notice_id,
+            Notice.deleted_at.is_(None),
+        )
+    ).scalar_one_or_none()
     if notice is None:
         return None
     notice.title = title
@@ -156,8 +172,8 @@ def update_notice(
 def delete_notice(session: Session, *, notice_id: int) -> bool:
     """공지사항 게시글을 삭제한다.
 
-    관리자 전용. 트랜잭션 commit 은 호출자 책임. ``session.delete(...)`` +
-    ``flush()`` 까지만 수행한다.
+    관리자 전용. 트랜잭션 commit 은 호출자 책임. ``deleted_at`` 을 현재 시각으로
+    설정하는 소프트 삭제이며 ``flush()`` 까지만 수행한다.
 
     Args:
         session: boards DB ORM 세션.
@@ -166,10 +182,15 @@ def delete_notice(session: Session, *, notice_id: int) -> bool:
     Returns:
         실제로 삭제됐으면 ``True``, 이미 존재하지 않았다면 ``False``.
     """
-    notice = session.get(Notice, notice_id)
+    notice = session.execute(
+        select(Notice).where(
+            Notice.id == notice_id,
+            Notice.deleted_at.is_(None),
+        )
+    ).scalar_one_or_none()
     if notice is None:
         return False
-    session.delete(notice)
+    notice.deleted_at = _utcnow()
     session.flush()
     return True
 
