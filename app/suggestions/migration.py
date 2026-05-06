@@ -140,4 +140,66 @@ def _verify_sqlite_file(path: Path) -> None:
         ) from verify_exc
 
 
-__all__ = ["migrate_suggestions_to_boards"]
+def ensure_suggestion_comment_updated_at_column() -> None:
+    """기존 boards.sqlite3 의 suggestion_comments 테이블에 updated_at 컬럼이 없으면 추가한다.
+
+    신규 환경(boards.sqlite3 없음)에서는 init_suggestions_db() 의 create_all 이
+    updated_at 포함 테이블을 한 번에 만들어주므로, 본 함수는 "기존 boards.sqlite3 가
+    있는데 updated_at 컬럼만 빠진" 운영 환경의 무중단 마이그레이션 전용이다.
+
+    ## 처리 순서
+    1. PRAGMA table_info 로 updated_at 컬럼 존재 여부 확인.
+    2. 없으면 ADD COLUMN (nullable) → UPDATE backfill(created_at 값으로) 수행.
+    3. 이미 있으면 NOOP — 멱등성 보장.
+
+    ## SQLite ALTER TABLE 제약 우회
+    SQLite 는 NOT NULL + DEFAULT 를 동시에 가진 컬럼을 ALTER TABLE 로 추가할 수 없다.
+    따라서 DB 레벨은 nullable 로 두고, ORM 레벨(mapped_column nullable=False) 에서만
+    NOT NULL 을 강제한다. 신규 row 는 ORM default=_utcnow 가 채운다.
+    """
+    settings = get_settings()
+    boards_path = _resolve_sqlite_path(settings.suggestions_db_url)
+
+    if not boards_path.exists():
+        # 신규 환경 — init_suggestions_db() 가 create_all 로 처리하므로 스킵
+        logger.info(
+            "ensure updated_at column: boards DB 없음 — 신규 환경으로 간주, 건너뜀 ({})",
+            boards_path,
+        )
+        return
+
+    conn = sqlite3.connect(str(boards_path))
+    try:
+        # PRAGMA table_info 로 기존 컬럼 목록 조회
+        rows = conn.execute("PRAGMA table_info(suggestion_comments)").fetchall()
+        existing_columns = {row[1] for row in rows}  # row[1] = 컬럼명
+
+        if "updated_at" in existing_columns:
+            logger.info(
+                "ensure updated_at column: 이미 존재함 — NOOP ({}, suggestion_comments)",
+                boards_path,
+            )
+            return
+
+        logger.info(
+            "ensure updated_at column: suggestion_comments 에 updated_at 컬럼 추가 시작 ({})",
+            boards_path,
+        )
+        # ADD COLUMN 은 nullable 로만 추가 가능 (SQLite 제약)
+        conn.execute(
+            "ALTER TABLE suggestion_comments ADD COLUMN updated_at TIMESTAMP"
+        )
+        # 기존 row 의 updated_at 을 created_at 값으로 backfill (idempotent)
+        conn.execute(
+            "UPDATE suggestion_comments SET updated_at = created_at WHERE updated_at IS NULL"
+        )
+        conn.commit()
+        logger.info(
+            "ensure updated_at column: 완료 — suggestion_comments.updated_at 추가 및 backfill ({}, suggestion_comments)",
+            boards_path,
+        )
+    finally:
+        conn.close()
+
+
+__all__ = ["migrate_suggestions_to_boards", "ensure_suggestion_comment_updated_at_column"]
