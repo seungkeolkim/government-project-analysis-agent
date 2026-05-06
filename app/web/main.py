@@ -59,6 +59,7 @@ from app.scrape_control import cleanup_stale_running_runs
 from app.suggestions import (
     ensure_deleted_at_columns,
     ensure_suggestion_comment_updated_at_column,
+    ensure_updated_at_initial_null_backfill,
     init_suggestions_db,
     migrate_suggestions_to_boards,
 )
@@ -269,6 +270,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # notices)에 deleted_at 컬럼이 없으면 멱등하게 ALTER ADD COLUMN 한다. 신규 환경에서는
     # 아래 init_suggestions_db() 의 create_all 이 컬럼 포함 테이블을 한 번에 만든다.
     ensure_deleted_at_columns()
+
+    # task 00072 — notices/suggestions/suggestion_comments 의 updated_at 을
+    # INSERT 시 NULL 정책으로 정착시킨다. 기존 환경의 테이블 recreate + backfill.
+    # 신규 환경(boards.sqlite3 없음)에서는 아래 init_suggestions_db() 의 create_all
+    # 이 nullable updated_at 포함 테이블을 한 번에 만든다.
+    ensure_updated_at_initial_null_backfill()
 
     # task 00051 — 게시판 별도 DB 의 테이블을 멱등하게 보장한다.
     # 메인 DB(init_db, Alembic) 와 별개의 SQLite 파일이며, 메인 DB reset 시에도

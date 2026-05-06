@@ -1,7 +1,7 @@
-"""게시판 DB 파일명 마이그레이션 헬퍼 (task 00056).
+"""게시판 DB 파일명·스키마 마이그레이션 헬퍼 (task 00056, 00068, 00069, 00072).
 
 기존 운영 환경에 존재하는 ``suggestions.sqlite3`` 파일을 ``boards.sqlite3`` 로
-원자적으로 이름을 바꾼다.
+원자적으로 이름을 바꾸고, 이후 컬럼 추가·제약 변경을 멱등하게 적용한다.
 
 ## 설계 원칙
 - **멱등**: 같은 환경에서 여러 번 실행해도 데이터 유실 없고 동작 변화 없음.
@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sqlite3
 from pathlib import Path
@@ -277,8 +278,223 @@ def ensure_deleted_at_columns() -> None:
         conn.close()
 
 
+def ensure_updated_at_initial_null_backfill() -> None:
+    """notices·suggestions·suggestion_comments 의 updated_at 을 INSERT 시 NULL 정책으로 정착시킨다.
+
+    ## 목적
+    최초 작성(INSERT) 시 updated_at 이 NULL 로 저장되고, 수정(UPDATE) 시에만
+    ORM onupdate 콜러블이 현재 시각을 채우는 정책을 DB 레벨에서 보장한다.
+
+    ## 각 테이블 처리 방식
+    - **notices / suggestions**: updated_at 이 NOT NULL 제약이면 SQLite recreate
+      패턴으로 nullable 로 변경하고, 기존 row 중 updated_at = created_at 인 것
+      (수정 이력 없는 것으로 간주)을 NULL 로 backfill 한다.
+      이미 nullable 이면 backfill UPDATE 만 수행한다.
+    - **suggestion_comments**: 이미 nullable (00068 마이그레이션에서 ADD COLUMN).
+      backfill UPDATE(updated_at = created_at → NULL) 만 수행한다.
+
+    ## 멱등성
+    - notices/suggestions recreate: 이미 nullable 이면 recreate 건너뜀.
+    - backfill UPDATE: WHERE updated_at IS NOT NULL AND updated_at = created_at.
+      이미 NULL 이면 WHERE 절 미매칭 → no-op.
+    - 이 함수를 여러 번 실행해도 데이터가 변하지 않는다.
+
+    ## FK 안전성
+    suggestion_comments → suggestions FK (ON DELETE CASCADE) 가 있으므로,
+    suggestions 테이블 recreate 전에 PRAGMA foreign_keys=OFF 로 비활성화한다.
+    recreation 완료 후 PRAGMA foreign_keys_check 로 무결성을 확인하고 ON 으로 복구.
+    """
+    settings = get_settings()
+    boards_path = _resolve_sqlite_path(settings.suggestions_db_url)
+
+    if not boards_path.exists():
+        logger.info(
+            "ensure updated_at null backfill: boards DB 없음 — 신규 환경, 건너뜀 ({})",
+            boards_path,
+        )
+        return
+
+    # isolation_level=None — 명시적 BEGIN/COMMIT/ROLLBACK 으로 단일 트랜잭션 관리.
+    conn = sqlite3.connect(str(boards_path), isolation_level=None)
+    try:
+        # FK 비활성화는 트랜잭션 외부에서 설정해야 확실히 적용된다.
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("BEGIN")
+        try:
+            for table_name in ("notices", "suggestions"):
+                _ensure_table_updated_at_nullable(conn, table_name, boards_path)
+
+            # suggestion_comments 는 이미 nullable — backfill UPDATE 만 수행
+            _backfill_updated_at_to_null(conn, "suggestion_comments", boards_path)
+
+            violations = conn.execute("PRAGMA foreign_keys_check").fetchall()
+            if violations:
+                raise RuntimeError(
+                    f"FK 무결성 검사 실패 — recreate 롤백: {violations}"
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON")
+    finally:
+        conn.close()
+
+
+def _ensure_table_updated_at_nullable(
+    conn: sqlite3.Connection,
+    table_name: str,
+    boards_path: Path,
+) -> None:
+    """단일 테이블(notices 또는 suggestions) 의 updated_at 을 nullable 로 보장한다.
+
+    NOT NULL 이면 create-copy-drop-rename 패턴으로 제약을 제거하고,
+    기존 row 중 updated_at = created_at 인 것을 NULL 로 backfill 한다.
+    이미 nullable 이면 backfill UPDATE 만 수행한다.
+    """
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    if not rows:
+        logger.info(
+            "ensure updated_at nullable: 테이블 없음, 건너뜀 ({}, {})",
+            table_name,
+            boards_path,
+        )
+        return
+
+    updated_at_info = next((r for r in rows if r[1] == "updated_at"), None)
+    if updated_at_info is None:
+        logger.warning(
+            "ensure updated_at nullable: updated_at 컬럼 없음 — 건너뜀 ({}, {})",
+            table_name,
+            boards_path,
+        )
+        return
+
+    is_not_null = updated_at_info[3] == 1  # PRAGMA table_info row[3] = notnull 플래그
+
+    if not is_not_null:
+        # 이미 nullable — backfill UPDATE 만 수행 (멱등)
+        logger.info(
+            "ensure updated_at nullable: 이미 nullable — backfill UPDATE 수행 ({}, {})",
+            table_name,
+            boards_path,
+        )
+        _backfill_updated_at_to_null(conn, table_name, boards_path)
+        return
+
+    # NOT NULL → recreate 로 nullable 로 변경
+    logger.info(
+        "ensure updated_at nullable: NOT NULL 제약 제거 위해 recreate 시작 ({}, {})",
+        table_name,
+        boards_path,
+    )
+
+    temp_name = f"_{table_name}_updated_at_null_migration"
+
+    # 기존 CREATE TABLE SQL 을 sqlite_master 에서 읽어 updated_at NOT NULL → nullable 로 수정
+    create_sql_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    existing_sql = create_sql_row[0]
+
+    new_sql = re.sub(
+        r"(updated_at\s+DATETIME)\s+NOT\s+NULL",
+        r"\1",
+        existing_sql,
+        flags=re.IGNORECASE,
+    )
+    if new_sql == existing_sql:
+        # 패턴 미매칭 — 이미 nullable 이거나 다른 형태일 수 있으므로 backfill 만 수행
+        logger.warning(
+            "ensure updated_at nullable: NOT NULL 패턴 미매칭 — backfill 만 수행 ({}, {})",
+            table_name,
+            boards_path,
+        )
+        _backfill_updated_at_to_null(conn, table_name, boards_path)
+        return
+
+    # 임시 테이블 이름으로 CREATE TABLE
+    new_sql = re.sub(
+        rf"(?i)\b{re.escape(table_name)}\b",
+        temp_name,
+        new_sql,
+        count=1,
+    )
+    conn.execute(new_sql)
+
+    # 컬럼 목록 기반 INSERT SELECT — updated_at = created_at 인 row 는 NULL 로 backfill
+    column_names = [r[1] for r in rows]
+    select_parts = [
+        "CASE WHEN updated_at = created_at THEN NULL ELSE updated_at END"
+        if col == "updated_at"
+        else col
+        for col in column_names
+    ]
+    cols_joined = ", ".join(column_names)
+    select_joined = ", ".join(select_parts)
+    conn.execute(
+        f"INSERT INTO {temp_name} ({cols_joined}) SELECT {select_joined} FROM {table_name}"
+    )
+
+    # 기존 인덱스 SQL 을 미리 수집해 둔다 (DROP 이후에는 조회 불가)
+    index_rows = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL",
+        (table_name,),
+    ).fetchall()
+
+    # 기존 테이블 삭제 (인덱스도 함께 제거됨)
+    conn.execute(f"DROP TABLE {table_name}")
+
+    # 임시 테이블을 원본 이름으로 교체
+    conn.execute(f"ALTER TABLE {temp_name} RENAME TO {table_name}")
+
+    # 기존 인덱스를 원본 이름으로 재생성 — RENAME 후 테이블명이 복원됐으므로
+    # 원래 인덱스 SQL 을 그대로 사용 가능
+    for index_row in index_rows:
+        conn.execute(index_row[0])
+
+    logger.info(
+        "ensure updated_at nullable: recreate 완료 ({}, {})",
+        table_name,
+        boards_path,
+    )
+
+
+def _backfill_updated_at_to_null(
+    conn: sqlite3.Connection,
+    table_name: str,
+    boards_path: Path,
+) -> None:
+    """updated_at = created_at 인 row 를 NULL 로 backfill 한다.
+
+    수정 이력이 없는 것으로 간주되는 row (최초 작성 시 created_at 과 동일 값) 를
+    NULL 로 변경한다. 멱등성: 이미 NULL 이면 WHERE 절 미매칭 → no-op.
+    """
+    result = conn.execute(
+        f"UPDATE {table_name} SET updated_at = NULL"
+        f" WHERE updated_at IS NOT NULL AND updated_at = created_at"
+    )
+    affected = result.rowcount
+    if affected > 0:
+        logger.info(
+            "ensure updated_at null backfill: {} 행 NULL 로 backfill ({}, {})",
+            affected,
+            table_name,
+            boards_path,
+        )
+    else:
+        logger.info(
+            "ensure updated_at null backfill: backfill no-op ({}, {})",
+            table_name,
+            boards_path,
+        )
+
+
 __all__ = [
     "migrate_suggestions_to_boards",
     "ensure_suggestion_comment_updated_at_column",
     "ensure_deleted_at_columns",
+    "ensure_updated_at_initial_null_backfill",
 ]

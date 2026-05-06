@@ -176,6 +176,8 @@ class SuggestionCommentView:
         is_owner: 현재 로그인 사용자가 이 댓글의 작성자인지 여부 (00064-1).
             비로그인 또는 작성자가 아니면 False. 템플릿에서 수정·삭제 버튼
             노출 여부를 결정하는 데 사용한다.
+        updated_at: 댓글 마지막 수정 시각(UTC). None 이면 수정 이력 없음.
+            템플릿에서 None 이 아닐 때만 '○○에 수정됨' 표시에 사용한다.
     """
 
     comment_id: int
@@ -184,6 +186,7 @@ class SuggestionCommentView:
     display_author_name: str | None
     created_at: datetime
     is_owner: bool
+    updated_at: datetime | None
 
 
 def apply_orphan_policy_to_comments(
@@ -252,6 +255,7 @@ def apply_orphan_policy_to_comments(
                 display_author_name=display_author_name,
                 created_at=comment.created_at,
                 is_owner=is_owner,
+                updated_at=comment.updated_at,
             )
         )
     return views
