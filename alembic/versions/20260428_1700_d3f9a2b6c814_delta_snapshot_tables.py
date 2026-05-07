@@ -31,7 +31,7 @@
 
 downgrade 는 정확히 역순으로 drop_table 한다 (인덱스는 drop_table 이 함께 처리).
 
-검증 절차 (docs/alembic_verification.md 의 3 tier 동일):
+검증 절차 (docs/db_portability.md §4 의 3 tier 동일):
     1. 기존 SQLite (stamp 경로): 운영 DB 사본에 init_db → 데이터 무변경 확인.
     2. 빈 SQLite (baseline-bootstrap): 새 DB 에 alembic upgrade head →
        3 신규 테이블 생성 확인.

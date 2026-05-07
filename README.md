@@ -244,13 +244,13 @@ scrape:
   - `/announcements/{id}` — 공고 상세 + 첨부파일 목록
   - `/attachments/{id}/download` — 첨부파일 다운로드
   - `/announcements`, `/announcements/{id}.json` — JSON API
-  - `/register`, `/login` — 회원가입/로그인 페이지 (Phase 1b)
+  - `/register`, `/login` — 회원가입/로그인 페이지
   - `/auth/register`, `/auth/login`, `/auth/logout` — 인증 처리 엔드포인트 (POST)
   - `/auth/me` — 현재 사용자 JSON (비로그인이면 `{"user": null}`)
 - **SQLite DB**: `./data/db/app.sqlite3`
 - **첨부파일 저장소**: `./data/downloads/{source_type}/{announcement_id}/`
 
-### 사용자 인증 (Phase 1b)
+### 사용자 인증
 
 자유 회원가입 기반의 세션 쿠키 인증이 활성화되어 있다.
 
@@ -282,9 +282,9 @@ scrape:
 
 - **Docker 전용.** 호스트 Python 직접 실행(`python -m app.cli`, `uvicorn` 등)은 지원하지 않는다.
   모든 실행은 `docker compose` 를 통해서만 수행한다.
-- **로컬 전용.** Phase 1b 에서 자유 회원가입 기반 세션 인증이 추가되었지만
-  여전히 팀 내부 로컬망 사용을 전제로 한다. 외부 인터넷에 직접 노출하지 말 것
-  (HTTPS 종단 미적용, CSRF 토큰 미발급, 비밀번호 정책 최소만 강제).
+- **로컬 전용.** 자유 회원가입 기반 세션 인증이 활성화되어 있지만 팀 내부 로컬망
+  사용을 전제로 한다. 외부 인터넷에 직접 노출하지 말 것 (HTTPS 종단 미적용,
+  CSRF 토큰 미발급, 비밀번호 정책 최소만 강제).
 - **차단 방지.** 각 소스가 동일 IP 의 과도한 요청을 차단할 수 있다. `sources.yaml` 의
   `request_delay_sec` (기본 1.5초) 를 너무 짧게 설정하지 말고, `max_pages` 로 범위를 제한해서 사용할 것.
 - **User-Agent/봇 정책.** 대상 사이트의 이용 약관, `robots.txt`, 저작권 정책을 확인하고,

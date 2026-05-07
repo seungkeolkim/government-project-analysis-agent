@@ -336,7 +336,7 @@ docker stop pg_test
 1. `alembic revision -m "설명"` 으로 새 파일 생성
 2. `upgrade()` / `downgrade()` 양방향 구현 필수
 3. `ALTER TABLE` 계열은 반드시 `batch_alter_table`로 감싸기 (SQLite 호환)
-4. 검증은 `docs/alembic_verification.md` 절차를 따른다
+4. 검증은 `docs/db_portability.md §4 — Migration 실행 순서` 의 3 단계(stamp 무변경 / 빈 SQLite bootstrap / Postgres syntax) 를 따른다
 
 ---
 

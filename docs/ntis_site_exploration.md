@@ -289,27 +289,10 @@ DOWNLOAD_ONCLICK_PATTERN = re.compile(
 
 ---
 
-## 9. canonical_identity_design.md §3 대비 신규 발견 사항
+## 9. 정규화·파싱 시 주의 사항
 
-§3에서 기술된 내용은 대부분 정확. 이번 실측에서 추가로 확인된 사항:
-
-1. **`\xa0` (non-breaking space) 및 en-dash(`–`, U+2013) 혼용**: 공고번호에 일반 공백 대신 `\xa0`와 en-dash가 혼재하는 케이스 실측 (`roRndUid=1262576`). 정규화 시 `unicodedata.normalize('NFKC', ...)` + 대시 통일 처리 필수.
-
-2. **공고번호 미포함 케이스 가능**: `roRndUid=1262576`의 경우 `div.se-contents` 파싱에서 공고번호 추출 성공했으나, 일부 공고는 본문 텍스트 형식이 달라 파싱 실패할 수 있음 → fuzzy fallback 중요.
-
-3. **첨부 직접 POST 가능**: §3에서 "Playwright 필요 여부 미확정"이었으나, 실측으로 **httpx POST 직접 다운로드 가능**임이 확인됨. AttachmentDownloader adapter 레벨에서 NTIS 전용 httpx 경로 추가 필요.
-
-4. **상태 코드 확인**: P/B/Y 코드 실측. `canonical_identity_design.md`에 언급 없었음.
-
----
-
-## 10. 이후 subtask 설계 근거
-
-| subtask | 탐사 근거 |
-|---------|---------|
-| 00014-2 (상태 매핑) | NTIS 원문 `접수예정`/`접수중`/`마감` → AnnouncementStatus 직접 1:1 매핑 가능. 별도 변환 코드 단순. |
-| 00014-3 (목록 스크래퍼) | httpx POST `mng.do` + `pageIndex`/`searchStatusList` 파라미터. BeautifulSoup HTML 파싱. |
-| 00014-4 (상세 스크래퍼) | httpx GET `view.do?roRndUid=…`. `div.se-contents` 본문, summary div 구조화 필드. 공고번호 정규식 파싱. |
-| 00014-5 (credentials) | **no-op** — 로그인 불필요. |
-| 00014-7 (첨부 다운로더) | NTIS: httpx POST `wfUid+roTextUid` 직접 → adapter 레벨에서 분기. downloader 자체는 소스 무관 유지. |
-| 00014-8 (cross-source 매칭) | NTIS 공고번호 파싱 후 normalize → IRIS ancmNo normalize와 동일 키 → `official:…` canonical_key 매칭. `\xa0`/dash 처리가 핵심 변수. |
+- 공고번호에 `\xa0` (non-breaking space) 와 en-dash(`–`, U+2013) / em-dash(`—`, U+2014) 가
+  일반 공백·하이픈 대신 혼재한다. 정규화 시 `unicodedata.normalize('NFKC', ...)` + 대시 통일 + 공백 제거가 필수.
+- 일부 공고는 본문 텍스트 형식이 달라 공고번호 추출이 실패할 수 있다 → fuzzy fallback 으로 보완.
+- 첨부 다운로드는 **httpx POST 직접 가능**(Playwright 불필요). adapter 레벨에서 IRIS 와 분기.
+- 상태 코드 P/B/Y 는 `canonical_identity_design.md` 에 명시되지 않은 NTIS 고유 코드이므로 이 문서가 1차 출처.
