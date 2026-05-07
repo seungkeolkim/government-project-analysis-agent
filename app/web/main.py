@@ -26,14 +26,16 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from loguru import logger
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import current_user_optional
 from app.auth.routes import router as auth_router
 from app.config import Settings, get_settings
 from app.db.init_db import init_db
-from app.db.models import Announcement, AnnouncementStatus, User
+from app.db.models import Announcement, AnnouncementStatus, Organization, User
 from app.db.repository import (
+    RELEVANCE_SUMMARY_EMPTY,
     count_announcements,
     count_canonical_groups,
     get_announcement_by_id,
@@ -45,13 +47,14 @@ from app.db.repository import (
     get_folder_tree_for_user,
     list_favorites_with_announcements,
     get_read_announcement_id_set,
-    get_relevance_by_canonical_id_map,
-    get_relevance_history_by_canonical_id_map,
+    get_relevance_history,
+    get_relevance_summary_by_canonical_id_map,
     get_siblings_by_canonical_id_map,
     list_announcements,
     list_canonical_groups,
     mark_announcement_read,
 )
+from app.organizations.service import get_user_organization_ids
 from app.db.session import SessionLocal
 from app.logging_setup import configure_logging
 from app.scheduler import start_scheduler, stop_scheduler
@@ -116,6 +119,38 @@ def get_session() -> Iterator[Session]:
 # ──────────────────────────────────────────────────────────────
 # 직렬화 헬퍼
 # ──────────────────────────────────────────────────────────────
+
+
+def _load_user_organization_options(
+    session: Session, current_user: User | None
+) -> list[dict[str, Any]]:
+    """현재 로그인 사용자가 소속된 조직 목록을 모달 드롭다운용 dict 리스트로 반환한다.
+
+    task 00085 — 관련성 판정 모달의 '조직' 드롭다운에 노출할 옵션을 미리 계산해
+    템플릿 컨텍스트에 주입한다. 단일 조직 소속이면 라디오 라벨에 직접 표시하고,
+    복수 조직 소속이면 라디오 선택 시 드롭다운으로 표시된다.
+
+    비로그인 호출 (current_user is None) 또는 무소속 사용자는 빈 리스트를 반환한다 —
+    템플릿이 옵션 길이로 무소속/단일/복수 케이스를 분기한다.
+
+    Args:
+        session: 호출자 세션.
+        current_user: 현재 로그인 사용자 또는 None.
+
+    Returns:
+        ``[{\"id\": int, \"name\": str}, ...]`` 형태의 리스트. 비로그인/무소속이면 빈 리스트.
+    """
+    if current_user is None:
+        return []
+    organization_ids = get_user_organization_ids(session, current_user.id)
+    if not organization_ids:
+        return []
+    organizations = session.execute(
+        select(Organization)
+        .where(Organization.id.in_(organization_ids))
+        .order_by(Organization.name.asc())
+    ).scalars().all()
+    return [{"id": org.id, "name": org.name} for org in organizations]
 
 
 def _serialize_announcement(announcement: Announcement, *, group_size: int = 1) -> dict[str, Any]:
@@ -480,23 +515,25 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     user_id=current_user.id,
                     announcement_ids=representative_ids,
                 )
-                # Phase 3a — 관련성 batch 조회 (N+1 방지: 쿼리 2개 추가).
-                canonical_ids = list({
-                    gr.representative.canonical_group_id
-                    for gr in groups
-                    if gr.representative.canonical_group_id is not None
-                })
-                relevance_map = get_relevance_by_canonical_id_map(session, canonical_ids)
-                history_map = get_relevance_history_by_canonical_id_map(session, canonical_ids)
-                my_relevance_map = {
-                    cid: next((rj for rj in rjs if rj.user_id == current_user.id), None)
-                    for cid, rjs in relevance_map.items()
-                }
             else:
                 read_id_set = set()
-                relevance_map = {}
-                history_map = {}
-                my_relevance_map = {}
+
+            # task 00085 — 관련성 summary batch 조회 (페이지당 추가 쿼리 1 개로 고정).
+            # current_user is None 인 비로그인 호출도 같은 헬퍼로 처리되며 mine 영역만
+            # 비고 OTHERS 카운터가 채워진다 (사용자 modify 턴 결정 3 — 비로그인 = 동일 노출).
+            canonical_ids = list({
+                gr.representative.canonical_group_id
+                for gr in groups
+                if gr.representative.canonical_group_id is not None
+            })
+            relevance_summary_map = get_relevance_summary_by_canonical_id_map(
+                session,
+                user_id=current_user.id if current_user is not None else None,
+                canonical_project_ids=canonical_ids,
+            )
+            user_organization_options = _load_user_organization_options(
+                session, current_user
+            )
 
             return templates.TemplateResponse(
                 request,
@@ -518,10 +555,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     # Phase 1b — base.html 상단 네비 + 목록 bold/normal 분기에 필요.
                     "current_user": current_user,
                     "read_id_set": read_id_set,
-                    # Phase 3a — 관련성 배지 batch 데이터.
-                    "relevance_map": relevance_map,
-                    "history_map": history_map,
-                    "my_relevance_map": my_relevance_map,
+                    # task 00085 — 관련성 요약 batch (mine_personal / mine_organization /
+                    # others / 카운터). 비로그인 / 로그인 모두 동일 키로 주입.
+                    "relevance_summary_map": relevance_summary_map,
+                    "relevance_summary_empty": RELEVANCE_SUMMARY_EMPTY,
+                    "user_organization_options": user_organization_options,
                     # Phase 3b — group_mode 에서는 expand/별 없음; undefined 방지.
                     "siblings_map": {},
                     "favorite_entry_map": {},
@@ -575,23 +613,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     user_id=current_user.id,
                     announcement_ids=announcement_ids,
                 )
-                # Phase 3a — 관련성 batch 조회 (N+1 방지: 쿼리 2개 추가).
-                canonical_ids = list({
-                    ann.canonical_group_id
-                    for ann, _ in ann_with_sizes
-                    if ann.canonical_group_id is not None
-                })
-                relevance_map = get_relevance_by_canonical_id_map(session, canonical_ids)
-                history_map = get_relevance_history_by_canonical_id_map(session, canonical_ids)
-                my_relevance_map = {
-                    cid: next((rj for rj in rjs if rj.user_id == current_user.id), None)
-                    for cid, rjs in relevance_map.items()
-                }
                 # Phase 3b (task 00037 갱신) — 별 아이콘 초기 상태 (announcement → entry_id).
-                # FavoriteEntry 가 announcement 단위로 바뀌었으므로 현재 페이지의
-                # announcement.id 목록으로 맵을 조회한다. data-entry-id 는 공고 row 에
-                # 붙고, 같은 announcement 가 여러 폴더에 담겨 있을 경우 MIN(entry_id)
-                # 가 대표로 선택된다.
                 favorite_entry_map = get_favorite_entry_map(
                     session,
                     user_id=current_user.id,
@@ -599,10 +621,24 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 )
             else:
                 read_id_set = set()
-                relevance_map = {}
-                history_map = {}
-                my_relevance_map = {}
                 favorite_entry_map = {}
+
+            # task 00085 — 관련성 summary batch 조회 (비로그인도 동일 노출).
+            # 페이지당 추가 쿼리 1 개로 mine_personal / mine_organization / others /
+            # 카운터를 모두 받는다.
+            canonical_ids = list({
+                ann.canonical_group_id
+                for ann, _ in ann_with_sizes
+                if ann.canonical_group_id is not None
+            })
+            relevance_summary_map = get_relevance_summary_by_canonical_id_map(
+                session,
+                user_id=current_user.id if current_user is not None else None,
+                canonical_project_ids=canonical_ids,
+            )
+            user_organization_options = _load_user_organization_options(
+                session, current_user
+            )
 
             return templates.TemplateResponse(
                 request,
@@ -624,10 +660,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     # Phase 1b — base.html 상단 네비 + 목록 bold/normal 분기에 필요.
                     "current_user": current_user,
                     "read_id_set": read_id_set,
-                    # Phase 3a — 관련성 배지 batch 데이터.
-                    "relevance_map": relevance_map,
-                    "history_map": history_map,
-                    "my_relevance_map": my_relevance_map,
+                    # task 00085 — 관련성 요약 batch.
+                    "relevance_summary_map": relevance_summary_map,
+                    "relevance_summary_empty": RELEVANCE_SUMMARY_EMPTY,
+                    "user_organization_options": user_organization_options,
                     # Phase 3b — 동일과제 expand 데이터 (비로그인 포함).
                     "siblings_map": siblings_map,
                     # Phase 3b — 별 아이콘 초기 상태 (로그인 시만).
@@ -687,17 +723,28 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
         attachments = get_attachments_by_announcement(session, announcement_id)
 
-        # Phase 3a — 로그인 사용자에 한해 canonical 관련성 판정 배지 데이터를 조회.
-        # session 은 mark_announcement_read + commit 이후에도 계속 사용 가능.
-        if current_user is not None and announcement.canonical_group_id is not None:
-            _cid = announcement.canonical_group_id
-            _rel_map = get_relevance_by_canonical_id_map(session, [_cid])
-            _rj_list = _rel_map.get(_cid, [])
-            _my_rj = next((rj for rj in _rj_list if rj.user_id == current_user.id), None)
-            _hist_map = get_relevance_history_by_canonical_id_map(session, [_cid])
-            _hist_list = _hist_map.get(_cid, [])
-            # Phase 3b (task 00037 갱신) — 별 아이콘 초기 상태.
-            # announcement 단위 저장 전환으로 현재 상세 공고 id 하나만으로 조회한다.
+        # task 00085 — 관련성 summary 조회 (비로그인 = 로그인 동일 노출).
+        # canonical_group_id 가 있을 때만 의미가 있다. _cid 가 None 이면 빈 summary 로 대체.
+        canonical_group_id = announcement.canonical_group_id
+        if canonical_group_id is not None:
+            relevance_summary_map = get_relevance_summary_by_canonical_id_map(
+                session,
+                user_id=current_user.id if current_user is not None else None,
+                canonical_project_ids=[canonical_group_id],
+            )
+            relevance_summary = relevance_summary_map.get(
+                canonical_group_id, RELEVANCE_SUMMARY_EMPTY
+            )
+            # 상세 페이지 하단의 판정 이력 섹션은 history 헬퍼로 별도 조회 (canonical 1 개).
+            history_items = get_relevance_history(
+                session, canonical_project_id=canonical_group_id
+            )
+        else:
+            relevance_summary = RELEVANCE_SUMMARY_EMPTY
+            history_items = []
+
+        # 즐겨찾기 별 아이콘 초기 상태 — 로그인 사용자에게만 의미가 있다.
+        if current_user is not None:
             _fav_map = get_favorite_entry_map(
                 session,
                 user_id=current_user.id,
@@ -705,20 +752,21 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             )
             _fav_entry_id: int | None = _fav_map.get(announcement.id)
         else:
-            _cid = None
-            _rj_list = []
-            _my_rj = None
-            _hist_list = []
             _fav_entry_id = None
 
+        # 모달 드롭다운에 채울 본인 소속 조직 목록 (비로그인이면 빈 리스트).
+        user_organization_options = _load_user_organization_options(
+            session, current_user
+        )
+
         # 동일과제 섹션 — 비로그인도 표시. 현재 공고는 목록에서 제외.
-        if announcement.canonical_group_id is not None:
+        if canonical_group_id is not None:
             _sib_map = get_siblings_by_canonical_id_map(
-                session, [announcement.canonical_group_id]
+                session, [canonical_group_id]
             )
             _siblings = [
                 s
-                for s in _sib_map.get(announcement.canonical_group_id, [])
+                for s in _sib_map.get(canonical_group_id, [])
                 if s["id"] != announcement.id
             ]
         else:
@@ -732,11 +780,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 "attachments": attachments,
                 # Phase 1b — base.html 상단 네비 분기에 필요.
                 "current_user": current_user,
-                # Phase 3a — 관련성 배지 데이터.
-                "canonical_id": _cid,
-                "rj_list": _rj_list,
-                "my_rj": _my_rj,
-                "hist_list": _hist_list,
+                # task 00085 — 관련성 요약 + 이력 + 모달 드롭다운 옵션.
+                "canonical_id": canonical_group_id,
+                "relevance_summary": relevance_summary,
+                "relevance_summary_empty": RELEVANCE_SUMMARY_EMPTY,
+                "history_items": history_items,
+                "user_organization_options": user_organization_options,
                 # Phase 3b — 동일과제 섹션 (비로그인 포함).
                 "siblings": _siblings,
                 # Phase 3b — 별 아이콘 초기 상태 (로그인 시만).
@@ -784,28 +833,22 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             )
             total_pages = max(1, ceil(total / page_size))
 
-        # 관련성 배지 데이터 (즐겨찾기 항목의 canonical_project_id 목록)
-        # task 00037 — announcement 단위 저장으로 항목별 canonical_project_id 는
-        # None 일 수 있다(canonical 미매칭 공고). 배지 조회 대상에서 None 은 제외.
+        # task 00085 — 즐겨찾기 페이지의 관련성 summary batch 조회.
+        # favorites 페이지는 비로그인이 위 분기에서 redirect 되므로 항상 current_user 가 있다.
+        # canonical_project_id 가 None 인 항목은 summary 조회 대상에서 제외된다.
         canonical_ids = [
             it["canonical_project_id"]
             for it in items
             if it.get("canonical_project_id") is not None
         ]
-        relevance_map: dict = {}
-        history_map: dict = {}
-        my_relevance_map: dict = {}
-        if canonical_ids:
-            relevance_map = get_relevance_by_canonical_id_map(session, canonical_ids)
-            history_map = get_relevance_history_by_canonical_id_map(
-                session, canonical_ids
-            )
-            my_relevance_map = {
-                cid: next(
-                    (rj for rj in rjs if rj.user_id == current_user.id), None
-                )
-                for cid, rjs in relevance_map.items()
-            }
+        relevance_summary_map = get_relevance_summary_by_canonical_id_map(
+            session,
+            user_id=current_user.id,
+            canonical_project_ids=canonical_ids,
+        )
+        user_organization_options = _load_user_organization_options(
+            session, current_user
+        )
 
         # task 00037 plan_review 추가요청 — 즐겨찾기 테이블도 목록 페이지와 동일하게
         # 읽음/안읽음에 따라 제목 일반/bold 로 분기하기 위해 read_id_set 을 주입한다.
@@ -836,9 +879,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 "page": page,
                 "page_size": page_size,
                 "total_pages": total_pages,
-                "relevance_map": relevance_map,
-                "history_map": history_map,
-                "my_relevance_map": my_relevance_map,
+                # task 00085 — 관련성 요약 batch + 모달 드롭다운 옵션.
+                "relevance_summary_map": relevance_summary_map,
+                "relevance_summary_empty": RELEVANCE_SUMMARY_EMPTY,
+                "user_organization_options": user_organization_options,
                 # task 00037 plan_review 추가요청 — read/unread bold 분기용.
                 "read_id_set": read_id_set,
             },

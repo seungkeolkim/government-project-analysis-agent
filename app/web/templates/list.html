@@ -9,31 +9,33 @@
     - Phase 3a — 관련성 배지 컬럼 + 체크박스 bulk 읽음/안읽음
 
   입력 컨텍스트 (main.py index_page 가 주입):
-    - group_mode:       bool
-    - ann_with_sizes:   list[tuple[Announcement, int]]  (group_mode=False 시)
-    - groups:           list[CanonicalGroupRow]          (group_mode=True 시)
-    - total:            int
-    - page:             int  (1-based)
-    - page_size:        int
-    - total_pages:      int
-    - status:           str  (선택된 상태 값 또는 빈 문자열)
-    - search:           str  (검색어 또는 빈 문자열)
-    - source:           str  (선택된 소스 또는 빈 문자열)
-    - sort:             str  (received_desc | deadline_asc | title_asc)
-    - group:            str  (on | off)
-    - available_sources: list[str]
-    - current_user:     User | None  (상단 네비 분기용)
-    - read_id_set:      set[int]  (Phase 1b — 로그인 사용자의 읽은 공고 id.
-                                   비로그인 시 빈 set.)
-    - relevance_map:    dict[int, list[RelevanceJudgment]]  (Phase 3a — canonical_id → 전체 사용자 판정)
-    - history_map:      dict[int, list[HistoryWithUser]]    (Phase 3a — canonical_id → 판정 이력)
-    - my_relevance_map: dict[int, RelevanceJudgment|None]   (Phase 3a — canonical_id → 현재 사용자 판정)
-    - siblings_map:     dict[int, list[dict]]               (Phase 3b — canonical_id → 동일 과제 목록)
-    - favorite_entry_map: dict[int, int]                    (Phase 3b — canonical_id → entry_id. 비로그인 시 빈 dict.)
+    - group_mode:               bool
+    - ann_with_sizes:           list[tuple[Announcement, int]]  (group_mode=False 시)
+    - groups:                   list[CanonicalGroupRow]          (group_mode=True 시)
+    - total:                    int
+    - page:                     int  (1-based)
+    - page_size:                int
+    - total_pages:              int
+    - status:                   str  (선택된 상태 값 또는 빈 문자열)
+    - search:                   str  (검색어 또는 빈 문자열)
+    - source:                   str  (선택된 소스 또는 빈 문자열)
+    - sort:                     str  (received_desc | deadline_asc | title_asc)
+    - group:                    str  (on | off)
+    - available_sources:        list[str]
+    - current_user:             User | None  (상단 네비 분기용)
+    - read_id_set:              set[int]  (Phase 1b — 로그인 사용자의 읽은 공고 id.
+                                           비로그인 시 빈 set.)
+    - relevance_summary_map:    dict[int, RelevanceSummary]  (task 00085 — canonical_id → 요약)
+    - relevance_summary_empty:  RelevanceSummary             (task 00085 — 미존재 canonical default)
+    - user_organization_options: list[dict]                  (task 00085 — 모달 드롭다운용. 비로그인이면 빈 리스트)
+    - siblings_map:             dict[int, list[dict]]        (Phase 3b — canonical_id → 동일 과제 목록)
+    - favorite_entry_map:       dict[int, int]               (Phase 3b — canonical_id → entry_id. 비로그인 시 빈 dict.)
 
   컬럼 수 계산 (colspan 에 사용):
-    비로그인: 5  (제목 / 기관 / 소스 / 상태 / 마감일)
-    로그인:   7  (체크박스 + 위 5개 + 관련성)
+    비로그인: 6  (제목 / 기관 / 소스 / 상태 / 마감일 / 관련성)
+    로그인:   7  (체크박스 + 위 6개)
+  task 00085 결정 3 (비로그인 = 로그인 동일 노출) 로 관련성 컬럼은 비로그인도 표시한다.
+  비로그인은 본인 영역(클릭 가능 배지·모달)만 비활성화되고 카운터·OTHERS 정보는 동일 노출.
 #}
 {% from "_relevance_badge_macro.html" import relevance_badge %}
 {% extends "base.html" %}
@@ -137,8 +139,8 @@
                 <th class="col-source">소스</th>
                 <th class="col-status">접수 상태</th>
                 <th class="col-deadline">마감일</th>
-                {# Phase 3a — 관련성 컬럼: 로그인 시에만 렌더. 비로그인은 컬럼 자체 제거(colspan 오류 방지). #}
-                {% if current_user %}<th class="col-relevance">관련성</th>{% endif %}
+                {# task 00085 — 관련성 컬럼은 로그인/비로그인 모두 표시 (결정 3). #}
+                <th class="col-relevance">관련성</th>
             </tr>
         </thead>
         <tbody>
@@ -202,24 +204,21 @@
                         -
                     {% endif %}
                 </td>
-                {# Phase 3a — 관련성 배지 셀 (로그인 시에만) #}
-                {% if current_user %}
+                {# task 00085 — 관련성 배지 셀: 로그인/비로그인 모두 표시 (결정 3). #}
                 <td class="col-relevance">
                     {% set cid = gr.representative.canonical_group_id %}
                     {% if cid %}
                     {{ relevance_badge(
                         cid,
-                        relevance_map.get(cid, []),
-                        my_relevance_map.get(cid),
-                        history_map.get(cid, [])
+                        relevance_summary_map.get(cid, relevance_summary_empty),
+                        current_user
                     ) }}
                     {% else %}-{% endif %}
                 </td>
-                {% endif %}
             </tr>
             {% else %}
             <tr>
-                <td colspan="{% if current_user %}7{% else %}5{% endif %}" class="empty-row">조건에 맞는 공고가 없습니다.</td>
+                <td colspan="{% if current_user %}7{% else %}6{% endif %}" class="empty-row">조건에 맞는 공고가 없습니다.</td>
             </tr>
             {% endfor %}
 
@@ -284,25 +283,22 @@
                         -
                     {% endif %}
                 </td>
-                {# Phase 3a — 관련성 배지 셀 (로그인 시에만) #}
-                {% if current_user %}
+                {# task 00085 — 관련성 배지 셀: 로그인/비로그인 모두 표시 (결정 3). #}
                 <td class="col-relevance">
                     {% set cid = ann.canonical_group_id %}
                     {% if cid %}
                     {{ relevance_badge(
                         cid,
-                        relevance_map.get(cid, []),
-                        my_relevance_map.get(cid),
-                        history_map.get(cid, [])
+                        relevance_summary_map.get(cid, relevance_summary_empty),
+                        current_user
                     ) }}
                     {% else %}-{% endif %}
                 </td>
-                {% endif %}
             </tr>
             {# Phase 3b — 동일과제 expand 행 (비로그인 포함). 서버 렌더, 기본 숨김. #}
             {% if group_size > 1 and ann.canonical_group_id is not none %}
             <tr id="siblings-row-{{ ann.id }}" class="siblings-expand-row" style="display:none">
-                <td colspan="{% if current_user %}7{% else %}5{% endif %}" class="siblings-expand-cell">
+                <td colspan="{% if current_user %}7{% else %}6{% endif %}" class="siblings-expand-cell">
                     <ul class="siblings-list">
                         {% for sib in siblings_map.get(ann.canonical_group_id, []) %}
                         {% if sib.id != ann.id %}
@@ -333,7 +329,7 @@
             {% endif %}
             {% else %}
             <tr>
-                <td colspan="{% if current_user %}7{% else %}5{% endif %}" class="empty-row">조건에 맞는 공고가 없습니다.</td>
+                <td colspan="{% if current_user %}7{% else %}6{% endif %}" class="empty-row">조건에 맞는 공고가 없습니다.</td>
             </tr>
             {% endfor %}
             {% endif %}
