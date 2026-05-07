@@ -55,9 +55,10 @@ code {
 
 /* ---------- 레이아웃 ---------- */
 .container {
-    max-width: 1100px;
+    max-width: 100%;
     margin: 0 auto;
-    padding: 0 20px;
+    /* 좌우 패딩만 남겨 콘텐츠 영역을 극대화 (task 00079) */
+    padding: 0 12px;
 }
 
 .site-header {
