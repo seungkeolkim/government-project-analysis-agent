@@ -27,6 +27,7 @@ from app.db.models import (
     AnnouncementStatus,
     AnnouncementUserState,
     Attachment,
+    Organization,
     RelevanceJudgment,
     RelevanceJudgmentHistory,
     User,
@@ -367,3 +368,78 @@ def test_new_version_reset_is_safe_without_users(db_session: Session) -> None:
     assert (
         len(list(db_session.execute(select(RelevanceJudgmentHistory)).scalars())) == 0
     )
+
+
+# ── (6) test_content_changed_reset_preserves_organization_id ─────────────────
+
+
+def test_content_changed_reset_preserves_organization_id(db_session: Session) -> None:
+    """task 00085 회귀: content_changed reset 시 organization_id 가 History 에 보존돼야 한다.
+
+    검증 시나리오 (사용자 원문 검증 13):
+      - 본인 개인 row (organization_id IS NULL) + 본인 조직 row (organization_id 정수)
+        가 같은 canonical 에 공존하는 상태에서 title 변경 → new_version + 리셋.
+      - 두 row 모두 RelevanceJudgmentHistory 로 이관되어야 하며,
+        archive_reason='content_changed' 이고 organization_id 값이 정확히 복사돼야 한다.
+    """
+    user = _make_user(db_session, "org_reset_user")
+    org = Organization(name="조직-content-changed")
+    db_session.add(org)
+    db_session.flush()
+
+    first = upsert_announcement(db_session, _payload_for("ORG-RESET-1"))
+    canonical_id = first.announcement.canonical_group_id
+    assert canonical_id is not None
+
+    # 본인 개인 row + 본인 조직 row 동시 생성 — task 00085 의 안 1 단일 UNIQUE 가
+    # 트리플 (canonical, user, organization_id) 로 슬롯이 분리됨을 활용.
+    db_session.add(
+        RelevanceJudgment(
+            canonical_project_id=canonical_id,
+            user_id=user.id,
+            organization_id=None,
+            verdict="관련",
+            reason="개인",
+            decided_at=datetime.now(tz=UTC),
+        )
+    )
+    db_session.add(
+        RelevanceJudgment(
+            canonical_project_id=canonical_id,
+            user_id=user.id,
+            organization_id=org.id,
+            verdict="무관",
+            reason="조직",
+            decided_at=datetime.now(tz=UTC),
+        )
+    )
+    db_session.flush()
+
+    # 내용 변경(title) → new_version + content_changed reset
+    second = upsert_announcement(
+        db_session,
+        _payload_for("ORG-RESET-1", title="변경된 제목"),
+    )
+    assert second.action == "new_version"
+
+    # 활성 row 0 건, 이력 2 건이어야 한다.
+    active = list(db_session.execute(select(RelevanceJudgment)).scalars())
+    history = list(
+        db_session.execute(
+            select(RelevanceJudgmentHistory).where(
+                RelevanceJudgmentHistory.canonical_project_id == canonical_id
+            )
+        ).scalars()
+    )
+    assert len(active) == 0, "원본 RelevanceJudgment 가 모두 이관·삭제돼야 한다."
+    assert len(history) == 2, "개인 row + 조직 row 두 건 모두 History 로 이관돼야 한다."
+
+    # archive_reason 모두 content_changed 이고 organization_id 가 1 개는 NULL,
+    # 1 개는 org.id 로 보존됨을 검증.
+    assert all(h.archive_reason == "content_changed" for h in history)
+    organization_ids_archived = sorted(
+        h.organization_id for h in history if h.organization_id is not None
+    )
+    none_count = sum(1 for h in history if h.organization_id is None)
+    assert organization_ids_archived == [org.id]
+    assert none_count == 1
