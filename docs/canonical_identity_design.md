@@ -538,9 +538,10 @@ NTIS canonical_key : official:과학기술정보통신부공고제2026-0484호  
 
 ---
 
-## 11. 알려진 false-positive (00036-2 감사 결과)
+## 11. 알려진 false-positive
 
-> 감사 일시: 2026-04-24. 상세: [docs/canonical_grouping_audit_00036.md](canonical_grouping_audit_00036.md)
+> 본 절은 운영 DB 감사 결과(2026-04-24 시점) 와, 그 후 합성 키 도입(00039) 으로 자동 해소된 케이스를
+> 함께 기록한다. 자세한 분석은 [docs/duplicate_detection_analysis.md](duplicate_detection_analysis.md).
 
 ### 11-1. official scheme N:1 구조와 false-positive 경계
 
@@ -587,8 +588,7 @@ TODO split: canonical_group_id=32 (ann 33+34)
 
 ### 11-6. 00039 후속 감사 — 합성 키 도입 후 (2026-04-28 시점)
 
-> 감사 일시: 2026-04-28. 검증 캡처: [`docs/00039-3-verification.md`](00039-3-verification.md).
-> 분석 근거: [`docs/duplicate_detection_analysis.md`](duplicate_detection_analysis.md).
+> 감사 일시: 2026-04-28. 분석 근거: [`docs/duplicate_detection_analysis.md`](duplicate_detection_analysis.md).
 
 DB 초기화 후 신규 합성 키(`official:{ancmNo}::{title}`) 로 IRIS+NTIS 1 페이지씩
 재수집(52건) 한 결과:

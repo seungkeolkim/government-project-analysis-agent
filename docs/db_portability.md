@@ -196,7 +196,12 @@ def downgrade() -> None:
 
 ### Migration 실행 순서
 
-새 migration을 추가할 때는 `docs/alembic_verification.md`의 검증 절차를 따른다.
+새 migration 을 추가할 때는 다음 3 단계 검증을 거친다.
+
+1. **기존 SQLite (stamp 경로)**: 운영 DB 사본에 `init_db()` → `alembic_version` 만 갱신, 데이터 무변경 확인.
+2. **빈 SQLite (baseline-bootstrap)**: 새 DB 에 `alembic upgrade head` → 신규 테이블·컬럼이 모두 생성되는지 확인.
+3. **Postgres syntax 호환**: dialect 중립 SQL(범용 `sa.JSON`, `String(N)`, `DateTime(timezone=True)` 등)
+   외에 sqlite-only 표현이 들어가지 않았는지 점검. ALTER TABLE 은 반드시 `op.batch_alter_table` 로 감싼다.
 
 ---
 
@@ -300,7 +305,6 @@ Phase 1a 의 FK 삭제 정책은 docs/schema_phase1a.md §3 에 요약되어 있
 - [ ] `alembic downgrade -1` 로 신규 13 개 테이블이 모두 DROP 되고
       alembic_version 이 `a8f3c2d14e7b` (baseline) 로 되돌아감을 확인
 - [ ] 다시 `alembic upgrade head` 를 실행해 멱등성 + 재현 가능성 확인
-- [ ] 세부 실행 로그는 docs/alembic_verification.md 의 Phase 1a 섹션 참조
 
 ### 2차 변경 감지 + 리셋 유닛 테스트
 

@@ -406,40 +406,20 @@ fuzzy scheme (ancmNo 부재 시 — 현행 그대로):
    허위 중복으로 정의한 케이스 유형) 으로 본다. 만약 운영 중 "재공고 시 사소한 제목 변경(예: 마감일 포함)" 이
    다수 관찰되면 추후 별도 보정 로직(canonical_overrides merge 또는 정규화 추가) 으로 처리.
 2. **NTIS 외 신규 source 추가 시**: title 표기 변이 패턴 재조사 필요. 신규 정규화 규칙 추가 형태로 점진 보강.
-3. **`canonical_overrides` Phase 5 의 split TODO 가 알고리즘 수준에서 자동 해소됨**:
-   `docs/canonical_grouping_audit_00036.md §3-3` 의 group 32 (ann 33,34) split TODO 는 현 시점 DB 에는 더 이상
-   존재하지 않으나(이력 row 가 아니라 새 데이터셋), 동일 패턴 출현 시 알고리즘이 자동 분리하므로 manual override
-   필요성이 줄어든다.
+3. **`canonical_overrides` 의 split TODO 가 알고리즘 수준에서 자동 해소됨**: 동일 ancmNo 아래 별개 세부공고가
+   같은 그룹으로 잘못 묶이던 케이스(과거 감사 시 group 32: ann 33+34)는 합성 키 도입으로 자동 분리되므로
+   manual override 의 필요성이 줄어든다.
 
 ---
 
-## 9. 후속 작업 제안 (본 task 종료 후)
-
-본 subtask 의 acceptance 는 **본 문서 작성 1 건**으로 충족된다. 후속 코드 변경은 사용자 확인 후 별도 task 로 진행한다.
-다음 작업 단계를 사전 정리한다.
-
-1. **canonical_key 정의 변경**: `app/canonical.py:compute_canonical_key` 에 title 정규화 + 합성 키 로직 추가.
-   `_normalize_official_title` 헬퍼 신규 추가.
-2. **repository 변경 없음 예상**: `_apply_canonical` 의 흐름은 유지. `compute_canonical_key` 의 반환값만 새 형식이
-   되도록 한다.
-3. **Backfill**: `scripts/backfill_canonical.py` 를 신규 키 정의로 1 회 실행. dry-run 으로 group 분리 수 사전 확인.
-4. **검증**: `scripts/verify_canonical_iris.py` 시나리오 A~D + `scripts/verify_canonical_cross_source.py` E~H +
-   `scripts/audit_canonical_false_positives.py` 재실행. group 5, 25 가 분리되었는지 확인.
-5. **테스트 추가**: `tests/test_canonical.py` 등에 false-positive 분리 케이스 (5/6, 26/27/28/29) 와 cross-source
-   유지 케이스 (16/35 NTIS suffix 정규화) 회귀 테스트 신설.
-6. **문서 갱신**:
-   - `docs/canonical_identity_design.md §4-1, §11`: 신규 키 포맷 + 알려진 false-positive 해소 반영.
-   - `docs/canonical_grouping_audit_00036.md`: §5 Phase 5 TODO 항목 업데이트(알고리즘 해결로 표시).
-   - `PROJECT_NOTES.md`: 본 변경 요약 추가.
-7. **(선택) UI 영향 점검**: 즐겨찾기·검색·중복 표시 UI 가 `canonical_group_id` 단위로 동작하는 부분이 있다면 그룹 수 증가에 따른 영향 점검.
+> **참고**: §8 권장 방안(합성 키 + title 정규화) 은 task 00039 에서 구현·머지되었고, 운영 DB 도 신 키로
+> 재계산 완료됐다. 본 문서는 결정의 **근거 자료** 로 보존된다. 현재 canonical 키 포맷·정규화 규칙은
+> `docs/canonical_identity_design.md §4-1 / §11-6` 와 `app/canonical.py` 가 source of truth 다.
 
 ---
 
-## 10. 참고
+## 9. 참고
 
 - `docs/canonical_identity_design.md` §2-3 (N:1 구조), §4-1 (official key 정규화), §11 (알려진 false-positive)
-- `docs/canonical_grouping_audit_00036.md` §3-2 (다중 그룹 수동 분류), §5 (Phase 5 TODO)
 - `app/canonical.py` `compute_canonical_key`, `_normalize_official_key`, `_normalize_fuzzy_title`
-- `app/db/repository.py:159` `_apply_canonical` (UPSERT 4-branch 통합)
-- `app/db/repository.py:1072` `recompute_canonical_with_ancm_no` (fuzzy → official 승급)
-- `scripts/audit_canonical_false_positives.py` 임계값 상수 + 분류 기준
+- `app/db/repository.py` `_apply_canonical` (UPSERT 4-branch 통합), `recompute_canonical_with_ancm_no` (fuzzy → official 승급)
