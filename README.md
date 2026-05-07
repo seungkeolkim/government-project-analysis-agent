@@ -154,20 +154,41 @@ docker compose run --rm scraper alembic downgrade -1
 
 Docker 와 docker compose v2 이상이 설치되어 있어야 한다.
 
-### 1) 이미지 빌드 (최초 1회 또는 코드 변경 후)
+모든 docker compose 호출은 wrapper 스크립트 `scripts/compose.sh <mode> ...` 를 통해 수행한다.
+
+| mode | 사용 compose 파일 | 동작 |
+|------|------------------|------|
+| `dev` | `docker-compose.yml` + `docker-compose.dev.yml` | uvicorn `--reload` 활성화. 호스트 `./app` 바인드 마운트와 짝을 이뤄 코드 변경이 자동 반영 |
+| `prod` | `docker-compose.yml` 만 | 이미지에 고정된 코드로 단일 프로세스 기동 (reload 비활성) |
+
+`mode` 뒤에 오는 모든 인자는 `docker compose` 에 그대로 전달된다.
+
+### 1) 이미지 빌드 (최초 1회 또는 아래 변경이 있을 때만)
 
 ```bash
-docker compose build
+scripts/compose.sh dev build     # 또는 prod build
 ```
+
+> dev 모드에서는 **코드(.py / Jinja 템플릿 / static 리소스) 변경이 자동 반영**되므로
+> 일반적인 코드 수정 후에는 재빌드가 필요 없다. 다음 변경에 한해서만 재빌드한다:
+> - `docker/Dockerfile`
+> - `pyproject.toml` / `uv.lock` (의존성 변경)
+> - `alembic/versions/` 의 신규 migration 파일
+> - `docker/entrypoint.sh`
+> - `sources.yaml.template`
 
 ### 2) 웹 UI 기동
 
 ```bash
-docker compose up app
+# 개발 (코드 변경 자동 반영, uvicorn --reload)
+scripts/compose.sh dev up app
+
+# 운영 (이미지 코드 고정)
+scripts/compose.sh prod up app
 ```
 
 - 기동 후 브라우저에서 <http://localhost:8000> 로 접속한다.
-- 종료는 `Ctrl+C` 또는 별도 터미널에서 `docker compose down`.
+- 종료는 `Ctrl+C` 또는 별도 터미널에서 `scripts/compose.sh dev down` (또는 `prod down`).
 
 ### 3) 스크래퍼 실행
 
@@ -175,7 +196,9 @@ docker compose up app
 **실행 파라미터는 모두 `sources.yaml` 의 `scrape:` 섹션에서 설정한다.**
 
 ```bash
-docker compose --profile scrape run --rm scraper
+scripts/compose.sh dev --profile scrape run --rm scraper
+# 운영 환경 검증이 필요하면:
+scripts/compose.sh prod --profile scrape run --rm scraper
 ```
 
 `sources.yaml` 에서 `enabled: true` 인 소스를 `scrape.active_sources` 순서 또는
@@ -187,7 +210,7 @@ docker compose --profile scrape run --rm scraper
 
 #### 자주 쓰는 설정 패턴
 
-설정을 변경한 뒤 `docker compose --profile scrape run --rm scraper` 를 실행한다.
+설정을 변경한 뒤 `scripts/compose.sh dev --profile scrape run --rm scraper` 를 실행한다.
 
 ```yaml
 # NTIS 만 소량 검증 (드라이런)
@@ -284,12 +307,12 @@ scrape:
    - [ ] `sources.yaml` 의 `scrape:` 섹션이 의도한 파라미터로 설정되어 있다.
    - [ ] `./data/db`, `./data/downloads` 디렉터리가 존재한다(비어 있어도 됨).
 2. **Docker 빌드 & 기동**
-   - [ ] `docker compose build` 가 에러 없이 완료된다.
-   - [ ] `docker compose up app` 후 <http://localhost:8000> 가 200 을 반환한다.
+   - [ ] `scripts/compose.sh dev build` 가 에러 없이 완료된다.
+   - [ ] `scripts/compose.sh dev up app` 후 <http://localhost:8000> 가 200 을 반환한다.
    - [ ] 초기 목록 페이지에 "공고가 없습니다" 빈 상태 UI 가 정상 렌더링된다.
 3. **스크래퍼 드라이런**
    - [ ] `sources.yaml` 의 `scrape.dry_run: true`, `scrape.max_pages: 1` 설정 후
-         `docker compose --profile scrape run --rm scraper` 실행 시
+         `scripts/compose.sh dev --profile scrape run --rm scraper` 실행 시
          목록 파싱 로그가 정상 출력되고 DB/파일 쓰기 없이 exit code 0 으로 종료된다.
 4. **스크래퍼 실제 실행 및 증분 동작 확인**
    - [ ] `scrape.dry_run: false`, `scrape.max_pages: 1` 설정 후 실행하면
