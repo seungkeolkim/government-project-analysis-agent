@@ -1,4 +1,4 @@
-"""scripts/create_admin.py 의 핵심 로직 테스트.
+"""scripts/python/create_admin.py 의 핵심 로직 테스트.
 
 subprocess 대신 ``main()`` 과 ``create_admin_account()`` 를 직접 호출하고,
 prompt 헬퍼(_prompt_username / _prompt_password_confirmed /
@@ -6,8 +6,8 @@ _prompt_email_optional) 를 monkeypatch 로 대체한다 (guidance 제안).
 실행 가능한 CLI 인지보다 **is_admin=True 로 계정이 생성되는지 + 중복/오류
 분기가 올바른 종료 코드를 돌려주는지** 를 pin 한다.
 
-scripts/ 는 패키지가 아니라서 ``import scripts.create_admin`` 이 불가하다.
-파일 경로로 importlib 로드해서 test 모듈 이름으로 매핑한다.
+scripts/python/ 는 패키지가 아니라서 ``import scripts.python.create_admin`` 이
+불가하다. 파일 경로로 importlib 로드해서 test 모듈 이름으로 매핑한다.
 """
 
 from __future__ import annotations
@@ -24,16 +24,16 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def _load_create_admin_module() -> ModuleType:
-    """``scripts/create_admin.py`` 를 임의 이름 모듈로 로드한다.
+    """``scripts/python/create_admin.py`` 를 임의 이름 모듈로 로드한다.
 
-    scripts/ 가 패키지가 아니어서 ``import scripts.create_admin`` 은 실패한다.
-    importlib 로 파일 경로를 직접 지정해 로드하고 sys.modules 에 캐시한다.
+    scripts/python/ 이 패키지가 아니어서 ``import scripts.python.create_admin`` 은
+    실패한다. importlib 로 파일 경로를 직접 지정해 로드하고 sys.modules 에 캐시한다.
     """
     module_name = "scripts_create_admin_under_test"
     if module_name in sys.modules:
         return sys.modules[module_name]
 
-    script_path = _PROJECT_ROOT / "scripts" / "create_admin.py"
+    script_path = _PROJECT_ROOT / "scripts" / "python" / "create_admin.py"
     spec = importlib.util.spec_from_file_location(module_name, script_path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -120,7 +120,7 @@ def test_main_success_with_all_args(
 
     monkeypatch.setattr(
         sys, "argv",
-        ["scripts/create_admin.py", "main_admin", "--email", "main@example.com"],
+        ["scripts/python/create_admin.py", "main_admin", "--email", "main@example.com"],
     )
     monkeypatch.setattr(
         module, "_prompt_password_confirmed",
@@ -149,7 +149,7 @@ def test_main_prompts_username_when_missing(
     module = _load_create_admin_module()
 
     # argv 에 username / --email 없음 → 양쪽 prompt 경로
-    monkeypatch.setattr(sys, "argv", ["scripts/create_admin.py"])
+    monkeypatch.setattr(sys, "argv", ["scripts/python/create_admin.py"])
     monkeypatch.setattr(module, "_prompt_username", lambda: "prompted_admin")
     monkeypatch.setattr(
         module, "_prompt_password_confirmed",
@@ -176,7 +176,7 @@ def test_main_returns_1_on_duplicate(
     module.create_admin_account(username="dup_admin", password="first_password_1")
 
     monkeypatch.setattr(
-        sys, "argv", ["scripts/create_admin.py", "dup_admin"]
+        sys, "argv", ["scripts/python/create_admin.py", "dup_admin"]
     )
     monkeypatch.setattr(
         module, "_prompt_password_confirmed",
@@ -202,7 +202,7 @@ def test_main_returns_1_on_password_mismatch(
         raise module.PasswordPolicyError("비밀번호 확인이 일치하지 않습니다.")
 
     monkeypatch.setattr(
-        sys, "argv", ["scripts/create_admin.py", "mismatch_admin"]
+        sys, "argv", ["scripts/python/create_admin.py", "mismatch_admin"]
     )
     monkeypatch.setattr(module, "_prompt_password_confirmed", raise_mismatch)
     monkeypatch.setattr(module, "_prompt_email_optional", lambda: None)
@@ -220,7 +220,7 @@ def test_main_returns_1_on_short_password(
     module = _load_create_admin_module()
 
     monkeypatch.setattr(
-        sys, "argv", ["scripts/create_admin.py", "weak_pw_admin"]
+        sys, "argv", ["scripts/python/create_admin.py", "weak_pw_admin"]
     )
     monkeypatch.setattr(module, "_prompt_password_confirmed", lambda: "short")
     monkeypatch.setattr(module, "_prompt_email_optional", lambda: None)
@@ -239,7 +239,7 @@ def test_main_returns_1_on_empty_username(
     def raise_empty_username() -> str:
         raise module.UsernamePolicyError("username 이 비어 있습니다.")
 
-    monkeypatch.setattr(sys, "argv", ["scripts/create_admin.py"])
+    monkeypatch.setattr(sys, "argv", ["scripts/python/create_admin.py"])
     monkeypatch.setattr(module, "_prompt_username", raise_empty_username)
     # password / email prompt 에 도달하기 전에 종료되지만 방어적으로 설정.
     monkeypatch.setattr(

@@ -8,7 +8,7 @@
 #   1. compose 바인드 마운트 (/run/config/sources.yaml) — 정상 경로
 #   2. 이미지 내 template (/app/sources.yaml.template) — 마운트 누락 시 폴백
 #      (호스트에서 sources.yaml 을 생성하지 않은 경우. 기본값으로 동작하며
-#       실제 설정 반영을 위해 bootstrap_sources.sh 실행 후 재기동을 권장한다)
+#       실제 설정 반영을 위해 ./bootstrap_sources.sh 실행 후 재기동을 권장한다)
 
 set -eu
 
@@ -35,7 +35,7 @@ elif [ -f "$SOURCES_YAML_TEMPLATE" ]; then
     # 마운트가 없거나 디렉터리인 경우: 이미지 내 template 을 폴백으로 사용한다.
     # 호스트에서 sources.yaml 을 생성하지 않은 최초 기동 상황에 해당한다.
     echo "[entrypoint] WARNING: sources.yaml 마운트 없음 — template 기본값으로 기동합니다." >&2
-    echo "[entrypoint] 설정 반영은: sh scripts/bootstrap_sources.sh 실행 후 컨테이너 재기동" >&2
+    echo "[entrypoint] 설정 반영은: sh ./bootstrap_sources.sh 실행 후 컨테이너 재기동" >&2
     umask 077
     _tmpdir="$(mktemp -d)"
     trap 'rm -rf "$_tmpdir"' EXIT INT TERM

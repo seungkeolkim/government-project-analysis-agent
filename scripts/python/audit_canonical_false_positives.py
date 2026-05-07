@@ -4,9 +4,9 @@
 DB 는 읽기 전용으로만 접근하며 어떤 row 도 변경하지 않는다.
 
 실행:
-    docker compose run --rm app python scripts/audit_canonical_false_positives.py
-    docker compose run --rm app python scripts/audit_canonical_false_positives.py --top-n 20
-    docker compose run --rm app python scripts/audit_canonical_false_positives.py --show-id 33 34
+    docker compose run --rm app python scripts/python/audit_canonical_false_positives.py
+    docker compose run --rm app python scripts/python/audit_canonical_false_positives.py --top-n 20
+    docker compose run --rm app python scripts/python/audit_canonical_false_positives.py --show-id 33 34
 
 감사 내용
 ---------
@@ -27,8 +27,9 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# 프로젝트 루트를 sys.path 에 추가
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# 프로젝트 루트를 sys.path 에 추가 — 본 파일은 scripts/python/ 아래에 위치하므로
+# 루트까지 부모 3단계(파일 → scripts/python → scripts → 프로젝트 루트) 를 거슬러 올라간다.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 from loguru import logger  # noqa: E402

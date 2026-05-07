@@ -29,11 +29,11 @@
 
 사용법:
     # 1) DB 백업 (운영자 책임):
-    python scripts/backup_db.py
+    python scripts/python/backup_db.py
     # 2) dry-run 으로 영향 범위 확인:
-    python scripts/backfill_kst_assumption.py
+    python scripts/python/backfill_kst_assumption.py
     # 3) 만족하면 실제 적용:
-    python scripts/backfill_kst_assumption.py --apply
+    python scripts/python/backfill_kst_assumption.py --apply
 
 옵션:
     --apply             DB 에 실제 UPDATE 를 수행한다. 생략 시 dry-run.
@@ -50,8 +50,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-# 프로젝트 루트를 sys.path 에 추가 (scripts/ 에서 app 패키지를 임포트하기 위해).
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# 프로젝트 루트를 sys.path 에 추가 — 본 파일은 scripts/python/ 아래에 위치하므로
+# 루트까지 부모 3단계(파일 → scripts/python → scripts → 프로젝트 루트) 를 거슬러 올라간다.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 from loguru import logger  # noqa: E402
@@ -292,7 +293,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "외부 응답 텍스트의 KST 가정 미적용 row 를 재계산해 보정하는 일회성 "
-            "backfill. 실행 전에 반드시 scripts/backup_db.py 로 DB 백업을 권장."
+            "backfill. 실행 전에 반드시 scripts/python/backup_db.py 로 DB 백업을 권장."
         )
     )
     parser.add_argument(

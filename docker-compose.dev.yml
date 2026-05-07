@@ -1,5 +1,5 @@
 # dev override (uvicorn hot reload).
-# 단독 실행 금지 — `scripts/compose.sh dev` 또는
+# 단독 실행 금지 — `./compose.sh dev` 또는
 # `docker compose -f docker-compose.yml -f docker-compose.dev.yml ...` 형태로만 사용한다.
 
 services:

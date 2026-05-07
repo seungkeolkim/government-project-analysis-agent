@@ -149,7 +149,7 @@ def admin_user_required(
     그 뒤 is_admin 플래그로 403 을 분기한다. 비관리자가 403 응답만 보고 라우트의
     존재 자체는 인지할 수 있다는 점은 의도된 설계(로컬 팀 전용 UI).
 
-    is_admin 부여는 DB 직접 수정(``scripts/create_admin.py`` + Phase 1b SQL)
+    is_admin 부여는 DB 직접 수정(``scripts/python/create_admin.py`` + Phase 1b SQL)
     으로만 가능하며, UI 에서 부여하는 경로는 Phase 5 범위.
 
     Args:
