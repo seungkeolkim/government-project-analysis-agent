@@ -755,31 +755,35 @@ def _apply_owner_edit_gates(
     *,
     suggestion_id: int,
     current_user: User,
+    allow_admin: bool = False,
 ) -> Suggestion:
     """수정·삭제 라우트가 공통으로 적용해야 하는 4단 게이트.
 
     적용 순서는 ``view_suggestion_page`` 와 일관되며, 마지막에 작성자 본인
-    검증을 추가한다 — 가이던스 그대로:
+    검증을 추가한다:
 
     1. 게시글 존재 (404)
     2. 고아 게이트 (404 비관리자) — 작성자 user 가 사라진 글은 비관리자에게
        존재 자체를 가린다. (수정/삭제 흐름에서도 동일 정책으로 처리.)
     3. 비밀글 게이트 (403 비-작성자/비-관리자) — 작성자 본인은 자동 통과.
-    4. 작성자 본인 게이트 (403 비-작성자) — 관리자라도 본인 글이 아니면 거절.
-       사용자 원문이 \"작성자\" 한정이라 보수적으로 본인만 허용한다.
+    4. 작성자 본인 게이트 (403 비-작성자):
+       - ``allow_admin=False`` (기본값, 수정 라우트): 관리자라도 본인 글이 아니면 거절.
+       - ``allow_admin=True`` (삭제 라우트): 관리자이면 작성자 여부와 무관하게 통과.
 
     Args:
         main_session: 메인 DB 세션 (cross-DB 고아 판정용).
         suggestions_session: 건의사항 DB 세션 (게시글 조회용).
         suggestion_id: 게시글 PK.
         current_user: 로그인 사용자(필수).
+        allow_admin: True 이면 게이트 4에서 관리자(is_admin)를 우회 허용한다.
+            삭제 라우트 전용. 수정 라우트는 기본값 False 를 유지한다.
 
     Returns:
         4단 게이트를 통과한 ``Suggestion`` ORM 인스턴스 (수정/삭제 대상).
 
     Raises:
         HTTPException(404): 게시글이 없거나, 고아 글에 비관리자 접근.
-        HTTPException(403): 비밀글에 비-작성자 비-관리자 접근, 또는 비-작성자 접근.
+        HTTPException(403): 비밀글에 비-작성자 비-관리자 접근, 또는 권한 없는 접근.
     """
     suggestion = get_suggestion_by_id(suggestions_session, suggestion_id)
     if suggestion is None:
@@ -810,11 +814,20 @@ def _apply_owner_edit_gates(
             detail="비밀글은 작성자 본인 또는 관리자만 열람할 수 있습니다.",
         )
 
-    # 게이트 4: 작성자 본인. 관리자는 본 task 범위에서 수정·삭제 불가.
-    if not is_owner:
+    # 게이트 4: 작성자 본인 (또는 삭제 라우트에 한해 관리자도 통과).
+    # allow_admin=True 일 때는 관리자(is_admin)가 비-작성자라도 통과한다.
+    # allow_admin=False(수정 라우트)일 때는 작성자만 허용 — 기존 동작 유지.
+    if not is_owner and not (allow_admin and is_admin):
+        # 삭제 허용 게이트(allow_admin=True)에서 비-작성자 비-관리자가 도달한 경우
+        # 와, 수정 전용 게이트(allow_admin=False)에서 비-작성자가 도달한 경우를
+        # 분기해 메시지를 달리한다 — 양쪽 모두 403 이므로 정보 누설은 없다.
+        if allow_admin:
+            detail_message = "이 글을 삭제할 권한이 없습니다."
+        else:
+            detail_message = "자신이 작성한 글만 수정·삭제할 수 있습니다."
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="자신이 작성한 글만 수정·삭제할 수 있습니다.",
+            detail=detail_message,
         )
 
     return suggestion
@@ -965,11 +978,14 @@ def delete_suggestion_route(
     suggestions_session: Session = Depends(_suggestions_db_session),
     current_user: User = Depends(current_user_required),
 ) -> RedirectResponse:
-    """건의사항 삭제 처리 (POST /suggestions/{id}/delete) — 작성자 본인 전용.
+    """건의사항 삭제 처리 (POST /suggestions/{id}/delete) — 작성자 본인 또는 관리자.
 
     동일한 4단 게이트를 적용한 뒤 게시글을 소프트 삭제한다. 소속 댓글도 동일
     deleted_at 타임스탬프로 소프트 삭제한다. 성공 시 목록 페이지(``/suggestions``)
     로 303 리다이렉트한다.
+
+    관리자(is_admin=True)는 작성자가 누구든 삭제 가능하다(allow_admin=True).
+    수정 라우트와 달리 삭제만 허용하는 것이 사용자 원문 의도다.
 
     Returns:
         303 리다이렉트 (``Location: /suggestions``) — PRG.
@@ -977,14 +993,16 @@ def delete_suggestion_route(
     Raises:
         HTTPException(401): 비로그인.
         HTTPException(404): 게시글 없음 또는 고아 글에 비관리자.
-        HTTPException(403): 비밀글 비-작성자 또는 비-작성자.
+        HTTPException(403): 삭제 권한 없음 (비-작성자 + 비-관리자).
     """
-    # 4단 게이트 — 게시글 존재/고아/비밀글/작성자 본인.
+    # 4단 게이트 — 게시글 존재/고아/비밀글/작성자-or-관리자.
+    # allow_admin=True: 관리자이면 게이트 4(작성자 본인 여부) 를 우회한다.
     _apply_owner_edit_gates(
         main_session,
         suggestions_session,
         suggestion_id=suggestion_id,
         current_user=current_user,
+        allow_admin=True,
     )
 
     # ── DELETE (트랜잭션은 라우트 끝에서 명시 commit) ──────────────────────
