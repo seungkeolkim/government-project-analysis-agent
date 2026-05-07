@@ -411,12 +411,13 @@ class TestBuildSectionA:
         item = content_card.items[0]
         # 같은 ID 가 transitioned_to_접수중 에도 있으므로 배지 1개.
         assert any("접수중" in badge for badge in item.duplicate_badges)
-        # transition 카드의 행은 transition_from 이 있어야 한다.
+        # transition 카드의 행은 transition_from / transition_from_key 가 있어야 한다.
         transition_card = next(
             c for c in result.cards if c.category_key == "transitioned_to_접수중"
         )
         assert len(transition_card.items) == 1
         assert transition_card.items[0].transition_from == "접수예정"
+        assert transition_card.items[0].transition_from_key == "scheduled"
 
     def test_announcements_join_is_single_query(self, session: Session) -> None:
         """검증 15: announcement 메타 JOIN 은 IN 1회 — N+1 회피 회귀.
@@ -518,3 +519,15 @@ class TestSectionACategoryDescriptors:
                 assert descriptor["is_transition"] == "true"
             else:
                 assert descriptor["is_transition"] == "false"
+
+    def test_transition_labels_use_parenthesis_format(self) -> None:
+        """전이 카드 헤더 라벨이 '(전이) X' 형식인지 확인 (task 00075)."""
+        transition_descriptors = [
+            d for d in SECTION_A_CATEGORY_DESCRIPTORS
+            if d["is_transition"] == "true"
+        ]
+        assert len(transition_descriptors) == 3
+        for descriptor in transition_descriptors:
+            assert descriptor["label"].startswith("(전이) "), (
+                f"전이 라벨이 '(전이) X' 형식이어야 함: {descriptor['label']!r}"
+            )
