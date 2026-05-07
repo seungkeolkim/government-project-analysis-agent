@@ -222,10 +222,19 @@ def settings_password(
         session: DB 세션.
         current_user: 로그인 사용자 (비로그인 → 401).
     """
+    # current_user는 _auth_db_session 소속 인스턴스다. settings 세션 기준으로
+    # 재조회해야 이후 change_password의 flush/commit이 실제 UPDATE로 이어진다.
+    user = session.get(User, current_user.id)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="사용자를 찾을 수 없습니다.",
+        )
+
     def _error(msg: str) -> Response:
         """실패 시 settings 페이지를 400 으로 재렌더하는 내부 헬퍼."""
         context = _build_settings_context(
-            request, session, current_user,
+            request, session, user,
             flash=msg, flash_section="password", flash_type="error",
         )
         return _templates.TemplateResponse(
@@ -233,7 +242,7 @@ def settings_password(
         )
 
     # 현재 비밀번호 검증
-    if not verify_password(current_password, current_user.password_hash):
+    if not verify_password(current_password, user.password_hash):
         return _error("현재 비밀번호가 올바르지 않습니다.")
 
     # 새 비밀번호 확인 일치
@@ -242,12 +251,12 @@ def settings_password(
 
     # 정책 검증 + 해시 업데이트 + 모든 세션 삭제
     try:
-        change_password(session, current_user, new_password=new_password)
+        change_password(session, user, new_password=new_password)
     except PasswordPolicyError as exc:
         return _error(str(exc))
 
     # 새 세션 발급 (비밀번호 변경으로 인해 기존 세션이 모두 삭제됐으므로 재발급 필수)
-    new_user_session = create_session(session, current_user)
+    new_user_session = create_session(session, user)
     session.commit()
 
     redirect_response = RedirectResponse(
@@ -255,7 +264,7 @@ def settings_password(
         status_code=status.HTTP_303_SEE_OTHER,
     )
     _apply_session_cookie(redirect_response, new_user_session.session_id)
-    logger.info("비밀번호 변경 완료: user_id={}", current_user.id)
+    logger.info("비밀번호 변경 완료: user_id={}", user.id)
     return redirect_response
 
 
@@ -283,19 +292,28 @@ def settings_email(
         session: DB 세션.
         current_user: 로그인 사용자.
     """
+    # current_user는 _auth_db_session 소속 인스턴스다. settings 세션 기준으로
+    # 재조회해야 change_email의 flush/commit이 실제 UPDATE로 이어진다.
+    user = session.get(User, current_user.id)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="사용자를 찾을 수 없습니다.",
+        )
+
     try:
-        change_email(session, current_user, new_email=new_email or None)
+        change_email(session, user, new_email=new_email or None)
         session.commit()
     except ValueError as exc:
         context = _build_settings_context(
-            request, session, current_user,
+            request, session, user,
             flash=str(exc), flash_section="email", flash_type="error",
         )
         return _templates.TemplateResponse(
             request, "settings.html", context, status_code=400,
         )
 
-    logger.info("이메일 변경 완료: user_id={}", current_user.id)
+    logger.info("이메일 변경 완료: user_id={}", user.id)
     return RedirectResponse(
         url="/settings?flash_msg=이메일이 변경되었습니다.&flash_section=email&flash_type=success",
         status_code=status.HTTP_303_SEE_OTHER,
@@ -326,12 +344,21 @@ def settings_notification(
         session: DB 세션.
         current_user: 로그인 사용자.
     """
+    # current_user는 _auth_db_session 소속 인스턴스다. settings 세션 기준으로
+    # 재조회해야 change_email_subscribed의 flush/commit이 실제 UPDATE로 이어진다.
+    user = session.get(User, current_user.id)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="사용자를 찾을 수 없습니다.",
+        )
+
     subscribed = email_subscribed == "1"
-    change_email_subscribed(session, current_user, subscribed=subscribed)
+    change_email_subscribed(session, user, subscribed=subscribed)
     session.commit()
 
     label = "켰습니다" if subscribed else "껐습니다"
-    logger.info("이메일 수신 설정 변경 완료: user_id={} subscribed={}", current_user.id, subscribed)
+    logger.info("이메일 수신 설정 변경 완료: user_id={} subscribed={}", user.id, subscribed)
     return RedirectResponse(
         url=f"/settings?flash_msg=이메일 알림을 {label}.&flash_section=notification&flash_type=success",
         status_code=status.HTTP_303_SEE_OTHER,
