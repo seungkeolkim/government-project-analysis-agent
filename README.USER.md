@@ -1356,6 +1356,19 @@ sqlite3 ./data/db/app.sqlite3 "DELETE FROM announcements WHERE is_current = 0;"
 
 ## 트러블슈팅
 
+### dev 모드인데 코드 변경이 반영되지 않는다 (hot reload 미동작)
+
+`scripts/compose.sh dev up app` 으로 기동했다면 컨테이너 로그에
+`Will watch for changes in ['/app/app']` 와 `Started reloader process` 가 보여야 하고,
+`./app/` 하위 파일을 저장하면 `Reloading...` → `Application startup complete.` 가
+재출력된다. 위 메시지가 보이지 않거나 변경이 자동 반영되지 않으면:
+
+- 호출 시 mode 인자가 정말 `dev` 인지 확인한다 — `scripts/compose.sh prod up app`
+  은 일부러 reloader 를 끈 운영 모드다.
+- `docker compose ps` 로 떠 있는 컨테이너가 `dev` 모드로 기동된 것인지
+  (이전 `prod` 컨테이너가 그대로 떠 있는 경우) 확인하고, 필요하면 한 번 내렸다가
+  `scripts/compose.sh dev up app` 으로 다시 기동한다.
+
 ### admin 페이지에서 500 에러가 나는데 docker logs 가 비어 있다
 
 00030 이전 버전에서 발생하던 증상. 현재 버전에서는 loguru↔stdlib 브리지가 설치돼 있어 500 에러가 나면
