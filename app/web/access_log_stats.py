@@ -33,6 +33,46 @@ from app.timezone import now_utc, to_kst
 
 
 # ──────────────────────────────────────────────────────────────
+# IP 필터 헬퍼
+# ──────────────────────────────────────────────────────────────
+
+
+def filter_records_by_ip(
+    records: Iterable[dict],
+    *,
+    ip_list: list[str],
+    mode: str,
+) -> Iterator[dict]:
+    """IP 목록과 모드에 따라 record 스트림을 필터링한다.
+
+    ip_list 가 비어 있으면 필터를 적용하지 않고 모든 record 를 그대로 yield 한다.
+    mode 는 라우트에서 이미 'include' | 'exclude' 로 정규화된 값이 전달된다고 가정한다.
+
+    Args:
+        records: 필터링할 record iterable. 소모(exhaust) 됨.
+        ip_list: 필터 대상 IP 주소 목록. 비어 있으면 필터 없음.
+        mode:    'include' — ip_list 에 있는 IP 의 record 만 yield.
+                 'exclude' — ip_list 에 없는 IP 의 record 만 yield.
+
+    Yields:
+        필터 조건을 만족하는 record dict.
+    """
+    if not ip_list:
+        yield from records
+        return
+
+    ip_set = set(ip_list)
+    for record in records:
+        ip = record.get("ip_address", "-")
+        if mode == "exclude":
+            if ip not in ip_set:
+                yield record
+        else:  # include
+            if ip in ip_set:
+                yield record
+
+
+# ──────────────────────────────────────────────────────────────
 # 상수
 # ──────────────────────────────────────────────────────────────
 
@@ -291,16 +331,21 @@ def get_recent_raw_rows(
     *,
     limit: int = _RECENT_ROWS_DEFAULT_LIMIT,
     reference_kst_date: date | None = None,
+    ip_list: list[str] | None = None,
+    filter_mode: str = "include",
 ) -> list[dict]:
     """오늘 접근 이력 로그의 최근 N줄을 최신 순으로 반환한다.
 
     오늘 파일이 없으면 빈 리스트를 반환한다.
+    ip_list 가 주어지면 필터 적용 후 limit 슬라이싱 — "필터된 결과 중 최신 N건" 이 된다.
     MVP: 파일 전체를 메모리에 읽은 뒤 tail slice (1MB 미만 가정).
 
     Args:
         log_dir:             로그 파일 디렉터리.
         limit:               반환할 최대 줄 수. 기본 _RECENT_ROWS_DEFAULT_LIMIT.
         reference_kst_date:  테스트용 기준 날짜. None 이면 오늘 KST.
+        ip_list:             IP 필터 목록. None 또는 빈 리스트면 필터 없음.
+        filter_mode:         'include' | 'exclude'. 라우트에서 정규화된 값을 전달한다.
 
     Returns:
         최신 항목이 앞에 오는 list of dict (최대 limit 개).
@@ -308,13 +353,16 @@ def get_recent_raw_rows(
     today = _kst_today(reference_kst_date)
     log_file = _log_file_path_for_date(log_dir, today)
     rows = list(iter_log_file(log_file))
-    # 마지막 limit 개를 역순 반환 (최신이 먼저)
+    # IP 필터 적용 후 limit 슬라이싱 → "필터된 결과 중 최신 N건" 보장
+    if ip_list:
+        rows = list(filter_records_by_ip(rows, ip_list=ip_list, mode=filter_mode))
     return list(reversed(rows[-limit:]))
 
 
 __all__ = [
     "aggregate_daily_stats",
     "aggregate_ip_history",
+    "filter_records_by_ip",
     "get_recent_raw_rows",
     "iter_log_file",
     "iter_log_records_for_days",

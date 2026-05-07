@@ -108,6 +108,7 @@ from app.timezone import format_kst
 from app.web.access_log_stats import (
     aggregate_daily_stats,
     aggregate_ip_history,
+    filter_records_by_ip,
     get_recent_raw_rows,
     iter_log_records_for_days,
 )
@@ -1801,12 +1802,35 @@ def users_set_organizations(
 @router.get("/usage", response_class=HTMLResponse)
 def admin_usage_page(
     request: Request,
+    ips: Optional[str] = Query(default=None),
+    mode: Optional[str] = Query(default=None),
     current_user: User = Depends(admin_user_required),
 ) -> HTMLResponse:
-    """이용 통계 탭 — 일별 접근 통계 / IP 방문 이력 / 오늘 최근 원본 로그."""
+    """이용 통계 탭 — 일별 접근 통계 / IP 방문 이력 / 오늘 최근 원본 로그.
+
+    쿼리 파라미터:
+        ips:  comma-separated IP 주소 목록 (예: 192.168.1.1,10.0.0.2).
+              생략 또는 빈 문자열이면 전체 집계.
+        mode: 'include' — ips 에 있는 IP 만 집계.
+              'exclude' — ips 에 있는 IP 를 제외하고 집계.
+              그 외 값 또는 생략 시 'include' 로 폴백.
+    """
     settings = get_settings()
     log_dir = settings.access_log_dir
     gap_minutes = settings.access_history_session_gap_minutes
+
+    # ips 파싱: comma-separated → 공백 제거 → 빈 값/중복 제거
+    ip_list: list[str] = []
+    if ips:
+        seen: set[str] = set()
+        for token in ips.split(","):
+            cleaned = token.strip()
+            if cleaned and cleaned not in seen:
+                ip_list.append(cleaned)
+                seen.add(cleaned)
+
+    # mode 정규화: 'exclude' 만 허용, 그 외는 'include' 로 폴백
+    filter_mode = "exclude" if (mode or "").strip().lower() == "exclude" else "include"
 
     flash: str | None = None
     flash_level: str | None = None
@@ -1815,10 +1839,19 @@ def admin_usage_page(
     recent_rows: list[dict] = []
 
     try:
-        all_records = list(iter_log_records_for_days(log_dir, days=7))
+        all_records = list(filter_records_by_ip(
+            iter_log_records_for_days(log_dir, days=7),
+            ip_list=ip_list,
+            mode=filter_mode,
+        ))
         daily_stats = aggregate_daily_stats(all_records, days=7)
         ip_history = aggregate_ip_history(all_records, gap_minutes=gap_minutes)
-        recent_rows = get_recent_raw_rows(log_dir, limit=50)
+        recent_rows = get_recent_raw_rows(
+            log_dir,
+            limit=50,
+            ip_list=ip_list,
+            filter_mode=filter_mode,
+        )
     except Exception as exc:
         logger.warning("이용 통계 로그 집계 실패: {}: {}", type(exc).__name__, exc)
         flash = "로그 파일을 읽는 중 오류가 발생했습니다."
@@ -1837,6 +1870,9 @@ def admin_usage_page(
             "gap_minutes": gap_minutes,
             "flash": flash,
             "flash_level": flash_level,
+            # IP 필터 상태 — 템플릿에서 폼 값 복원에 사용
+            "filter_ips_raw": ips or "",
+            "filter_mode": filter_mode,
         },
     )
 

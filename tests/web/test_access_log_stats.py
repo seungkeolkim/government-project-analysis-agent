@@ -15,6 +15,7 @@ import pytest
 from app.web.access_log_stats import (
     aggregate_daily_stats,
     aggregate_ip_history,
+    filter_records_by_ip,
     get_recent_raw_rows,
     iter_log_file,
     iter_log_records_for_days,
@@ -389,3 +390,171 @@ class TestGetRecentRawRows:
         _write_log_file(tmp_path, _REF_DATE, entries)
         result = get_recent_raw_rows(tmp_path, limit=5, reference_kst_date=_REF_DATE)
         assert len(result) == 5
+
+
+# ──────────────────────────────────────────────────────────────
+# filter_records_by_ip
+# ──────────────────────────────────────────────────────────────
+
+
+class TestFilterRecordsByIp:
+    def test_empty_ip_list_passes_all_records(self) -> None:
+        """ip_list 가 비어 있으면 모든 record 가 그대로 yield 된다."""
+        records = [
+            _entry("1.1.1.1", "2026-05-06T10:00:00+09:00"),
+            _entry("2.2.2.2", "2026-05-06T11:00:00+09:00"),
+        ]
+        result = list(filter_records_by_ip(records, ip_list=[], mode="include"))
+        assert len(result) == 2
+
+    def test_include_mode_keeps_only_matching_ips(self) -> None:
+        """include 모드: ip_list 에 있는 IP 의 record 만 반환한다."""
+        records = [
+            _entry("1.1.1.1", "2026-05-06T10:00:00+09:00"),
+            _entry("2.2.2.2", "2026-05-06T11:00:00+09:00"),
+            _entry("3.3.3.3", "2026-05-06T12:00:00+09:00"),
+        ]
+        result = list(filter_records_by_ip(records, ip_list=["1.1.1.1", "3.3.3.3"], mode="include"))
+        assert len(result) == 2
+        ips = [r["ip_address"] for r in result]
+        assert "1.1.1.1" in ips
+        assert "3.3.3.3" in ips
+        assert "2.2.2.2" not in ips
+
+    def test_exclude_mode_removes_matching_ips(self) -> None:
+        """exclude 모드: ip_list 에 있는 IP 의 record 를 제거한다."""
+        records = [
+            _entry("1.1.1.1", "2026-05-06T10:00:00+09:00"),
+            _entry("2.2.2.2", "2026-05-06T11:00:00+09:00"),
+            _entry("3.3.3.3", "2026-05-06T12:00:00+09:00"),
+        ]
+        result = list(filter_records_by_ip(records, ip_list=["2.2.2.2"], mode="exclude"))
+        assert len(result) == 2
+        ips = [r["ip_address"] for r in result]
+        assert "2.2.2.2" not in ips
+        assert "1.1.1.1" in ips
+        assert "3.3.3.3" in ips
+
+    def test_include_mode_no_match_returns_empty(self) -> None:
+        """include 모드에서 ip_list 의 IP 가 record 에 없으면 빈 결과를 반환한다."""
+        records = [
+            _entry("1.1.1.1", "2026-05-06T10:00:00+09:00"),
+        ]
+        result = list(filter_records_by_ip(records, ip_list=["9.9.9.9"], mode="include"))
+        assert result == []
+
+    def test_exclude_mode_all_match_returns_empty(self) -> None:
+        """exclude 모드에서 모든 record 의 IP 가 ip_list 에 있으면 빈 결과를 반환한다."""
+        records = [
+            _entry("1.1.1.1", "2026-05-06T10:00:00+09:00"),
+            _entry("2.2.2.2", "2026-05-06T11:00:00+09:00"),
+        ]
+        result = list(filter_records_by_ip(records, ip_list=["1.1.1.1", "2.2.2.2"], mode="exclude"))
+        assert result == []
+
+    def test_returns_iterator(self) -> None:
+        """filter_records_by_ip 는 Iterator 를 반환한다 (list 로 구체화 전까지 지연)."""
+        records = [_entry("1.1.1.1", "2026-05-06T10:00:00+09:00")]
+        result = filter_records_by_ip(records, ip_list=["1.1.1.1"], mode="include")
+        # Iterator 인터페이스 확인
+        assert hasattr(result, "__iter__")
+        assert hasattr(result, "__next__")
+
+    def test_preserves_record_order(self) -> None:
+        """필터 후 record 의 순서가 유지된다."""
+        records = [
+            _entry("1.1.1.1", "2026-05-06T10:00:00+09:00"),
+            _entry("1.1.1.1", "2026-05-06T11:00:00+09:00"),
+            _entry("1.1.1.1", "2026-05-06T12:00:00+09:00"),
+        ]
+        result = list(filter_records_by_ip(records, ip_list=["1.1.1.1"], mode="include"))
+        times = [r["accessed_at"] for r in result]
+        assert times == sorted(times)
+
+    def test_empty_records_returns_empty(self) -> None:
+        """빈 records 에 필터를 적용하면 빈 결과를 반환한다."""
+        result = list(filter_records_by_ip([], ip_list=["1.1.1.1"], mode="include"))
+        assert result == []
+
+
+# ──────────────────────────────────────────────────────────────
+# get_recent_raw_rows — IP 필터 파라미터
+# ──────────────────────────────────────────────────────────────
+
+
+class TestGetRecentRawRowsWithIpFilter:
+    def test_include_filter_shows_only_matching_ip(self, tmp_path: Path) -> None:
+        """ip_list include 필터 적용 시 해당 IP 의 row 만 반환한다."""
+        entries = [
+            _entry("1.1.1.1", "2026-05-06T10:00:00+09:00"),
+            _entry("2.2.2.2", "2026-05-06T11:00:00+09:00"),
+            _entry("1.1.1.1", "2026-05-06T12:00:00+09:00"),
+        ]
+        _write_log_file(tmp_path, _REF_DATE, entries)
+
+        result = get_recent_raw_rows(
+            tmp_path,
+            limit=10,
+            reference_kst_date=_REF_DATE,
+            ip_list=["1.1.1.1"],
+            filter_mode="include",
+        )
+        assert len(result) == 2
+        assert all(r["ip_address"] == "1.1.1.1" for r in result)
+
+    def test_exclude_filter_removes_matching_ip(self, tmp_path: Path) -> None:
+        """ip_list exclude 필터 적용 시 해당 IP 를 제외한 row 를 반환한다."""
+        entries = [
+            _entry("1.1.1.1", "2026-05-06T10:00:00+09:00"),
+            _entry("2.2.2.2", "2026-05-06T11:00:00+09:00"),
+        ]
+        _write_log_file(tmp_path, _REF_DATE, entries)
+
+        result = get_recent_raw_rows(
+            tmp_path,
+            limit=10,
+            reference_kst_date=_REF_DATE,
+            ip_list=["1.1.1.1"],
+            filter_mode="exclude",
+        )
+        assert len(result) == 1
+        assert result[0]["ip_address"] == "2.2.2.2"
+
+    def test_filter_then_limit_applied(self, tmp_path: Path) -> None:
+        """필터 적용 후 limit 슬라이싱 — '필터된 결과 중 최신 N건' 이 반환된다."""
+        # 1.1.1.1 3개, 2.2.2.2 2개 → include 1.1.1.1, limit=2 → 1.1.1.1 최신 2개
+        entries = [
+            _entry("1.1.1.1", "2026-05-06T08:00:00+09:00"),
+            _entry("2.2.2.2", "2026-05-06T09:00:00+09:00"),
+            _entry("1.1.1.1", "2026-05-06T10:00:00+09:00"),
+            _entry("2.2.2.2", "2026-05-06T11:00:00+09:00"),
+            _entry("1.1.1.1", "2026-05-06T12:00:00+09:00"),
+        ]
+        _write_log_file(tmp_path, _REF_DATE, entries)
+
+        result = get_recent_raw_rows(
+            tmp_path,
+            limit=2,
+            reference_kst_date=_REF_DATE,
+            ip_list=["1.1.1.1"],
+            filter_mode="include",
+        )
+        # 1.1.1.1 의 3개 중 최신 2개 (12시, 10시) 가 최신 순으로 반환되어야 한다
+        assert len(result) == 2
+        assert result[0]["accessed_at"] == "2026-05-06T12:00:00+09:00"
+        assert result[1]["accessed_at"] == "2026-05-06T10:00:00+09:00"
+
+    def test_no_filter_behaves_as_before(self, tmp_path: Path) -> None:
+        """ip_list 없으면 기존 동작과 동일하다."""
+        entries = [
+            _entry("1.1.1.1", "2026-05-06T10:00:00+09:00"),
+            _entry("2.2.2.2", "2026-05-06T11:00:00+09:00"),
+        ]
+        _write_log_file(tmp_path, _REF_DATE, entries)
+
+        result = get_recent_raw_rows(
+            tmp_path,
+            limit=10,
+            reference_kst_date=_REF_DATE,
+        )
+        assert len(result) == 2
