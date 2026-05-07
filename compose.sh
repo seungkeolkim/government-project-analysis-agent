@@ -5,10 +5,10 @@
 # 호출할지를 결정한 뒤, 나머지 인자는 docker compose 에 그대로 전달한다.
 #
 # 사용 예시:
-#   scripts/compose.sh dev up app
-#   scripts/compose.sh dev --profile scrape run --rm scraper
-#   scripts/compose.sh prod up app
-#   scripts/compose.sh prod build
+#   ./compose.sh dev up app
+#   ./compose.sh dev --profile scrape run --rm scraper
+#   ./compose.sh prod up app
+#   ./compose.sh prod build
 #
 # mode:
 #   dev  — docker-compose.yml + docker-compose.dev.yml (uvicorn --reload 활성화).
@@ -24,17 +24,17 @@ set -eu
 
 usage() {
     cat <<'USAGE' >&2
-사용법: scripts/compose.sh <mode> [docker compose args...]
+사용법: ./compose.sh <mode> [docker compose args...]
 
   mode:
     dev  — docker-compose.yml + docker-compose.dev.yml (개발: 코드 변경 자동 반영)
     prod — docker-compose.yml 만 사용 (운영: 이미지 코드 고정)
 
 예시:
-  scripts/compose.sh dev up app
-  scripts/compose.sh dev --profile scrape run --rm scraper
-  scripts/compose.sh prod up app
-  scripts/compose.sh prod build
+  ./compose.sh dev up app
+  ./compose.sh dev --profile scrape run --rm scraper
+  ./compose.sh prod up app
+  ./compose.sh prod build
 USAGE
 }
 

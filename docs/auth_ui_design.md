@@ -25,7 +25,7 @@
   자동 읽음 처리 연동.
 - `app/web/static/css/style.css` 에 `.site-nav`, `.announcement-title-link--unread`,
   `.auth-form`, `.flash-message` 등 추가.
-- `scripts/create_admin.py` 신설 — 첫 admin 계정 생성 CLI.
+- `scripts/python/create_admin.py` 신설 — 첫 admin 계정 생성 CLI.
 - `tests/auth/` 신설 — 서비스·라우트·실사용자 리셋 흐름 단위/통합 테스트.
 - 문서 갱신 — `README.md` / `README.USER.md`.
 
@@ -104,7 +104,7 @@ app/auth/routes.py                 # APIRouter: /auth/register, /login, /logout,
 app/web/templates/login.html       # 로그인 폼 (base.html extends)
 app/web/templates/register.html    # 회원가입 폼 (base.html extends)
 
-scripts/create_admin.py            # 첫 admin 계정 생성 CLI (getpass)
+scripts/python/create_admin.py            # 첫 admin 계정 생성 CLI (getpass)
 
 tests/auth/__init__.py
 tests/auth/test_service.py         # 해시·세션 발급/만료 단위
@@ -224,7 +224,7 @@ def create_user(
     is_admin: bool = False,
 ) -> User:
     """User row 생성. username 중복이면 DuplicateUsernameError.
-    호출자가 commit. scripts/create_admin.py 도 이 함수를 공유한다."""
+    호출자가 commit. scripts/python/create_admin.py 도 이 함수를 공유한다."""
 
 def authenticate(
     session: Session, *, username: str, password: str,
@@ -629,13 +629,13 @@ def ensure_same_origin(request: Request) -> None:
 
 ---
 
-## §12. `scripts/create_admin.py` 설계
+## §12. `scripts/python/create_admin.py` 설계
 
 ```python
 """첫 관리자 계정 생성 CLI.
 
 usage:
-    python -m scripts.create_admin [username]
+    python scripts/python/create_admin.py [username]
 
 - username 인자 생략 시 stdin prompt 로 받는다.
 - password 는 getpass 로 2회 입력받아 일치 검증.
@@ -704,7 +704,7 @@ usage:
 신규 섹션 "첫 관리자 계정 생성":
 ```
 cd /app
-python -m scripts.create_admin
+python scripts/python/create_admin.py
 (→ username, password 2회, email 입력)
 ```
 - `is_admin=True` 가 왜 필요한지(관리자 기능 Phase 2 예고) 한 문단.
@@ -727,7 +727,7 @@ python -m scripts.create_admin
     ↓
 00021-4  §8 list.html 분기 + §9 detail 자동 읽음 + §10 CSS unread 부분
     ↓
-00021-5  §12 scripts/create_admin.py  (§4.3 의 create_user 재사용)
+00021-5  §12 scripts/python/create_admin.py  (§4.3 의 create_user 재사용)
     ↓
 00021-6  §13 테스트 전체 (리셋 회귀 + 만료 + 인증 기본)
     ↓

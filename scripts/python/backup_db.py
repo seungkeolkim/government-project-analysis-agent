@@ -1,7 +1,7 @@
 """SQLite DB 백업 + 로테이션 스크립트.
 
 사용자 원문 요구:
-    - scripts/backup_db.py — SQLite 복사 + 타임스탬프
+    - scripts/python/backup_db.py — SQLite 복사 + 타임스탬프
     - data/backups/ 디렉터리에 저장
     - 최근 14개만 보관 (오래된 것부터 삭제)
     - pg_dump 는 skip (Postgres 는 별도 백업 도구 사용)
@@ -19,8 +19,8 @@
     (6) loguru 로 성공/삭제 수/유지 목록 로깅.
 
 실행 예:
-    docker compose --profile scrape run --rm scraper python scripts/backup_db.py
-    python scripts/backup_db.py --keep 30 --dest /mnt/backups
+    docker compose --profile scrape run --rm scraper python scripts/python/backup_db.py
+    python scripts/python/backup_db.py --keep 30 --dest /mnt/backups
 
 옵션:
     --keep N     최근 몇 개의 백업을 보관할지 (기본값: 14).
@@ -39,8 +39,9 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-# 프로젝트 루트를 sys.path 에 추가 (scripts/ 에서 app 패키지 임포트)
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# 프로젝트 루트를 sys.path 에 추가 — 본 파일은 scripts/python/ 아래에 위치하므로
+# 루트까지 부모 3단계(파일 → scripts/python → scripts → 프로젝트 루트) 를 거슬러 올라간다.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 from loguru import logger  # noqa: E402
@@ -291,7 +292,7 @@ def run_backup(*, dest_dir: Path, keep_count: int) -> int:
 def _build_arg_parser() -> argparse.ArgumentParser:
     """CLI 인자 파서를 구성한다."""
     parser = argparse.ArgumentParser(
-        prog="python scripts/backup_db.py",
+        prog="python scripts/python/backup_db.py",
         description="SQLite DB 를 타임스탬프 파일로 복제하고 최근 N 개만 보관한다.",
     )
     parser.add_argument(

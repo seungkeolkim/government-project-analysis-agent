@@ -10,6 +10,11 @@
 > - 코더 로컬 (Linux, Python 3.12, .venv) — pytest + 직접 호출 스크립트.
 > - docker compose 환경에서의 E2E (실 IRIS 응답 / 실 SIGTERM 시그널) 는 운영자가
 >   별도 수행하는 항목으로 분리해 표시했다.
+>
+> **경로 변경 안내 (task 00078, 2026-05-07)**: 본문에서 인용하는
+> `scripts/gc_orphan_attachments.py` 는 이후 `scripts/python/gc_orphan_attachments.py`
+> 로 이동되었다. 검증 시점의 실행 기록은 그대로 보존하고, 재실행 시에는 신 경로로 호출한다.
+> (`tests/scripts/test_gc_orphan_attachments.py` 는 테스트 파일이라 위치 변경 없음.)
 
 ## 결과 요약
 

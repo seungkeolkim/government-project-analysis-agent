@@ -215,7 +215,7 @@ def create_user(
         password: 원문 비밀번호.
         email: 이메일 주소 (없으면 None).
         is_admin: 관리자 플래그. 일반 회원가입은 False. CLI
-            (``scripts/create_admin.py``) 에서만 True 로 호출한다.
+            (``scripts/python/create_admin.py``) 에서만 True 로 호출한다.
 
     Returns:
         새로 생성된 ``User`` 인스턴스 (flush 완료, id 할당됨).

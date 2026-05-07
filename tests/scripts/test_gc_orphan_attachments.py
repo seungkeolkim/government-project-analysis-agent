@@ -3,7 +3,7 @@
 검증 대상:
     - ``app/scrape_control/orphan_gc.py`` 의 핵심 함수 (compute_orphan_files /
       gather_db_attachment_paths / delete_orphan_files / run_gc).
-    - ``scripts/gc_orphan_attachments.py`` 의 CLI 종료 코드 분기.
+    - ``scripts/python/gc_orphan_attachments.py`` 의 CLI 종료 코드 분기.
 
 설계 §11.5 의 검증 기준 (사용자 원문 검증 8):
     - --dry-run 으로 후보 출력 → 운영자가 검수 → 실제 실행.
@@ -447,20 +447,20 @@ def test_run_gc_handles_missing_root_directory(
 
 
 # ──────────────────────────────────────────────────────────────
-# CLI 종료 코드 분기 (scripts/gc_orphan_attachments.py)
+# CLI 종료 코드 분기 (scripts/python/gc_orphan_attachments.py)
 # ──────────────────────────────────────────────────────────────
 
 
 def _load_gc_script_module() -> ModuleType:
-    """``scripts/gc_orphan_attachments.py`` 를 임의 이름 모듈로 로드한다.
+    """``scripts/python/gc_orphan_attachments.py`` 를 임의 이름 모듈로 로드한다.
 
-    scripts/ 가 패키지가 아니라 importlib 로 직접 경로 지정 — tests/auth/
+    scripts/python/ 이 패키지가 아니라 importlib 로 직접 경로 지정 — tests/auth/
     test_create_admin.py 와 동일 패턴.
     """
     module_name = "scripts_gc_orphan_attachments_under_test"
     if module_name in sys.modules:
         return sys.modules[module_name]
-    script_path = _PROJECT_ROOT / "scripts" / "gc_orphan_attachments.py"
+    script_path = _PROJECT_ROOT / "scripts" / "python" / "gc_orphan_attachments.py"
     spec = importlib.util.spec_from_file_location(module_name, script_path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

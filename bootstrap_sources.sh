@@ -7,16 +7,18 @@
 # sources.yaml 은 .gitignore 대상이므로 브랜치 전환 시 유지된다.
 #
 # 사용법:
-#   sh scripts/bootstrap_sources.sh
+#   sh ./bootstrap_sources.sh
 #
 # 초기 설정 순서:
-#   1. sh scripts/bootstrap_sources.sh
+#   1. sh ./bootstrap_sources.sh
 #   2. sources.yaml 을 환경에 맞게 편집
 #   3. docker compose up app
 
-# 이 스크립트가 위치한 디렉터리 기준으로 프로젝트 루트를 결정한다.
+# 이 스크립트가 위치한 디렉터리(= 프로젝트 루트) 를 기준으로 경로를 계산한다.
+# 사용자 실행 스크립트는 프로젝트 루트에 직접 배치되어 있으므로 SCRIPT_DIR 이
+# 곧 프로젝트 루트다 (00078 에서 scripts/ 분리 시 루트로 승격됨).
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+PROJECT_ROOT="$SCRIPT_DIR"
 
 TEMPLATE_PATH="$PROJECT_ROOT/sources.yaml.template"
 TARGET_PATH="$PROJECT_ROOT/sources.yaml"

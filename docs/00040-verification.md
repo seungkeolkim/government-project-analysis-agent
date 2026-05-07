@@ -8,6 +8,11 @@
 > - 코더 로컬 (Linux, Python 3.12, .venv).
 > - docker compose 환경에서의 E2E 점검은 운영자(또는 인간 리뷰어) 가 수행해야
 >   하는 항목을 별도 표시한다.
+>
+> **경로 변경 안내 (task 00078, 2026-05-07)**: 본문에서 인용하는 `scripts/backup_db.py`,
+> `scripts/backfill_kst_assumption.py` 는 이후 `scripts/python/<name>.py` 로 이동되었다.
+> 검증 시점의 실행 기록은 그대로 보존하고, 재실행 시에는 신 경로
+> (`scripts/python/backup_db.py`, `scripts/python/backfill_kst_assumption.py`) 로 호출한다.
 
 ## 결과 요약
 

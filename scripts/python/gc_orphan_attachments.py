@@ -10,7 +10,7 @@
 
        권장 호출:
            docker compose --profile scrape run --rm scraper \\
-               python scripts/gc_orphan_attachments.py --dry-run
+               python scripts/python/gc_orphan_attachments.py --dry-run
 
     2. **먼저 ``--dry-run`` 으로 후보 확인** → 출력 검토 → 같은 명령어에서
        ``--dry-run`` 을 빼고 재실행해 실제 삭제. 사용자 원문 검증 8 그대로
@@ -43,10 +43,11 @@ import argparse
 import sys
 from pathlib import Path
 
-# 프로젝트 루트를 sys.path 에 추가 — scripts/ 는 패키지가 아니라 직접 실행 시
-# ``app`` import 가 안 된다. 다른 운영 스크립트(create_admin / backup_db 등)와
-# 동일 패턴.
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# 프로젝트 루트를 sys.path 에 추가 — scripts/python/ 는 패키지가 아니라 직접
+# 실행 시 ``app`` import 가 안 된다. 본 파일이 scripts/python/ 아래에 있으므로
+# 루트까지 부모 3단계(파일 → scripts/python → scripts → 프로젝트 루트) 를
+# 거슬러 올라간다. 다른 운영 스크립트(create_admin / backup_db 등)와 동일 패턴.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 from loguru import logger  # noqa: E402
@@ -67,7 +68,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     옵션 의미는 모듈 docstring 참조.
     """
     parser = argparse.ArgumentParser(
-        prog="python scripts/gc_orphan_attachments.py",
+        prog="python scripts/python/gc_orphan_attachments.py",
         description=(
             "data/downloads/ 의 첨부 파일 중 본 테이블 attachments 가 참조하지 "
             "않는 고아 파일을 스캔/삭제한다. (사용자 원문 검증 8)"

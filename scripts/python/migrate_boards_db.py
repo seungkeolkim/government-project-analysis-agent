@@ -6,7 +6,7 @@
 
 사용법::
 
-    python scripts/migrate_boards_db.py
+    python scripts/python/migrate_boards_db.py
 """
 
 from __future__ import annotations
@@ -14,8 +14,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# 프로젝트 루트를 sys.path 에 추가한다 (스크립트 단독 실행 지원)
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# 프로젝트 루트를 sys.path 에 추가한다 (스크립트 단독 실행 지원).
+# 본 파일은 scripts/python/ 아래에 위치하므로 루트까지 부모 3단계
+# (파일 → scripts/python → scripts → 프로젝트 루트) 를 거슬러 올라간다.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
