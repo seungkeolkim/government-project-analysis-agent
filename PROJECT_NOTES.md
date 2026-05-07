@@ -161,6 +161,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
   - `tests/e2e/` — Playwright 기반. 포트 8000(운영) 충돌 방지로 8001 격리 서버. `test_dashboard_e2e.py`, `test_admin_organizations_e2e.py`, `test_admin_suggestion_delete_e2e.py`. 호스트에 chromium 의존 라이브러리·Playwright 브라우저 캐시가 없으면 `conftest.py` 가 `pytest.skip`. `e2e-tests/` TypeScript Playwright 테스트도 병행.
   - conftest 패턴: 인메모리 SQLite + 가짜 User fixture. settings 류 통합 테스트는 TestClient + 별도 `db_verify` 세션으로 commit 결과를 재조회하는 패턴.
 - **커밋 메시지**: `[{task_id}][tg:{requester}] {subtask_id}: {요약}` 형식.
+- **장기 문서 컨벤션 — 현재 상태 중심**: `PROJECT_NOTES.md` 와 `README.USER.md` 는 모두 **현재 상태 중심**으로 유지한다. task ID 인용·시간순 append·"최근 변경 이력" 류 일지 섹션 금지 — 장기적으로 의미 있는 결정·컨벤션·아키텍처 변화만 본문 해당 섹션에 병합한다. `README.USER.md` 는 기능/상황별 단위(시작하기·스크래퍼 실행·DB 관리·트러블슈팅 등)로 구조화하고, 운영자에게 의미 없는 task 출처 메타는 제거한다. 일회성 verification·audit 산출물은 `docs/` 에 영속 저장하지 않고 PR 설명·커밋 메시지로 대체.
 - **데이터 / 비밀**: `.env` 와 `sources.yaml` 은 커밋 금지 (`.gitignore`). `.env.example`·`sources.yaml.template` 만 관리. `sources.yaml` 초기 생성은 `sh ./bootstrap_sources.sh`.
 - **Migration / ORM 이식성**: ORM 컬럼 타입은 JSON (범용·JSONB 금지), `DateTime(timezone=True)`, `String(N)` 같은 dialect 중립 타입만 사용. ALTER TABLE 은 반드시 `batch_alter_table` 로 감싼다 (SQLite 호환). 각 migration 은 `upgrade()` + `downgrade()` 양방향 구현. 대소문자 무시 검색은 `func.lower() + LIKE`. 상세 규칙은 `docs/db_portability.md`.
 - **Migration 검증 절차**: 신규 migration 추가 시 (1) 기존 DB stamp 무변경, (2) 빈 SQLite 에 baseline-bootstrap, (3) Postgres syntax 호환 — 3 단계 검증. 절차는 `docs/db_portability.md §4`.
