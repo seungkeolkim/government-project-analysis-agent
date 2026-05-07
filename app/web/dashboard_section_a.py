@@ -37,7 +37,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.db.models import Announcement, ScrapeSnapshot
+from app.db.models import Announcement, AnnouncementStatus, ScrapeSnapshot
 from app.db.repository import (
     find_nearest_previous_snapshot_date,
     get_scrape_snapshot_by_date,
@@ -51,6 +51,18 @@ from app.db.snapshot import (
     merge_snapshot_payload,
     normalize_payload,
 )
+
+
+# ──────────────────────────────────────────────────────────────
+# 전이 이전상태 label → CSS status key 매핑
+# ──────────────────────────────────────────────────────────────
+
+# transition_from 값(한글 상태명)을 status-{key} CSS 클래스의 key 로 변환.
+# TRANSITION_TO_LABELS 에 정의된 상태에 한해 매핑하고, 그 외 값은 None fallback.
+_TRANSITION_FROM_KEY_MAP: dict[str, str] = {
+    AnnouncementStatus(label).value: AnnouncementStatus(label).name.lower()
+    for label in TRANSITION_TO_LABELS
+}
 
 
 # ──────────────────────────────────────────────────────────────
@@ -86,19 +98,19 @@ SECTION_A_CATEGORY_DESCRIPTORS: tuple[dict[str, str], ...] = (
     },
     {
         "key": _transition_key(TRANSITION_TO_LABELS[0]),  # 접수예정
-        "label": f"전이 → {TRANSITION_TO_LABELS[0]}",
+        "label": f"(전이) {TRANSITION_TO_LABELS[0]}",
         "duplicate_badge": f"🔄 전이→{TRANSITION_TO_LABELS[0]}도",
         "is_transition": "true",
     },
     {
         "key": _transition_key(TRANSITION_TO_LABELS[1]),  # 접수중
-        "label": f"전이 → {TRANSITION_TO_LABELS[1]}",
+        "label": f"(전이) {TRANSITION_TO_LABELS[1]}",
         "duplicate_badge": f"🔄 전이→{TRANSITION_TO_LABELS[1]}도",
         "is_transition": "true",
     },
     {
         "key": _transition_key(TRANSITION_TO_LABELS[2]),  # 마감
-        "label": f"전이 → {TRANSITION_TO_LABELS[2]}",
+        "label": f"(전이) {TRANSITION_TO_LABELS[2]}",
         "duplicate_badge": f"🔄 전이→{TRANSITION_TO_LABELS[2]}도",
         "is_transition": "true",
     },
@@ -128,8 +140,12 @@ class SectionAExpandItem:
         deadline_at:        마감 시각 UTC tz-aware datetime — 템플릿이 ``kst_date``
                             필터로 표시.
         canonical_group_id: 위젯 4번 (canonical 미판정 카운트) 가 활용. None 가능.
-        transition_from:    전이 카테고리 행에서만 의미 — \"X 에서\" 표기. plain
-                            카테고리는 None.
+        transition_from:    전이 카테고리 행에서만 의미 — 이전 상태 한글값
+                            (\"접수예정\" 등). plain 카테고리는 None.
+        transition_from_key: transition_from 에 대응하는 CSS status key
+                            (\"scheduled\" / \"receiving\" / \"closed\" 등).
+                            배지 색상 클래스 ``status-{key}`` 에 사용.
+                            transition_from 이 None 이거나 매핑에 없으면 None.
         duplicate_badges:   내용 변경 행에서 같은 announcement 가 다른 카테고리
                             에도 등장하면 표시할 배지 텍스트 list. 중복 없으면
                             빈 list.
@@ -144,6 +160,7 @@ class SectionAExpandItem:
     deadline_at: datetime | None
     canonical_group_id: int | None
     transition_from: str | None
+    transition_from_key: str | None
     duplicate_badges: list[str] = field(default_factory=list)
 
 
@@ -599,6 +616,7 @@ def _build_expand_items_for_category(
             announcement = announcement_meta_map.get(announcement_id)
             if announcement is None:
                 continue
+            from_label = str(entry["from"])
             items.append(
                 SectionAExpandItem(
                     announcement_id=announcement.id,
@@ -609,7 +627,8 @@ def _build_expand_items_for_category(
                     agency=announcement.agency,
                     deadline_at=announcement.deadline_at,
                     canonical_group_id=announcement.canonical_group_id,
-                    transition_from=str(entry["from"]),
+                    transition_from=from_label,
+                    transition_from_key=_TRANSITION_FROM_KEY_MAP.get(from_label),
                     duplicate_badges=_collect_duplicate_badges(
                         announcement_id=announcement_id,
                         own_category_key=key,
@@ -644,6 +663,7 @@ def _build_expand_items_for_category(
                     deadline_at=announcement.deadline_at,
                     canonical_group_id=announcement.canonical_group_id,
                     transition_from=None,
+                    transition_from_key=None,
                     duplicate_badges=duplicate_badges,
                 )
             )

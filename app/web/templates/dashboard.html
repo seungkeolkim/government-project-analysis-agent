@@ -200,13 +200,12 @@
                                             <a class="dashboard-card__expand-link"
                                                href="/announcements/{{ item.announcement_id }}">
                                                 <span class="source-badge source-{{ item.source_type | lower }}">{{ item.source_type }}</span>
+                                                {% if item.transition_from and item.transition_from_key %}
+                                                    <span class="status-badge status-{{ item.transition_from_key }}">{{ item.transition_from }}</span>
+                                                    <span class="dashboard-card__transition-arrow">→</span>
+                                                {% endif %}
                                                 <span class="status-badge status-{{ item.status_key }}">{{ item.status_label }}</span>
                                                 <span class="dashboard-card__expand-title">{{ item.title }}</span>
-                                                {% if item.transition_from %}
-                                                    <span class="dashboard-card__transition-from">
-                                                        ({{ item.transition_from }}에서)
-                                                    </span>
-                                                {% endif %}
                                                 {% for badge_text in item.duplicate_badges %}
                                                     <span class="dashboard-card__duplicate-badge">{{ badge_text }}</span>
                                                 {% endfor %}

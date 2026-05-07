@@ -2829,9 +2829,10 @@ button.canonical-count-badge.siblings-toggle--open {
     text-decoration: underline;
 }
 
-.dashboard-card__transition-from {
+.dashboard-card__transition-arrow {
     color: #6b7280;
     font-size: 12px;
+    margin: 0 2px;
 }
 
 .dashboard-card__duplicate-badge {
