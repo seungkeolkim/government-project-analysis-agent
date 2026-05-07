@@ -21,15 +21,14 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{% block page_title %}정부과제 공고 수집 시스템{% endblock %}</title>
+    <title>{% block page_title %}정부과제 공고 수집/분석 시스템{% endblock %}</title>
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body class="{% if not current_user %}is-anonymous{% endif %}">
     <header class="site-header">
         <div class="container site-header__inner">
             <div class="site-header__brand">
-                <h1 class="site-title"><a href="/">정부과제 공고 수집 시스템</a></h1>
-                <p class="site-subtitle">수집된 사업공고를 소스별로 조회한다.</p>
+                <h1 class="site-title"><a href="/">정부과제 공고 수집/분석 시스템</a></h1>
             </div>
             <nav class="site-nav" aria-label="사용자 메뉴">
                 {# Phase 5b (task 00042-2) — 대시보드 탭. 비로그인 사용자도
