@@ -180,6 +180,35 @@ def test_notification_unsubscribe_persists_to_db(client: TestClient, db_verify: 
     assert user.email_subscribed is False
 
 
+def test_notification_subscribe_redirects_with_success_flash_type(client: TestClient) -> None:
+    """이메일 알림 켜기 시 redirect URL의 flash_type이 success여야 한다."""
+    _register_and_login(client, "fred", "fred_password_1")
+
+    response = client.post(
+        "/settings/notification",
+        data={"email_subscribed": "1"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "flash_type=success" in response.headers["location"]
+
+
+def test_notification_unsubscribe_redirects_with_warning_flash_type(client: TestClient) -> None:
+    """이메일 알림 끄기 시 redirect URL의 flash_type이 warning이어야 한다.
+
+    끄기 상태는 노란색(warning 톤)으로 표시해 한 눈에 비활성 상태를 인식할 수 있도록 한다.
+    """
+    _register_and_login(client, "grace", "grace_password_1")
+
+    response = client.post(
+        "/settings/notification",
+        data={},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "flash_type=warning" in response.headers["location"]
+
+
 # ──────────────────────────────────────────────────────────────
 # POST /settings/password
 # ──────────────────────────────────────────────────────────────

@@ -109,6 +109,13 @@
                     value="1"
                     {% if current_user.email_subscribed %}checked{% endif %}>
                 <span class="settings-form__label settings-form__label--inline">이메일 알림 수신</span>
+                {# 현재 구독 상태를 한 눈에 인식할 수 있도록 배지로 표시한다.
+                   flash 메시지가 사라진 후에도 상태가 남는다. #}
+                {% if current_user.email_subscribed %}
+                <span class="settings-notification__status-badge settings-notification__status-badge--on">수신 중</span>
+                {% else %}
+                <span class="settings-notification__status-badge settings-notification__status-badge--off">수신 꺼짐</span>
+                {% endif %}
             </label>
             <button type="submit" class="settings-form__submit">저장</button>
         </form>

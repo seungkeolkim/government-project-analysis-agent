@@ -358,9 +358,11 @@ def settings_notification(
     session.commit()
 
     label = "켰습니다" if subscribed else "껐습니다"
+    # 알림을 끈 상태는 warning 톤으로 표시해 한 눈에 비활성 상태를 인식할 수 있도록 한다.
+    flash_type = "success" if subscribed else "warning"
     logger.info("이메일 수신 설정 변경 완료: user_id={} subscribed={}", user.id, subscribed)
     return RedirectResponse(
-        url=f"/settings?flash_msg=이메일 알림을 {label}.&flash_section=notification&flash_type=success",
+        url=f"/settings?flash_msg=이메일 알림을 {label}.&flash_section=notification&flash_type={flash_type}",
         status_code=status.HTTP_303_SEE_OTHER,
     )
 

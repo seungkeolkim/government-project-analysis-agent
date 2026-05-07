@@ -3121,6 +3121,36 @@ button.canonical-count-badge.siblings-toggle--open {
     border: 1px solid #bbf7d0;
 }
 
+/* 경고 플래시 메시지 — 이메일 알림 끄기처럼 주의 필요 상태에 사용. */
+.flash-message--warning {
+    background: #fef9c3;
+    color: #854d0e;
+    border: 1px solid #fde047;
+}
+
+/* 이메일 알림 수신 상태 배지 — flash 사라진 후에도 현재 상태를 한 눈에 인식. */
+.settings-notification__status-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 9999px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-left: 8px;
+    vertical-align: middle;
+}
+
+.settings-notification__status-badge--on {
+    background: #dcfce7;
+    color: #166534;
+    border: 1px solid #bbf7d0;
+}
+
+.settings-notification__status-badge--off {
+    background: #fef9c3;
+    color: #854d0e;
+    border: 1px solid #fde047;
+}
+
 /* 설정 페이지 전체 래퍼 */
 .settings-wrap {
     max-width: 560px;
