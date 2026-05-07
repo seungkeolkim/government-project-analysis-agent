@@ -40,8 +40,14 @@ def _auth_db_session() -> Iterator[Session]:
     ``app/web/main.py`` 의 ``get_session`` 과 동일한 패턴이지만, auth 모듈이
     ``main`` 에 의존하지 않도록 독립적으로 선언한다. FastAPI 의존성 시스템은
     중복 주입을 방지하지 않으므로 같은 요청에서 이 함수와 ``get_session`` 이
-    모두 호출되면 세션이 2개 생성될 수 있다 — 인증 플로우의 DB 질의는 가볍고
-    (PK lookup 수준) 쓰기도 단일 row 이므로 실무상 문제가 없다.
+    모두 호출되면 세션이 2개 생성될 수 있다.
+
+    **주의 — 세션 mismatch 함정 (task 00080 회귀 원인):**
+    이 세션에서 로드된 ``User`` 인스턴스(``current_user``)를 다른 세션(예:
+    ``_settings_db_session``)의 service 함수에 넘기면, 그 세션은 해당 인스턴스를
+    identity map에서 추적하지 않으므로 ORM 속성 변경 후 flush/commit 해도
+    UPDATE 쿼리가 발행되지 않는다. mutate 목적으로 ``User`` 가 필요한 라우트에서는
+    반드시 대상 세션 기준으로 재조회(``session.get(User, current_user.id)``)해야 한다.
     """
     # 00030-3 — 세션 lifecycle 추적용 DEBUG 로그. 주 sink 는 FastAPI 요청
     # 미들웨어(observability.py) 가 request_id 로 스코프를 잡아두므로, 이 한
