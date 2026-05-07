@@ -5,6 +5,11 @@
     1. 최근 7일 일별 접근 통계 (날짜 내림차순)
     2. IP별 방문 이력 (최근 방문 순)
     3. 오늘 최근 원본 로그 (최신 50건, 최신 순)
+
+  IP 필터 (task 00077-2):
+    - 상단 폼: IP 입력창 + 포함/제외 라디오 + 적용 + 초기화
+    - GET 쿼리스트링(ips, mode) 으로 전달 → 라우트가 필터 적용 후 재집계
+    - 초기화는 /admin/usage 앵커 링크 — 서버 호출 없는 <button type="reset"> 대신 사용
 #}
 {% extends "admin/base.html" %}
 
@@ -15,6 +20,37 @@
     {{ flash }}
 </div>
 {% endif %}
+
+{# ── IP 필터 폼 ────────────────────────────────────────────── #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">IP 필터</h3>
+    <form method="get" action="/admin/usage" class="admin-form">
+        <fieldset class="admin-fieldset">
+            <legend class="admin-fieldset__legend">필터 대상 IP (콤마로 구분)</legend>
+            <input type="text" name="ips"
+                   value="{{ filter_ips_raw }}"
+                   class="admin-usage-ip-filter__input"
+                   placeholder="예) 192.168.1.1, 10.0.0.2">
+        </fieldset>
+        <fieldset class="admin-fieldset">
+            <legend class="admin-fieldset__legend">집계 방식</legend>
+            <label class="admin-checkbox">
+                <input type="radio" name="mode" value="include"
+                       {% if filter_mode == 'include' %}checked{% endif %}>
+                포함 — 입력한 IP만 집계
+            </label>
+            <label class="admin-checkbox">
+                <input type="radio" name="mode" value="exclude"
+                       {% if filter_mode == 'exclude' %}checked{% endif %}>
+                제외 — 입력한 IP를 제외하고 집계
+            </label>
+        </fieldset>
+        <div class="admin-usage-ip-filter__actions">
+            <button type="submit" class="admin-button admin-button--primary">적용</button>
+            <a href="/admin/usage" class="admin-button admin-button--secondary">초기화</a>
+        </div>
+    </form>
+</section>
 
 {# ── 패널 1: 일별 접근 통계 ────────────────────────────────── #}
 <section class="admin-section">
