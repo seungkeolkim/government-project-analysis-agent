@@ -4,6 +4,10 @@
 > **DB 상태**: 사전 초기화 → 본 subtask 가 IRIS+NTIS 1 페이지씩 신규 수집
 > **검증 대상**: 00039-1 에서 도입한 `official:{normalized_ancmNo}::{normalized_title}` 합성 키
 > **인용 분석**: `docs/duplicate_detection_analysis.md` §3-1, §8-4
+>
+> **경로 변경 안내 (task 00078, 2026-05-07)**: 본문에서 인용하는 `scripts/verify_canonical_iris.py`,
+> `scripts/verify_canonical_cross_source.py` 는 이후 `scripts/python/<name>.py` 로 이동되었다.
+> 검증 시점의 실행 기록은 그대로 보존하고, 재실행 시에는 신 경로(`scripts/python/...`) 로 호출한다.
 
 본 문서는 후속 문서 갱신(00039-4: design / audit / PROJECT_NOTES) 의 입력 자료다.
 

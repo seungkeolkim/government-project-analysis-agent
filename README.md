@@ -82,7 +82,7 @@ cp .env.example .env
 최초 설정 시 template 에서 복사해 사용한다:
 
 ```bash
-sh scripts/bootstrap_sources.sh
+sh ./bootstrap_sources.sh
 # 또는: cp -n sources.yaml.template sources.yaml
 ```
 
@@ -154,7 +154,7 @@ docker compose run --rm scraper alembic downgrade -1
 
 Docker 와 docker compose v2 이상이 설치되어 있어야 한다.
 
-모든 docker compose 호출은 wrapper 스크립트 `scripts/compose.sh <mode> ...` 를 통해 수행한다.
+모든 docker compose 호출은 wrapper 스크립트 `./compose.sh <mode> ...` 를 통해 수행한다.
 
 | mode | 사용 compose 파일 | 동작 |
 |------|------------------|------|
@@ -166,7 +166,7 @@ Docker 와 docker compose v2 이상이 설치되어 있어야 한다.
 ### 1) 이미지 빌드 (최초 1회 또는 아래 변경이 있을 때만)
 
 ```bash
-scripts/compose.sh dev build     # 또는 prod build
+./compose.sh dev build     # 또는 prod build
 ```
 
 > dev 모드에서는 **코드(.py / Jinja 템플릿 / static 리소스) 변경이 자동 반영**되므로
@@ -181,14 +181,14 @@ scripts/compose.sh dev build     # 또는 prod build
 
 ```bash
 # 개발 (코드 변경 자동 반영, uvicorn --reload)
-scripts/compose.sh dev up app
+./compose.sh dev up app
 
 # 운영 (이미지 코드 고정)
-scripts/compose.sh prod up app
+./compose.sh prod up app
 ```
 
 - 기동 후 브라우저에서 <http://localhost:8000> 로 접속한다.
-- 종료는 `Ctrl+C` 또는 별도 터미널에서 `scripts/compose.sh dev down` (또는 `prod down`).
+- 종료는 `Ctrl+C` 또는 별도 터미널에서 `./compose.sh dev down` (또는 `prod down`).
 
 ### 3) 스크래퍼 실행
 
@@ -196,9 +196,9 @@ scripts/compose.sh prod up app
 **실행 파라미터는 모두 `sources.yaml` 의 `scrape:` 섹션에서 설정한다.**
 
 ```bash
-scripts/compose.sh dev --profile scrape run --rm scraper
+./compose.sh dev --profile scrape run --rm scraper
 # 운영 환경 검증이 필요하면:
-scripts/compose.sh prod --profile scrape run --rm scraper
+./compose.sh prod --profile scrape run --rm scraper
 ```
 
 `sources.yaml` 에서 `enabled: true` 인 소스를 `scrape.active_sources` 순서 또는
@@ -210,7 +210,7 @@ scripts/compose.sh prod --profile scrape run --rm scraper
 
 #### 자주 쓰는 설정 패턴
 
-설정을 변경한 뒤 `scripts/compose.sh dev --profile scrape run --rm scraper` 를 실행한다.
+설정을 변경한 뒤 `./compose.sh dev --profile scrape run --rm scraper` 를 실행한다.
 
 ```yaml
 # NTIS 만 소량 검증 (드라이런)
@@ -261,7 +261,7 @@ scrape:
   - 상세 페이지 진입 시 자동으로 "읽음" 처리 (announcement 단위로 기록).
 - **회원가입.** 우상단 네비의 "회원가입" 또는 `/register` 로 직접 접근.
   username/password (선택: email) 만 입력하면 가입과 동시에 자동 로그인.
-- **첫 관리자 계정.** 운영자가 `scripts/create_admin.py` CLI 로 생성한다.
+- **첫 관리자 계정.** 운영자가 `scripts/python/create_admin.py` CLI 로 생성한다.
   자세한 절차는 [README.USER.md](README.USER.md) 의 *첫 관리자 계정 생성*
   섹션 참조.
 
@@ -302,17 +302,17 @@ scrape:
 
 1. **환경 구성**
    - [ ] `.env` 가 생성되어 있고 `DB_URL`, `DOWNLOAD_DIR` 이 의도한 값이다.
-   - [ ] `sources.yaml` 이 존재한다 (`sh scripts/bootstrap_sources.sh` 또는 `cp -n sources.yaml.template sources.yaml` 로 생성).
+   - [ ] `sources.yaml` 이 존재한다 (`sh ./bootstrap_sources.sh` 또는 `cp -n sources.yaml.template sources.yaml` 로 생성).
    - [ ] `sources.yaml` 에서 수집할 소스가 `enabled: true` 로 설정되어 있다.
    - [ ] `sources.yaml` 의 `scrape:` 섹션이 의도한 파라미터로 설정되어 있다.
    - [ ] `./data/db`, `./data/downloads` 디렉터리가 존재한다(비어 있어도 됨).
 2. **Docker 빌드 & 기동**
-   - [ ] `scripts/compose.sh dev build` 가 에러 없이 완료된다.
-   - [ ] `scripts/compose.sh dev up app` 후 <http://localhost:8000> 가 200 을 반환한다.
+   - [ ] `./compose.sh dev build` 가 에러 없이 완료된다.
+   - [ ] `./compose.sh dev up app` 후 <http://localhost:8000> 가 200 을 반환한다.
    - [ ] 초기 목록 페이지에 "공고가 없습니다" 빈 상태 UI 가 정상 렌더링된다.
 3. **스크래퍼 드라이런**
    - [ ] `sources.yaml` 의 `scrape.dry_run: true`, `scrape.max_pages: 1` 설정 후
-         `scripts/compose.sh dev --profile scrape run --rm scraper` 실행 시
+         `./compose.sh dev --profile scrape run --rm scraper` 실행 시
          목록 파싱 로그가 정상 출력되고 DB/파일 쓰기 없이 exit code 0 으로 종료된다.
 4. **스크래퍼 실제 실행 및 증분 동작 확인**
    - [ ] `scrape.dry_run: false`, `scrape.max_pages: 1` 설정 후 실행하면

@@ -5,6 +5,10 @@
 > **감사 스크립트**: `scripts/audit_canonical_false_positives.py`  
 > **실행 명령**: `docker compose run --rm app python scripts/audit_canonical_false_positives.py --show-id 17 33 34 39`  
 > **DB 접근**: 읽기 전용 (SessionLocal). 어떤 row 도 변경하지 않음.
+>
+> **경로 변경 안내 (task 00078, 2026-05-07)**: 본 문서에서 인용하는 모든 `scripts/<name>.py` 는
+> 이후 `scripts/python/<name>.py` 로 이동되었다. 본문은 감사 시점의 실행 기록을 그대로 보존하되,
+> 재실행 시에는 `scripts/python/audit_canonical_false_positives.py` 경로로 호출한다.
 
 ---
 

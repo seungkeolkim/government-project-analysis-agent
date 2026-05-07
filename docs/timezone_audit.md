@@ -3,6 +3,12 @@
 > 작성일: 2026-04-28 / 대상 SHA: `6a1f392` (`feature/00040-kst-display-consistency`)
 > 본 보고서는 **읽기 전용** 산출물이다. 코드 변경은 없으며, 후속 subtask
 > (00040-2 ~ 00040-6) 가 1차 근거로 사용한다.
+>
+> **경로 변경 안내 (task 00078, 2026-05-07)**: 본문에서 인용하는
+> `scripts/backup_db.py`, `scripts/audit_canonical_false_positives.py`,
+> `scripts/backfill_kst_assumption.py` 는 이후 `scripts/python/<name>.py` 로 이동되었다.
+> 감사 시점의 행/위치 표기(`scripts/backup_db.py:221` 등)는 그대로 보존하고,
+> 재실행 또는 재참조 시에는 신 경로(`scripts/python/...`) 기준으로 찾는다.
 
 ## §0 전제 / 컨벤션 한 줄 요약
 

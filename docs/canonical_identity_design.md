@@ -355,7 +355,7 @@ ALTER TABLE announcements
 
 - **재공고(재공고 여부=Y) 처리**: 동일 `ancmNo` 재사용 여부 — 실데이터 관찰 필요
 - **NTIS 공고번호 파싱 정규식 정교화**: 상세 HTML 본문에서 추출 (`[부처명]\s*공고\s*제\s*[\d\-]+\s*호`)
-- **IRIS 재등록(ancmId 변경) 실데이터 검증**: `scripts/verify_canonical_iris.py` 시나리오 B는 현재 fixture 대체 — NTIS 구현 이후 실데이터로 최종 점검
+- **IRIS 재등록(ancmId 변경) 실데이터 검증**: `scripts/python/verify_canonical_iris.py` 시나리오 B는 현재 fixture 대체 — NTIS 구현 이후 실데이터로 최종 점검
 - **ancmNo 공란 케이스**: 현재 샘플에서 0건이나, 마감 대량 페이지에서 추가 확인 권장
 
 ---
@@ -385,8 +385,8 @@ ALTER TABLE announcements
 | `app/db/migration.py` | 단계 5 (`canonical_projects` CREATE) + 단계 6 (컬럼 3개 ADD) |
 | `app/db/repository.py` | `_apply_canonical()` 헬퍼 + `upsert_announcement()` 4-branch 통합 |
 | `app/scraper/iris/list_scraper.py` | `ancmNo` → `ancm_no` 추출 추가 |
-| `scripts/verify_canonical_iris.py` | IRIS 단독 검증 스크립트 (18/18 PASS) |
-| `scripts/backfill_canonical.py` | 기존 데이터 일회성 backfill 스크립트 |
+| `scripts/python/verify_canonical_iris.py` | IRIS 단독 검증 스크립트 (18/18 PASS) |
+| `scripts/python/backfill_canonical.py` | 기존 데이터 일회성 backfill 스크립트 |
 
 ### 수집 파이프라인 canonical 적용 규칙
 
@@ -410,7 +410,7 @@ fuzzy:{제목정규화50자}:{기관정규화}:{마감연도}
 > **00039 (2026-04-28) 변경**: official scheme 가 ancmNo 단독에서 (ancmNo + title) 합성으로
 > 전환. fuzzy 분기는 변경 없음. §4-1 / §11-6 참조.
 
-### IRIS 단독 검증 시나리오 (scripts/verify_canonical_iris.py)
+### IRIS 단독 검증 시나리오 (scripts/python/verify_canonical_iris.py)
 
 | 시나리오 | 검증 내용 | 결과 |
 |----------|-----------|------|
@@ -421,16 +421,16 @@ fuzzy:{제목정규화50자}:{기관정규화}:{마감연도}
 
 > 시나리오 B의 실데이터 재등록 검증은 NTIS 구현 이후 수행 예정.
 
-### 기존 데이터 backfill (scripts/backfill_canonical.py)
+### 기존 데이터 backfill (scripts/python/backfill_canonical.py)
 
 한 번만 실행하면 된다. 멱등 설계 — 이미 `canonical_group_id`가 채워진 row는 건너뛴다.
 
 ```bash
 # 1) dry-run 으로 대상 건수 먼저 확인
-python scripts/backfill_canonical.py --dry-run
+python scripts/python/backfill_canonical.py --dry-run
 
 # 2) 실제 실행
-python scripts/backfill_canonical.py --batch-size 200
+python scripts/python/backfill_canonical.py --batch-size 200
 ```
 
 신규 DB는 첫 수집 시부터 canonical이 자동으로 채워지므로 backfill 불필요.
@@ -440,9 +440,9 @@ python scripts/backfill_canonical.py --batch-size 200
 ## 10. Cross-source canonical 매칭 실검증 (00014-8)
 
 > 검증 일시: 2026-04-21  
-> 스크립트: `scripts/verify_canonical_cross_source.py`  
+> 스크립트: `scripts/python/verify_canonical_cross_source.py`  
 > 결과: **PASS 15 / FAIL 0**  
-> IRIS 단독 검증(`scripts/verify_canonical_iris.py`): **PASS 18 / FAIL 0** (회귀 없음)
+> IRIS 단독 검증(`scripts/python/verify_canonical_iris.py`): **PASS 18 / FAIL 0** (회귀 없음)
 
 ### 10-1. NTIS canonical 수집 파이프라인 보완 (00014-6 known_concern 해소)
 
@@ -583,7 +583,7 @@ TODO split: canonical_group_id=32 (ann 33+34)
 ### 11-5. fuzzy false-positive 상황
 
 감사 시점 현재 fuzzy scheme 다중 그룹은 0건. fuzzy false-positive 미관찰.
-데이터 증가 후 재감사 시 `scripts/audit_canonical_false_positives.py` 재실행.
+데이터 증가 후 재감사 시 `scripts/python/audit_canonical_false_positives.py` 재실행.
 
 ### 11-6. 00039 후속 감사 — 합성 키 도입 후 (2026-04-28 시점)
 
@@ -630,8 +630,8 @@ DB 초기화 후 신규 합성 키(`official:{ancmNo}::{title}`) 로 IRIS+NTIS 1
 관찰되면 별도 보정(canonical_overrides merge 또는 정규화 추가)으로 처리.
 
 **verify 스크립트 회귀**:
-- `scripts/verify_canonical_cross_source.py`: PASS=15 / FAIL=0 (E/F/G/H 전 시나리오 통과).
-- `scripts/verify_canonical_iris.py`: PASS=16 / FAIL=2 — scenario B 의 fixture 가 구
+- `scripts/python/verify_canonical_cross_source.py`: PASS=15 / FAIL=0 (E/F/G/H 전 시나리오 통과).
+- `scripts/python/verify_canonical_iris.py`: PASS=16 / FAIL=2 — scenario B 의 fixture 가 구
   contract(같은 ancmNo + 다른 title 도 같은 그룹) 를 인코딩하고 있어 발생한 회귀.
   분석 §8-5 의 의도된 동작 변경에 해당. 후속 작업으로 fixture 의 두 title 을 동일하게
   맞추거나 별도 시나리오 추가가 필요 (본 task 범위 밖).

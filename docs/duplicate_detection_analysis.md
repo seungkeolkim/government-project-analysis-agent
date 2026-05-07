@@ -5,6 +5,12 @@
 > **DB 접근**: 읽기 전용 (`SessionLocal`). 어떤 row 도 변경하지 않음.
 > **인용 스크립트**: `scripts/audit_canonical_false_positives.py` + 일회성 `python -c` 분석.
 > **본 문서 범위**: 분석 + 권장 방안 도출까지. **코드 변경은 별도 task 에서 진행** (사용자 명시 제약).
+>
+> **경로 변경 안내 (task 00078, 2026-05-07)**: 본문에서 인용하는 모든 `scripts/<name>.py`
+> (audit_canonical_false_positives, backfill_canonical, verify_canonical_iris,
+> verify_canonical_cross_source) 는 이후 `scripts/python/<name>.py` 로 이동되었다.
+> 분석 시점의 실행 기록과 §3-1 표 는 그대로 보존하고, 권장 방안에서 \"재실행\" 을 언급하는
+> 명령은 신 경로(`scripts/python/...`) 기준으로 호출한다.
 
 ---
 

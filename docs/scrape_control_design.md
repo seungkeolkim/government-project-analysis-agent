@@ -41,7 +41,7 @@
 ### §1.2 이 task 에서 다루지 않는 것 (범위 밖)
 
 - **사용자 목록 / 계정 관리 UI** — Phase 5. 본 task 에서 `is_admin` 부여는
-  `scripts/create_admin.py` + DB 직접 수정에만 의존한다.
+  `scripts/python/create_admin.py` + DB 직접 수정에만 의존한다.
 - **AuditLog UI 열람** — Phase 5. 본 task 에서 AuditLog 는 쓰지 않는다.
 - **sources.yaml 편집 이력 열람** — Phase 5. 백업은 이번 task 에서 만들되
   UI 조회는 Phase 5 가 담당한다.

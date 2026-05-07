@@ -45,7 +45,7 @@ echo "HOST_PROJECT_DIR=$(pwd)" >> .env
 # 필요 시 .env 편집 (DB_URL, REQUEST_DELAY_SEC 등)
 
 # 2) sources.yaml 생성 (template 에서 복사, 이미 존재하면 덮어쓰지 않음)
-sh scripts/bootstrap_sources.sh
+sh ./bootstrap_sources.sh
 # 필요 시 sources.yaml 편집 (수집 소스·페이지 수 등)
 # sources.yaml 은 .gitignore 대상 — 브랜치 전환 시 로컬 수정이 보존된다
 
@@ -56,6 +56,19 @@ docker compose build
 docker compose up app
 # → http://localhost:8000 접속
 ```
+
+### 운영 스크립트 디렉터리 구조 (task 00078)
+
+운영 스크립트는 역할별로 다음 위치에 둔다 — 어디서 무엇을 실행할지 한눈에 알도록:
+
+- **사용자 실행 shell** : 프로젝트 루트의 `./compose.sh`(docker compose wrapper),
+  `./bootstrap_sources.sh`(초기 `sources.yaml` 생성). 사용자가 손으로 직접 호출한다.
+- **시스템 호출 shell** : 현재는 `docker/entrypoint.sh` 만 존재(이미지 안에서 자동 실행).
+  향후 시스템 전용 shell script 가 늘어나면 `scripts/system/` 하위에 둘 자리이며,
+  사용자는 직접 실행하지 않는다.
+- **Python 운영 스크립트** : `scripts/python/<name>.py` (예: `backup_db.py`,
+  `create_admin.py`, `gc_orphan_attachments.py` 등). 모두 `docker compose run` 으로
+  컨테이너 안에서 실행한다.
 
 ---
 
@@ -190,13 +203,13 @@ docker compose up -d --force-recreate app
 
 ```bash
 # 1) DB 백업 (운영자 책임)
-docker compose run --rm app python scripts/backup_db.py
+docker compose run --rm app python scripts/python/backup_db.py
 
 # 2) dry-run 으로 영향 범위 확인 (변경 없음)
-docker compose run --rm app python scripts/backfill_kst_assumption.py
+docker compose run --rm app python scripts/python/backfill_kst_assumption.py
 
 # 3) 결과를 검토한 뒤 실제 적용
-docker compose run --rm app python scripts/backfill_kst_assumption.py --apply
+docker compose run --rm app python scripts/python/backfill_kst_assumption.py --apply
 ```
 
 스크립트는 idempotent — 두 번 실행해도 이미 KST 가정 변환된 row 는 skip 된다.
@@ -208,17 +221,17 @@ docker compose run --rm app python scripts/backfill_kst_assumption.py --apply
 Phase 1b 에서 자유 회원가입 + 세션 쿠키 인증이 추가되었다. 일반 사용자는
 `/register` 폼에서 직접 가입할 수 있지만, **관리자(`is_admin=True`) 계정은
 DB 컬럼만 존재하고 가입 폼으로는 만들 수 없다**. 운영자가 컨테이너 안에서
-`scripts/create_admin.py` CLI 로 한 번 만들어 둔다.
+`scripts/python/create_admin.py` CLI 로 한 번 만들어 둔다.
 
 ```bash
 # 대화형 (username/password/email 모두 prompt)
-docker compose run --rm app python scripts/create_admin.py
+docker compose run --rm app python scripts/python/create_admin.py
 
 # username 만 인자로 전달, 나머지는 prompt
-docker compose run --rm app python scripts/create_admin.py root_user
+docker compose run --rm app python scripts/python/create_admin.py root_user
 
 # username + email 까지 인자로, password 만 prompt
-docker compose run --rm app python scripts/create_admin.py root_user --email admin@example.com
+docker compose run --rm app python scripts/python/create_admin.py root_user --email admin@example.com
 ```
 
 **동작 요약**:
@@ -240,7 +253,7 @@ sqlite3 ./data/db/app.sqlite3 \
 
 > **컨테이너 내부 vs 호스트.** 위 예시는 Docker 사용을 전제로 한다. 호스트에서
 > 직접 가상환경을 돌리는 개발 환경이라면 `docker compose run --rm app`
-> 부분만 빼고 `python scripts/create_admin.py` 로 동일하게 사용한다.
+> 부분만 빼고 `python scripts/python/create_admin.py` 로 동일하게 사용한다.
 
 ### 만료된 세션 디버깅
 
@@ -651,11 +664,11 @@ apply 트랜잭션이 실패하거나 운영자가 본 테이블에서 attachmen
 ```bash
 # 1) 후보 확인 (디스크 변경 없음). 컨테이너 안에서 실행할 것 — 호스트 직접 실행 금지.
 docker compose --profile scrape run --rm scraper \
-    python scripts/gc_orphan_attachments.py --dry-run
+    python scripts/python/gc_orphan_attachments.py --dry-run
 
 # 2) 검수 후 실제 삭제
 docker compose --profile scrape run --rm scraper \
-    python scripts/gc_orphan_attachments.py
+    python scripts/python/gc_orphan_attachments.py
 ```
 
 **ScrapeRun running 가드**: 수집 진행 중에는 GC 가 거부된다 (종료 코드 2).
@@ -1229,17 +1242,17 @@ docker logs iris-agent-web 2>&1 | grep "req=9d4ecf87a930"
 
 #### 자동 백업 스크립트 (권장)
 
-일상 운영에서는 `scripts/backup_db.py` 를 사용한다 — SQLite 온라인 백업
+일상 운영에서는 `scripts/python/backup_db.py` 를 사용한다 — SQLite 온라인 백업
 (`sqlite3.connect().backup()`) 을 수행하므로 스크래퍼 실행 중에도 일관된
 스냅샷이 만들어진다.
 
 ```bash
 # 기본: data/backups/ 에 UTC 타임스탬프 파일명으로 저장, 최근 14개 보관
-docker compose run --rm scraper python scripts/backup_db.py
+docker compose run --rm scraper python scripts/python/backup_db.py
 
 # 보관 개수 / 저장 위치 변경 예
-docker compose run --rm scraper python scripts/backup_db.py --keep 30
-docker compose run --rm scraper python scripts/backup_db.py --dest /mnt/backups
+docker compose run --rm scraper python scripts/python/backup_db.py --keep 30
+docker compose run --rm scraper python scripts/python/backup_db.py --dest /mnt/backups
 ```
 
 **동작 요약**:
@@ -1256,7 +1269,7 @@ docker compose run --rm scraper python scripts/backup_db.py --dest /mnt/backups
 
 ```bash
 # 예: /etc/cron.d/gov-project-backup
-0 2 * * * cd /path/to/repo && docker compose run --rm scraper python scripts/backup_db.py >> /var/log/gov-backup.log 2>&1
+0 2 * * * cd /path/to/repo && docker compose run --rm scraper python scripts/python/backup_db.py >> /var/log/gov-backup.log 2>&1
 ```
 
 #### 복원 절차
@@ -1287,7 +1300,7 @@ cp ./data/db/app.sqlite3 ./data/db/app.sqlite3.bak.$(date +%Y%m%d)
 다만 스크래퍼가 실행 중이면 WAL 로그와의 일관성이 깨질 수 있으므로 자동
 스크립트를 권장한다.
 
-> **Postgres 전환 시**: `scripts/backup_db.py` 는 SQLite 전용이다.
+> **Postgres 전환 시**: `scripts/python/backup_db.py` 는 SQLite 전용이다.
 > Postgres 로 전환한다면 `pg_dump` / `pg_basebackup` 등 Postgres 공식 도구를
 > 별도로 운영한다 (이 스크립트는 skip 으로 빠진다).
 
@@ -1335,10 +1348,10 @@ docker compose run --rm scraper alembic upgrade head
 
 ```bash
 # 1) dry-run 으로 대상 건수 확인 (DB 변경 없음)
-docker compose run --rm scraper python scripts/backfill_canonical.py --dry-run
+docker compose run --rm scraper python scripts/python/backfill_canonical.py --dry-run
 
 # 2) 실제 실행 (200건마다 commit)
-docker compose run --rm scraper python scripts/backfill_canonical.py --batch-size 200
+docker compose run --rm scraper python scripts/python/backfill_canonical.py --batch-size 200
 ```
 
 신규 DB(00013 이후 설치)는 첫 수집 시부터 자동으로 canonical이 채워지므로 이 스크립트를 실행하지 않아도 된다.
@@ -1358,16 +1371,16 @@ sqlite3 ./data/db/app.sqlite3 "DELETE FROM announcements WHERE is_current = 0;"
 
 ### dev 모드인데 코드 변경이 반영되지 않는다 (hot reload 미동작)
 
-`scripts/compose.sh dev up app` 으로 기동했다면 컨테이너 로그에
+`./compose.sh dev up app` 으로 기동했다면 컨테이너 로그에
 `Will watch for changes in ['/app/app']` 와 `Started reloader process` 가 보여야 하고,
 `./app/` 하위 파일을 저장하면 `Reloading...` → `Application startup complete.` 가
 재출력된다. 위 메시지가 보이지 않거나 변경이 자동 반영되지 않으면:
 
-- 호출 시 mode 인자가 정말 `dev` 인지 확인한다 — `scripts/compose.sh prod up app`
+- 호출 시 mode 인자가 정말 `dev` 인지 확인한다 — `./compose.sh prod up app`
   은 일부러 reloader 를 끈 운영 모드다.
 - `docker compose ps` 로 떠 있는 컨테이너가 `dev` 모드로 기동된 것인지
   (이전 `prod` 컨테이너가 그대로 떠 있는 경우) 확인하고, 필요하면 한 번 내렸다가
-  `scripts/compose.sh dev up app` 으로 다시 기동한다.
+  `./compose.sh dev up app` 으로 다시 기동한다.
 
 ### admin 페이지에서 500 에러가 나는데 docker logs 가 비어 있다
 
@@ -1400,7 +1413,7 @@ Traceback (most recent call last):
 
 ```bash
 # 1) sources.yaml 생성
-sh scripts/bootstrap_sources.sh
+sh ./bootstrap_sources.sh
 
 # 2) 필요 시 편집
 vim sources.yaml   # 또는 선호하는 에디터
