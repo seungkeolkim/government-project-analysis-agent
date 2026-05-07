@@ -162,7 +162,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
   - conftest 패턴: 인메모리 SQLite + 가짜 User fixture. settings 류 통합 테스트는 TestClient + 별도 `db_verify` 세션으로 commit 결과를 재조회하는 패턴.
 - **커밋 메시지**: `[{task_id}][tg:{requester}] {subtask_id}: {요약}` 형식.
 - **장기 문서 컨벤션 — 현재 상태 중심**: `PROJECT_NOTES.md` 와 `README.USER.md` 는 모두 **현재 상태 중심**으로 유지한다. task ID 인용·시간순 append·"최근 변경 이력" 류 일지 섹션 금지 — 장기적으로 의미 있는 결정·컨벤션·아키텍처 변화만 본문 해당 섹션에 병합한다. `README.USER.md` 는 기능/상황별 단위(시작하기·스크래퍼 실행·DB 관리·트러블슈팅 등)로 구조화하고, 운영자에게 의미 없는 task 출처 메타는 제거한다. 일회성 verification·audit 산출물은 `docs/` 에 영속 저장하지 않고 PR 설명·커밋 메시지로 대체.
-- **데이터 / 비밀**: `.env` 와 `sources.yaml` 은 커밋 금지 (`.gitignore`). `.env.example`·`sources.yaml.template` 만 관리. `sources.yaml` 초기 생성은 `sh ./bootstrap_sources.sh`.
+- **데이터 / 비밀**: `.env` 와 `sources.yaml` 은 커밋 금지 (`.gitignore`). `.env.example`·`sources.yaml.template` 만 관리. `sources.yaml` 초기 생성은 `sh ./bootstrap_sources.sh`. 두 템플릿 파일은 **기능별 번호 섹션**으로 구성하고 `README.USER.md` 의 초기 설치 흐름과 순서를 맞춘다 — task 출처·히스토리성 주석은 제거하고 실제 사용자 관점에서 필요한 정보만 유지한다.
 - **Migration / ORM 이식성**: ORM 컬럼 타입은 JSON (범용·JSONB 금지), `DateTime(timezone=True)`, `String(N)` 같은 dialect 중립 타입만 사용. ALTER TABLE 은 반드시 `batch_alter_table` 로 감싼다 (SQLite 호환). 각 migration 은 `upgrade()` + `downgrade()` 양방향 구현. 대소문자 무시 검색은 `func.lower() + LIKE`. 상세 규칙은 `docs/db_portability.md`.
 - **Migration 검증 절차**: 신규 migration 추가 시 (1) 기존 DB stamp 무변경, (2) 빈 SQLite 에 baseline-bootstrap, (3) Postgres syntax 호환 — 3 단계 검증. 절차는 `docs/db_portability.md §4`.
 
@@ -263,3 +263,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - **bulk 요청 두 가지 모드 — `ids` vs `filter`**: 페이지 내 선택은 `ids` 모드(명시 목록), "현재 필터 결과 전체 M건 선택" 은 `filter` 모드(서버가 필터 파라미터로 announcement id 추출). `MAX_BULK_MARK` 상수로 한 번에 처리할 수 있는 상한 제한. 클라이언트가 필터 재구성을 서버에 위임해 페이지를 넘는 대량 선택을 지원.
 - **배지 클릭 vs row 클릭 충돌은 `stopPropagation` 으로 해결**: 목록 row 전체가 상세 링크(`<a>`) 로 감싸져 있을 때 내부 배지 클릭이 상세 페이지로 이동하지 않도록 `event.stopPropagation()` + `preventDefault()`. 클릭 이벤트가 있는 인라인 위젯 추가 시 동일 패턴.
 - **sources.yaml credentials 슬롯 (optional)**: 로그인이 필요한 소스를 위한 `credentials.username` / `credentials.password` 필드를 `SourceConfig` 에 예약. NTIS 는 게스트 수집이 가능해 현재 미사용. 실제 값은 `.env` 로만 주입하고 yaml 에는 키 이름만.
+
+## 최근 변경 이력
+
+- [00084] `.env.example` · `sources.yaml.template` 기능별 섹션 재구성 및 `README.USER.md` 연계 정합 — 2026-05-07

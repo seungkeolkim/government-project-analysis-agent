@@ -15,7 +15,9 @@
 # CLI 인자 없이 이 파일과 .env 로 모든 동작을 제어한다.
 
 # ──────────────────────────────────────────────────────────────
-# 전역 수집 실행 설정
+# 1. 전역 수집 실행 설정 (scrape:)
+#    이 블록의 값은 sources 의 소스별 설정보다 우선한다 (active_sources / log_level
+#    제외). 비워 두면 소스별 설정 → 코드 default 순으로 fallback 한다.
 # ──────────────────────────────────────────────────────────────
 scrape:
   # 실행할 소스 ID 목록. 비어 있으면 아래 sources 중 enabled: true 인 소스 전체를 실행한다.
@@ -30,22 +32,25 @@ scrape:
   # null 이면 소스별 max_announcements 설정 → 코드 default(200) 순으로 사용.
   max_announcements: null
 
-  # 상세 페이지 수집 건너뜀 여부 (true 이면 목록 적재만 수행)
+  # true 면 상세 페이지 수집을 건너뛴다 (목록 적재만 수행).
   skip_detail: false
 
-  # 첨부파일 다운로드 건너뜀 여부
+  # true 면 첨부파일 다운로드를 건너뛴다 (목록·상세 수집은 정상 진행).
   skip_attachments: false
 
-  # DB 쓰기 건너뜀 여부 (수집 동작만 검증할 때 사용)
+  # true 면 DB 쓰기를 건너뛴다 (수집 동작만 검증할 때 사용).
   dry_run: false
 
   # 로그 레벨 오버라이드. null 이면 .env 의 LOG_LEVEL 사용.
   # log_level: DEBUG
 
 # ──────────────────────────────────────────────────────────────
-# 소스별 크롤링 설정
-# enabled: true 인 소스만 크롤러 실행 시 활성화된다.
-# 각 소스 id 는 app/sources/constants.py 의 SOURCE_TYPE_* 상수와 일치해야 한다.
+# 2. 소스별 크롤링 설정 (sources:)
+#    enabled: true 인 소스만 크롤러 실행 시 활성화된다.
+#    각 소스 id 는 app/sources/constants.py 의 SOURCE_TYPE_* 상수와 일치해야 한다.
+#
+#    인증이 필요한 소스는 yaml 에 비밀번호를 적지 않고 환경변수로 주입한다:
+#      {SOURCE_ID}_USERNAME / {SOURCE_ID}_PASSWORD  (예: IRIS_USERNAME)
 # ──────────────────────────────────────────────────────────────
 sources:
   - id: IRIS
@@ -59,16 +64,15 @@ sources:
 
   - id: NTIS
     enabled: true
-    # 목록 POST 엔드포인트 (docs/ntis_site_exploration.md §1)
+    # 목록 POST 엔드포인트. 자세한 사이트 구조는 docs/ntis_site_exploration.md 참조.
     base_url: https://www.ntis.go.kr/rndgate/eg/un/ra/mng.do
     request_delay_sec: 2.0
-    # 마감 공고가 74,809건에 달하므로 기본값을 보수적으로 설정한다 (탐사 §1).
-    # 필요 시 최상단 scrape.max_pages / scrape.max_announcements 또는 이 값을 수정하여 일시 확장 가능.
+    # NTIS 마감 공고가 74,000건+ 으로 매우 많아 기본값을 보수적으로 둔다.
+    # 전체 수집이 필요하면 위 scrape.max_pages / scrape.max_announcements 또는
+    # 이 값을 늘려 사용한다.
     max_pages: 5
     max_announcements: 100
     statuses:
       - 접수예정
       - 접수중
       - 마감
-    # credentials 슬롯: NTIS 는 로그인 불필요(게스트 수집 가능)이므로 설정하지 않는다.
-    # 로그인이 필요한 소스는 NTIS_USERNAME / NTIS_PASSWORD 환경변수로 주입한다.
