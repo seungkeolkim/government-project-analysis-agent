@@ -15,6 +15,7 @@ from app.web.routes.bulk import router as bulk_router
 from app.web.routes.dashboard import router as dashboard_router
 from app.web.routes.favorites import router as favorites_router
 from app.web.routes.notices import router as notices_router
+from app.web.routes.progress import router as progress_router
 from app.web.routes.relevance import router as relevance_router
 from app.web.routes.settings import router as settings_router
 from app.web.routes.suggestions import router as suggestions_router
@@ -25,6 +26,7 @@ __all__ = [
     "dashboard_router",
     "favorites_router",
     "notices_router",
+    "progress_router",
     "relevance_router",
     "settings_router",
     "suggestions_router",

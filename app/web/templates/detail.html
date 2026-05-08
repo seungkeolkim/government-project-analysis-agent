@@ -10,6 +10,9 @@
     - relevance_summary_empty:    RelevanceSummary   (task 00085 — 빈 default 상수)
     - history_items:              list[HistoryWithUser]  (task 00085 — canonical 단위 판정 이력)
     - user_organization_options:  list[dict]         (task 00085 — 모달 드롭다운)
+    - progress_rows:              list[AnnouncementProgress]  (task 00097 — canonical 의 모든 active 진행 상태 row)
+    - progress_my_organizations:  list[dict]         (task 00097 — 본인 소속 조직 옵션 [{id, name}])
+    - progress_my_organization_ids: set[int]         (task 00097 — 본인 조직 PK 집합)
     - siblings:                   list[dict]         (Phase 3b — 동일 과제 목록. 비로그인 포함)
     - fav_entry_id:               int | None         (Phase 3b — 즐겨찾기 entry_id. 로그인 시만)
 
@@ -185,6 +188,9 @@
 {% else %}
     <p class="empty-attachments">첨부파일이 없거나 아직 다운로드되지 않았습니다.</p>
 {% endif %}
+
+{# ── task 00097 — 공고 진행 상태 인라인 섹션 (Phase C, 비로그인 = 로그인 동일 노출) ── #}
+{% include "_progress_section.html" %}
 
 {# ── task 00085 — 관련성 판정 풀어 표시 섹션 (비로그인 = 로그인 동일 노출) ── #}
 {% if canonical_id %}

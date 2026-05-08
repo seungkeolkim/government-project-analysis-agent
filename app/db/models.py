@@ -2027,9 +2027,328 @@ class BackupHistory(Base):
         )
 
 
+class AnnouncementProgressStatus(StrEnum):
+    """공고 진행 상태 4 단계.
+
+    값은 한글 원문을 그대로 사용한다 (PROJECT_NOTES 의 한글 enum 보존 컨벤션).
+
+    의미:
+        INTEREST    '관심' — 관심 공고 표시. 여러 조직 동시 가능.
+        REVIEW      '검토' — 검토 단계. 여러 조직 동시 가능.
+        IN_PROGRESS '진행' — 실제 진행 단계. 한 canonical 당 단일 조직 선점
+                              (선점 제약은 repository 의 app-level transactional
+                              체크가 보장 — partial unique index 는 사용하지 않음).
+        DONE        '종료' — 종료 단계. 의미상 활동성으로 보지 않으며, 카운터·
+                              필터에서 제외된다.
+    """
+
+    INTEREST = "관심"
+    REVIEW = "검토"
+    IN_PROGRESS = "진행"
+    DONE = "종료"
+
+
+class AnnouncementProgressArchiveReason(StrEnum):
+    """진행 상태 row 가 history 로 이관된 사유.
+
+    USER_CHANGED      'user_changed' — 사용자가 status/note 를 변경.
+    CONTENT_CHANGED   'content_changed' — canonical 비교 4 필드 변경 감지로
+                                          (Phase 1a §9) 일괄 reset 시 이관.
+    """
+
+    USER_CHANGED = "user_changed"
+    CONTENT_CHANGED = "content_changed"
+
+
+class AnnouncementProgress(Base):
+    """canonical_project × organization 단위 현재 유효 진행 상태.
+
+    같은 공고를 여러 조직이 모르고 중복 진행하는 사고를 방지하기 위해, canonical
+    마다 조직별 진행 상태(관심/검토/진행/종료)를 표명·열람할 수 있게 한다 (Phase
+    C, task 00097). UNIQUE 키 (canonical_project_id, organization_id) 로 한 조직
+    이 한 canonical 에 row 1 개만 가진다.
+
+    Phase B (RelevanceJudgment) 와의 차이:
+        - row 단위 키에 user_id 가 없다 — "조직 입장 = 1 row" 로 정규화.
+          작성자는 created_by_user_id 메타에 보존하며 권한 판정에는 사용하지 않는다.
+        - 권한 = 조직 멤버 누구나 (Phase B 의 row 작성자 본인 한정과 의도적 분기).
+          작성자 휴가/퇴사 시 다른 멤버가 변경할 수 있도록 한 결정.
+
+    선점 제약:
+        한 canonical 에 status='진행' row 가 최대 1 개. partial unique index 회피
+        결정(docs/db_portability §3 + Phase B 패턴)에 따라 DB UNIQUE 가 아닌
+        repository 의 app-level transactional 체크가 보장한다 (00097-3 책임).
+
+    내용 변경 감지(content_changed) 시 해당 canonical 의 모든 row 는
+    AnnouncementProgressHistory 로 이관되어 이 테이블에서 제거된다.
+    """
+
+    __tablename__ = "announcement_progress"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    canonical_project_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "canonical_projects.id",
+            name="fk_announcement_progress_canonical_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+        doc="진행 상태 대상 canonical_project PK.",
+    )
+
+    organization_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "organizations.id",
+            name="fk_announcement_progress_organization_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+        doc="진행 상태 표명 조직 PK. 조직 삭제 시 CASCADE 로 함께 사라진다.",
+    )
+
+    # status: 4 단계 한글 enum. native_enum=False — Postgres ENUM 타입 미생성,
+    # CHECK constraint 만 추가 (db_portability §1).
+    status: Mapped[AnnouncementProgressStatus] = mapped_column(
+        Enum(
+            AnnouncementProgressStatus,
+            name="announcement_progress_status",
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+            native_enum=False,
+        ),
+        nullable=False,
+        doc="진행 상태. '관심' / '검토' / '진행' / '종료' 중 하나.",
+    )
+
+    note: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="자유 메모. 없으면 NULL.",
+    )
+
+    # created_by_user_id: 마지막 수정자 메타. 권한 판정에는 사용하지 않는다
+    # (조직 멤버 누구나 정책). 사용자 탈퇴 시 NULL 로 남고 row 자체는 보존.
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "users.id",
+            name="fk_announcement_progress_created_by_user_id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        doc="마지막 수정자 사용자 PK. 권한 판정에는 사용하지 않는다.",
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        doc="최초 INSERT 시각(UTC).",
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+        doc="마지막 UPDATE 시각(UTC). status / note 변경 시 자동 갱신.",
+    )
+
+    # 관계 — repository / 라우트가 lazy load 로 조직명·작성자명을 끌어올 때 사용.
+    canonical_project: Mapped[CanonicalProject] = relationship(
+        "CanonicalProject",
+        foreign_keys=[canonical_project_id],
+        lazy="select",
+    )
+    organization: Mapped[Organization] = relationship(
+        "Organization",
+        foreign_keys=[organization_id],
+        lazy="select",
+    )
+    created_by: Mapped[User | None] = relationship(
+        "User",
+        foreign_keys=[created_by_user_id],
+        lazy="select",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "canonical_project_id",
+            "organization_id",
+            name="uq_announcement_progress_canonical_org",
+        ),
+        # status 한글 enum DB 레벨 강제 (Enum 자체는 create_constraint=False 가 SA
+        # 기본이라 CHECK 를 자동 추가하지 않는다 — relevance_judgments.verdict 와
+        # 동일 패턴으로 명시 CHECK constraint).
+        CheckConstraint(
+            "status IN ('관심', '검토', '진행', '종료')",
+            name="ck_announcement_progress_status",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현을 반환한다."""
+        return (
+            f"<AnnouncementProgress id={self.id} "
+            f"canonical={self.canonical_project_id} "
+            f"organization_id={self.organization_id} "
+            f"status={self.status!r}>"
+        )
+
+
+class AnnouncementProgressHistory(Base):
+    """이관된 과거 진행 상태 row.
+
+    AnnouncementProgress row 가 사용자 변경(user_changed) 또는 canonical 내용 변경
+    감지(content_changed, Phase 1a §9) 로 갱신·삭제될 때 이전 값이 이 테이블로
+    복사된다. 이 테이블은 append-only 로 취급하며 이관된 레코드는 수정하지 않는다.
+
+    UNIQUE 없음 — 같은 (canonical, organization) 조합에 대해 시간 순으로 row 가
+    누적된다. archive_reason 으로 이관 사유를 구분한다.
+
+    조직이 삭제되면 그 조직 입장의 history 도 CASCADE 로 함께 사라진다 — 진행
+    상태의 의미가 조직과 결합되어 있기 때문 (조직 사라짐 = 그 조직 입장 무의미).
+    """
+
+    __tablename__ = "announcement_progress_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    canonical_project_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "canonical_projects.id",
+            name="fk_announcement_progress_history_canonical_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+        doc="이관 시점의 canonical_project PK.",
+    )
+
+    organization_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "organizations.id",
+            name="fk_announcement_progress_history_organization_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+        doc="이관 시점의 진행 상태 표명 조직 PK.",
+    )
+
+    status: Mapped[AnnouncementProgressStatus] = mapped_column(
+        Enum(
+            AnnouncementProgressStatus,
+            name="announcement_progress_status",
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+            native_enum=False,
+        ),
+        nullable=False,
+        doc="이관 시점의 진행 상태 값.",
+    )
+
+    note: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="이관 시점의 자유 메모. 원본 그대로 복사.",
+    )
+
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "users.id",
+            name="fk_announcement_progress_history_created_by_user_id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        doc="이관 시점의 마지막 수정자 사용자 PK.",
+    )
+
+    # created_at / updated_at 은 이관 시점에 원본 값을 그대로 복사한다 — 이관 시각
+    # 자체는 archived_at 에 별도 기록.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        doc="이관 시점의 원본 created_at(UTC). 이관 시 덮어쓰지 않는다.",
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        doc="이관 시점의 원본 updated_at(UTC). 이관 시 덮어쓰지 않는다.",
+    )
+
+    archived_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        doc="history 로 이관된 시각(UTC).",
+    )
+
+    archive_reason: Mapped[AnnouncementProgressArchiveReason] = mapped_column(
+        Enum(
+            AnnouncementProgressArchiveReason,
+            name="announcement_progress_archive_reason",
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+            native_enum=False,
+        ),
+        nullable=False,
+        doc="이관 사유. 'user_changed' / 'content_changed'.",
+    )
+
+    canonical_project: Mapped[CanonicalProject] = relationship(
+        "CanonicalProject",
+        foreign_keys=[canonical_project_id],
+        lazy="select",
+    )
+    organization: Mapped[Organization] = relationship(
+        "Organization",
+        foreign_keys=[organization_id],
+        lazy="select",
+    )
+    created_by: Mapped[User | None] = relationship(
+        "User",
+        foreign_keys=[created_by_user_id],
+        lazy="select",
+    )
+
+    __table_args__ = (
+        # status / archive_reason 한글 enum DB 레벨 강제. Postgres 에서 같은 schema
+        # 안의 동명 CHECK constraint 충돌을 피하려고 history 쪽 CHECK 이름은 별도로
+        # 부여한다.
+        CheckConstraint(
+            "status IN ('관심', '검토', '진행', '종료')",
+            name="ck_announcement_progress_history_status",
+        ),
+        CheckConstraint(
+            "archive_reason IN ('user_changed', 'content_changed')",
+            name="ck_announcement_progress_history_archive_reason",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현을 반환한다."""
+        return (
+            f"<AnnouncementProgressHistory id={self.id} "
+            f"canonical={self.canonical_project_id} "
+            f"organization_id={self.organization_id} "
+            f"status={self.status!r} archive_reason={self.archive_reason!r}>"
+        )
+
+
 __all__ = [
     "Base",
     "Announcement",
+    "AnnouncementProgress",
+    "AnnouncementProgressArchiveReason",
+    "AnnouncementProgressHistory",
+    "AnnouncementProgressStatus",
     "AnnouncementStatus",
     "AnnouncementUserState",
     "Attachment",

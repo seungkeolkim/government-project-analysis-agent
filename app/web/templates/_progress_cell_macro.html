@@ -1,0 +1,181 @@
+{#
+  Phase C — 공고 진행 상태 / 선점 셀 매크로 (task 00097-5).
+
+  사용법:
+    {% from \"_progress_cell_macro.html\" import progress_cell, progress_expand_row %}
+    {{ progress_cell(canonical_id, summary, current_user, expand_row_id) }}
+    {{ progress_expand_row(expand_row_id, canonical_id, detail_rows, colspan) }}
+
+  인자 (progress_cell):
+    canonical_id    int                  canonical_project_id (>0)
+    summary         ProgressSummary      app.progress.repository.get_progress_summary_by_canonical_id_map
+                                         의 단일 항목. 없으면 PROGRESS_SUMMARY_EMPTY 를 그대로 넘긴다.
+    current_user    User | None          로그인 사용자 또는 None.
+    expand_row_id   str                  같은 canonical 의 셀 클릭 시 toggle 할 hidden <tr> 의 DOM id.
+                                         빈 문자열 또는 None 이면 셀이 클릭 불가능 (data 가 비어 있을 때).
+
+  인자 (progress_expand_row):
+    expand_row_id   str                  progress_cell 에 넘긴 것과 동일한 DOM id.
+    canonical_id    int                  canonical_project_id.
+    detail_rows     list[ProgressRowDetail]   조직별 단계·작성자·시점·note 풀어 표시 항목.
+                                              app.progress.repository.get_progress_rows_by_canonical_id_map
+                                              의 단일 canonical 항목 (정렬 끝난 상태).
+    colspan         int                  포함할 <tr> 의 td colspan (siblings-expand-row 와 동일 규칙).
+
+  표시 규칙 (docs/progress_org_design.md §4):
+    - 선점 있음 (in_progress_org != None): 🚩 + 조직명 + ': 진행' 큰 글씨.
+      본인 조직 진행이면 조직명 강조 색·굵게.
+    - 카운터 (검토 N · 관심 M): 0 인 항목은 생략. 둘 다 0 이면 카운터 라인 자체 미렌더.
+    - 본인 소속 조직이 관심/검토 단계에 있으면 small text 카운터에서 본인 조직 부분 강조.
+    - 빈 셀 (선점 없음 + 카운터 0/0): em dash '—' (00097-1 의 결정값).
+    - hover 툴팁: 선점·카운터 어느 한쪽이라도 있으면 노출. fixed 레이어 (00088 패턴).
+
+  보조 클래스:
+    .pg-wrap                컨테이너 (위치 기준 / hover·focus 트리거)
+    .pg-wrap--clickable     셀 expand 가 가능한 상태 (data 가 비어 있지 않음). cursor: pointer.
+    .pg-occupy              선점 라인
+    .pg-occupy--mine        본인 조직이 진행 중일 때 추가
+    .pg-counter             검토/관심 카운터 라인
+    .pg-counter__cell--mine 본인 조직이 활동 중인 단계의 카운터 cell 강조
+    .pg-empty               빈 셀 (em dash) 표시 클래스
+    .pg-tooltip             fixed 레이어 hover 툴팁
+    .pg-expand-row          셀 expand hidden <tr>
+    .pg-expand-row__list    expand 본문 ul
+    .pg-expand-row__item    expand 본문 li
+    .pg-expand-row__org     조직명 셀
+    .pg-expand-row__status  status 배지 (pg-status-badge 와 결합)
+    .pg-expand-row__meta    마지막 수정자 / 시점 메타
+    .pg-expand-row__note    note 텍스트
+
+  주의:
+    - <script> 블록 안에서 Jinja2 태그 금지 — 데이터는 data-* 속성으로 JS 에 전달.
+    - mine_organization_active 는 ProgressSummary.my_org_active (한글 단계 문자열).
+#}
+{% macro progress_cell(canonical_id, summary, current_user, expand_row_id='') %}
+{% set occupy = summary.in_progress_org %}
+{% set counter_review = summary.counter_review %}
+{% set counter_interest = summary.counter_interest %}
+{% set my_org_active = summary.my_org_active %}
+{% set mine_in_progress = (my_org_active == '진행') %}
+{% set mine_in_review = (my_org_active == '검토') %}
+{% set mine_in_interest = (my_org_active == '관심') %}
+{% set has_any_data = (occupy is not none) or counter_review > 0 or counter_interest > 0 %}
+{# expand 가능 조건: 셀에 표시할 데이터가 있고, 호출자가 expand_row_id 를 넘겼을 때.
+   빈 셀(em dash)은 클릭해도 펼칠 게 없으므로 .pg-wrap--clickable 을 부여하지 않는다. #}
+{% set is_clickable = has_any_data and (expand_row_id|length > 0) %}
+
+<span class="pg-wrap {% if is_clickable %}pg-wrap--clickable{% endif %}"
+      data-canonical-id="{{ canonical_id }}"
+      data-occupy-organization-id="{{ occupy.id if occupy is not none else '' }}"
+      data-occupy-organization-name="{{ occupy.name if occupy is not none else '' }}"
+      data-mine-active="{{ my_org_active or '' }}"
+      data-counter-review="{{ counter_review }}"
+      data-counter-interest="{{ counter_interest }}"
+      {% if is_clickable %}
+      data-expand-target="{{ expand_row_id }}"
+      role="button"
+      tabindex="0"
+      aria-expanded="false"
+      aria-controls="{{ expand_row_id }}"
+      title="클릭하여 조직별 진행 상태 펼치기"
+      {% endif %}>
+    {% if not has_any_data %}
+    {# 빈 셀 — em dash 표시 결정 (00097-1 §4.3). #}
+    <span class="pg-empty" aria-label="진행 상태 없음">—</span>
+    {% else %}
+        {% if occupy is not none %}
+        {# 선점 라인 — 본인 조직 진행이면 강조. #}
+        <span class="pg-occupy {% if mine_in_progress %}pg-occupy--mine{% endif %}">
+            <span class="pg-occupy__flag" aria-hidden="true">🚩</span>
+            <span class="pg-occupy__org">{{ occupy.name or '(조직명 없음)' }}</span>
+            <span class="pg-occupy__sep">:</span>
+            <span class="pg-occupy__status">진행</span>
+        </span>
+        {% endif %}
+
+        {% if counter_review > 0 or counter_interest > 0 %}
+        <span class="pg-counter" aria-label="검토 / 관심 카운터">
+            {% if counter_review > 0 %}
+            <span class="pg-counter__cell pg-counter__cell--review {% if mine_in_review %}pg-counter__cell--mine{% endif %}">검토 {{ counter_review }}</span>
+            {% endif %}
+            {% if counter_review > 0 and counter_interest > 0 %}
+            <span class="pg-counter__sep">·</span>
+            {% endif %}
+            {% if counter_interest > 0 %}
+            <span class="pg-counter__cell pg-counter__cell--interest {% if mine_in_interest %}pg-counter__cell--mine{% endif %}">관심 {{ counter_interest }}</span>
+            {% endif %}
+        </span>
+        {% endif %}
+
+        {# hover 툴팁 — 선점 또는 카운터 어느 한쪽이라도 있으면 노출.
+           조직별 상세 (단계·작성자·시점) 는 셀 expand 단계에서 별도 fetch 로 채운다.
+           이 단계의 툴팁은 요약 정보 (선점 조직명·단계별 카운트) 만 담는다. #}
+        <div class="pg-tooltip" role="tooltip">
+            {% if occupy is not none %}
+            <p class="pg-tooltip__heading">선점 조직</p>
+            <div class="pg-tooltip__row">
+                <span class="pg-tooltip__org">{{ occupy.name or '(조직명 없음)' }}</span>
+                <span class="pg-tooltip__sep">·</span>
+                <span class="pg-tooltip__status">진행</span>
+                {% if mine_in_progress %}
+                <span class="pg-tooltip__mine-tag">(본인 조직)</span>
+                {% endif %}
+            </div>
+            {% endif %}
+            {% if counter_review > 0 or counter_interest > 0 %}
+            <p class="pg-tooltip__heading">검토·관심</p>
+            <div class="pg-tooltip__row">
+                {% if counter_review > 0 %}
+                <span>검토 단계: {{ counter_review }}건{% if mine_in_review %} (본인 조직 포함){% endif %}</span>
+                {% endif %}
+                {% if counter_interest > 0 %}
+                <span>관심 단계: {{ counter_interest }}건{% if mine_in_interest %} (본인 조직 포함){% endif %}</span>
+                {% endif %}
+            </div>
+            <p class="pg-tooltip__hint">상세는 셀을 클릭하면 펼쳐집니다.</p>
+            {% endif %}
+        </div>
+    {% endif %}
+</span>
+{% endmacro %}
+
+
+{# ── 셀 expand hidden 행 매크로 (task 00097-5 시나리오 12) ───────────────
+  목록 row 다음에 별도 hidden <tr> 을 두어 .pg-wrap 클릭 시 toggle 한다.
+  Phase 3b 의 siblings-expand-row 와 동일 패턴으로 시각적 일관성 유지.
+  세부 row 데이터는 ProgressRowDetail (single SELECT + JOIN) 로 전달되므로
+  N+1 회귀 없음 (시나리오 17 가드 유지).
+#}
+{% macro progress_expand_row(expand_row_id, canonical_id, detail_rows, colspan) %}
+{% if detail_rows %}
+<tr id="{{ expand_row_id }}" class="pg-expand-row" style="display:none">
+    <td colspan="{{ colspan }}" class="pg-expand-row__cell">
+        <ul class="pg-expand-row__list">
+            {% for detail in detail_rows %}
+            <li class="pg-expand-row__item">
+                <span class="pg-expand-row__org">
+                    {{ detail.organization_name or '(조직명 없음)' }}
+                </span>
+                <span class="pg-status-badge pg-status-badge--{{ detail.status_name }} pg-expand-row__status">
+                    {{ detail.status_value }}
+                </span>
+                <span class="pg-expand-row__meta">
+                    마지막 수정:
+                    {% if detail.last_modifier_username %}
+                        {{ detail.last_modifier_username }}
+                    {% else %}
+                        (이력 없음)
+                    {% endif %}
+                    /
+                    {{ detail.updated_at | kst_format }}
+                </span>
+                {% if detail.note %}
+                <p class="pg-expand-row__note">{{ detail.note }}</p>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+    </td>
+</tr>
+{% endif %}
+{% endmacro %}
