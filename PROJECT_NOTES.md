@@ -264,10 +264,12 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 - **bulk 요청 두 가지 모드 — `ids` vs `filter`**: 페이지 내 선택은 `ids` 모드(명시 목록), "현재 필터 결과 전체 M건 선택" 은 `filter` 모드(서버가 필터 파라미터로 announcement id 추출). `MAX_BULK_MARK` 상수로 한 번에 처리할 수 있는 상한 제한. 클라이언트가 필터 재구성을 서버에 위임해 페이지를 넘는 대량 선택을 지원.
 - **배지 클릭 vs row 클릭 충돌은 `stopPropagation` 으로 해결**: 목록 row 전체가 상세 링크(`<a>`) 로 감싸져 있을 때 내부 배지 클릭이 상세 페이지로 이동하지 않도록 `event.stopPropagation()` + `preventDefault()`. 클릭 이벤트가 있는 인라인 위젯 추가 시 동일 패턴.
+- **테이블 셀 overflow 클리핑을 벗어나는 툴팁은 `position: fixed` + JS `getBoundingClientRect()` 패턴**: CSS `:hover` 트리거 대신 JS `mouseenter/focusin` 이벤트로 전환. `getBoundingClientRect()` 로 viewport 좌표를 계산해 `fixed` 레이어에 배치 — 부모 요소의 `overflow: hidden` 클리핑을 탈출. 위 공간 부족(8px 미만) 시 아래로 자동 반전 (`rj-tooltip--below` 클래스 토글), 좌우 viewport 경계 8px 여백 클램핑. 로그인 여부 무관하게 IIFE 최상단에서 `initTooltips()` 를 호출해 비로그인 사용자에게도 카운터 툴팁이 표시된다.
 - **sources.yaml credentials 슬롯 (optional)**: 로그인이 필요한 소스를 위한 `credentials.username` / `credentials.password` 필드를 `SourceConfig` 에 예약. NTIS 는 게스트 수집이 가능해 현재 미사용. 실제 값은 `.env` 로만 주입하고 yaml 에는 키 이름만.
 
 ## 최근 변경 이력
 
+- [00088] 관련성 hover 툴팁을 viewport 기준 fixed 레이어로 전환 — row/셀 overflow:hidden 클리핑 해소, 위/아래 자동 반전 + 좌우 viewport 클램핑 — 2026-05-08
 - [00087] 관련성 카운터 UI 재수정 — ❓(미검토) 로직 백엔드·프론트 완전 제거, 카운터 셀 오버플로우 수정(rj-wrap flex-column + col-relevance overflow:hidden), 본인 판정 없을 때도 others 있으면 hover 툴팁 표시 — 2026-05-08
 - [00085] 조직 단위 관련성 판정 추가 — RelevanceJudgment·History 에 organization_id FK 컬럼 추가, 단일 UNIQUE (canonical_project_id, user_id, organization_id), 입력 모달 판정 주체 라디오, 목록 셀 본인 배지·카운터, 상세 페이지 행 분리 표시 구현 — 2026-05-07
 - [00084] `.env.example` · `sources.yaml.template` 기능별 섹션 재구성 및 `README.USER.md` 연계 정합 — 2026-05-07
