@@ -16,9 +16,13 @@
         1) 본인 개인 row (organization_id IS NULL & user_id == 본인)
         2) 본인 조직 row 중 decided_at DESC 의 첫 항목 (mine_organization 첫 번째)
         3) 미검토 (빈 배지)
-    - 카운터: ✅(관련) ❌(무관) ❓(미검토) — OTHERS row 만 카운트.
+    - 카운터: ✅(관련) ❌(무관) — OTHERS row 만 카운트.
       OTHERS = 본인 user_id 가 아닌 모든 row (다른 사용자의 개인 + 조직 모두).
-      카운터 자체가 0/0/0 이면 카운터 div 자체를 렌더하지 않는다 (시각적 노이즈 감소).
+      ❓(미검토) 는 표시하지 않는다 (task 00086 — DB CHECK 가 '관련'/'무관' 만 허용해
+      실데이터에서 항상 0 이며, 사용자 의도상 시각적 노이즈가 큼).
+      ✅·❌ 합이 0 이면 카운터 div 자체를 렌더하지 않는다.
+      summary.others_count_unreviewed 필드는 도메인 모델에 그대로 유지하되 UI 에서는
+      읽지 않는다.
     - hover 툴팁: 본인이 만든 조직 row (mine_organization) 를 모두 나열.
       비어 있으면 툴팁을 렌더하지 않는다.
     - 비로그인 (current_user is None): 큰 배지는 항상 미검토. mine_personal /
@@ -79,13 +83,12 @@
     </span>
     {% endif %}
 
-    {# OTHERS 카운터 — 0/0/0 이면 렌더하지 않음. #}
-    {% set others_total = summary.others_count_related + summary.others_count_unrelated + summary.others_count_unreviewed %}
-    {% if others_total > 0 %}
+    {# OTHERS 카운터 — ✅·❌ 합이 0 이면 렌더하지 않음. ❓(미검토) 는 표시 제외. #}
+    {% set others_visible_total = summary.others_count_related + summary.others_count_unrelated %}
+    {% if others_visible_total > 0 %}
     <span class="rj-counter" aria-label="다른 사용자·조직의 평가 카운트">
         <span class="rj-counter__cell rj-counter__cell--related">✅ {{ summary.others_count_related }}</span>
         <span class="rj-counter__cell rj-counter__cell--unrelated">❌ {{ summary.others_count_unrelated }}</span>
-        <span class="rj-counter__cell rj-counter__cell--unreviewed">❓ {{ summary.others_count_unreviewed }}</span>
     </span>
     {% endif %}
 

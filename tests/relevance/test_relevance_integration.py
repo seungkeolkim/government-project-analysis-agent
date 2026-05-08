@@ -239,9 +239,11 @@ def test_list_cell_renders_my_badge_counter_and_organization_tooltip(
     assert "rj-badge--related" in html, "본인 개인 row 의 verdict 가 큰 배지로 노출돼야 한다."
     # 카운터 (OTHERS = 동료 2 건 — 관련 1, 무관 1).
     assert "rj-counter" in html
-    # ✅ 1 ❌ 1 ❓ 0 표기를 단언 — 공백 차이를 허용하기 위해 핵심 토큰만 검증.
+    # ✅ 1 ❌ 1 표기를 단언 — 공백 차이를 허용하기 위해 핵심 토큰만 검증.
+    # task 00086 — ❓(미검토) 셀은 매크로에서 제거되어 더 이상 렌더되지 않는다.
     assert "✅ 1" in html
     assert "❌ 1" in html
+    assert "❓" not in html, "task 00086 — ❓(미검토) 카운터 셀은 더 이상 노출되지 않아야 한다."
     # hover 툴팁에 본인 조직명 + verdict — \"렌더링-조직\" 이 mine_organization 영역으로.
     assert "렌더링-조직" in html, "hover 툴팁에 본인 조직명이 노출돼야 한다."
     assert "rj-tooltip" in html
@@ -498,3 +500,89 @@ def _measure_select_count(test_engine: Engine, fn) -> int:
     finally:
         event.remove(test_engine, "before_cursor_execute", _listener)
     return counter["value"]
+
+
+# ---------------------------------------------------------------------------
+# task 00086 — 관련성 카운터에서 ❓(미검토) 제거 회귀 테스트
+# ---------------------------------------------------------------------------
+#
+# 매크로(`_relevance_badge_macro.html`) 출력 자체를 직접 렌더해 검증한다.
+# 이유:
+#   - DB CHECK 가 verdict='관련'/'무관' 만 허용하므로 실데이터로는
+#     others_count_unreviewed > 0 인 RelevanceSummary 를 만들 수 없다.
+#   - "❓ 만 있을 때 카운터가 렌더되지 않는다" 라는 매크로 분기 동작은
+#     Jinja2 환경에서 RelevanceSummary 를 직접 구성해 렌더해야 검증 가능.
+
+
+def _render_relevance_macro(summary, current_user=None, canonical_id: int = 1) -> str:
+    """`_relevance_badge_macro.html` 의 relevance_badge 매크로를 직접 렌더한다.
+
+    실제 앱과 동일한 templates 디렉토리를 가리키는 Jinja2 Environment 를 만든다.
+    매크로는 외부 의존이 없으므로 (DB·라우트 무관) 직접 렌더가 가능하다.
+    """
+    from jinja2 import Environment, FileSystemLoader
+
+    from app.web.main import TEMPLATES_DIR
+
+    env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)))
+    template = env.from_string(
+        '{% from "_relevance_badge_macro.html" import relevance_badge %}'
+        "{{ relevance_badge(canonical_id, summary, current_user) }}"
+    )
+    return template.render(
+        canonical_id=canonical_id,
+        summary=summary,
+        current_user=current_user,
+    )
+
+
+def test_macro_does_not_render_question_mark_cell() -> None:
+    """매크로 출력에 ❓ 문자가 절대 등장하지 않는다 (task 00086).
+
+    OTHERS 가 ✅·❌ 카운트만 있는 일반 케이스에서, 카운터 영역에는 ✅·❌ 두 셀만
+    노출되고 ❓(미검토) 셀은 더 이상 렌더되지 않아야 한다.
+    """
+    from app.db.repository import RelevanceSummary
+
+    summary_with_visible_others = RelevanceSummary(
+        mine_personal=None,
+        mine_organization=(),
+        others=(),
+        others_count_related=2,
+        others_count_unrelated=1,
+        others_count_unreviewed=0,
+    )
+    rendered = _render_relevance_macro(summary_with_visible_others)
+    assert "rj-counter" in rendered, "✅·❌ 가 있을 때 카운터는 렌더돼야 한다."
+    assert "✅ 2" in rendered
+    assert "❌ 1" in rendered
+    assert "❓" not in rendered, (
+        "task 00086 — 매크로 출력 어디에도 ❓(미검토) 문자가 등장하지 않아야 한다."
+    )
+    assert "rj-counter__cell--unreviewed" not in rendered, (
+        "task 00086 — ❓ 셀 클래스도 렌더되지 않아야 한다."
+    )
+
+
+def test_macro_does_not_render_counter_when_only_unreviewed_others_present() -> None:
+    """✅·❌ 합이 0 이고 ❓(미검토) 만 있을 때 카운터 div 자체가 렌더되지 않는다.
+
+    task 00086 — 카운터 표시 규칙이 OTHERS 의 ✅·❌ 합만 보고 결정되도록 변경됐다.
+    DB CHECK 가 정상 데이터에서는 others_count_unreviewed=0 을 보장하지만,
+    매크로 분기 자체가 미검토 카운트를 무시하는지 명시적으로 회귀 차단한다.
+    """
+    from app.db.repository import RelevanceSummary
+
+    summary_only_unreviewed = RelevanceSummary(
+        mine_personal=None,
+        mine_organization=(),
+        others=(),
+        others_count_related=0,
+        others_count_unrelated=0,
+        others_count_unreviewed=5,
+    )
+    rendered = _render_relevance_macro(summary_only_unreviewed)
+    assert "rj-counter" not in rendered, (
+        "task 00086 — ✅·❌ 합이 0 이면 ❓ 카운트와 무관하게 카운터 자체가 렌더되지 않아야 한다."
+    )
+    assert "❓" not in rendered
