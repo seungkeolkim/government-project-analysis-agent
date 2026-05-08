@@ -791,20 +791,40 @@ def _reset_user_state_on_content_change(
     # flush 로 DB 에러(FK 위반 등)를 즉시 드러나게 한다.
     session.flush()
 
-    if read_reset_count or archived_count:
+    # ── (c) AnnouncementProgress (Phase C, task 00097) 도 history 로 이관 ──
+    # canonical 내용 변경 (status 단독 제외) 시 조직별 진행 상태 row 도
+    # archive_reason='content_changed' 로 history 이관 후 active 테이블에서
+    # 제거한다. RelevanceJudgment 와 동일 트랜잭션 / 동일 archive_time 을 공유.
+    # _reset_user_state_on_content_change 는 실제로는 항상 'content_changed' 로
+    # 호출되지만 (apply_delta_to_main / reapply_version_with_reset 의 기본값),
+    # 그 외 사유로 호출되더라도 progress 쪽은 canonical 단위 일괄 reset 의 의미가
+    # 동일하므로 'content_changed' 로 고정한다 (announcement_progress_history.
+    # archive_reason 도메인은 'user_changed' | 'content_changed' 만 허용).
+    from app.progress.repository import reset_progress_for_canonical
+
+    progress_archived_count = reset_progress_for_canonical(
+        session,
+        canonical_project_id=canonical_project_id,
+        archive_reason="content_changed",
+        archive_time=archive_time,
+    )
+
+    if read_reset_count or archived_count or progress_archived_count:
         logger.info(
             "사용자 라벨링 리셋: announcement_id={} canonical={} "
-            "reset_states={} archived_judgments={} reason={}",
+            "reset_states={} archived_judgments={} archived_progress={} reason={}",
             old_announcement_id,
             canonical_project_id,
             read_reset_count,
             archived_count,
+            progress_archived_count,
             archive_reason,
         )
 
     return {
         "announcement_user_states_reset": read_reset_count,
         "relevance_judgments_archived": archived_count,
+        "announcement_progress_archived": progress_archived_count,
     }
 
 
