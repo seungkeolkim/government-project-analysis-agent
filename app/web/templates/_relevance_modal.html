@@ -1,22 +1,19 @@
 {#
-  관련성 판정 모달 (task 00085 — 조직 단위 확장).
+  관련성 판정 모달 (task 00085 — 조직 단위 확장 / task 00093 — 개인 판정 제거).
 
   base.html 이 </body> 직전에 {% include "_relevance_modal.html" %} 로 삽입한다.
   비로그인(current_user 가 None/Undefined) 이면 렌더하지 않는다 — 모달 자체가
-  본인 작성/수정/삭제 영역이라 결정 3 (비로그인 = 동일 노출) 의 \"본인 영역만
-  비활성\" 조건에 따라 비로그인은 모달이 아예 없다.
+  본인 작성/수정/삭제 영역이라 결정 3 (비로그인 = 동일 노출) 의 "본인 영역만
+  비활성" 조건에 따라 비로그인은 모달이 아예 없다.
 
-  '판정 주체' 라디오 동작 (사용자 원문 + modify 턴):
-    - [개인] / [조직] 두 옵션. 기본은 [개인].
-    - 무소속 사용자: [조직] 라디오 자체 disabled, tooltip 으로 사유 안내.
-    - 단일 조직 소속: [조직] 라벨에 조직명을 직접 노출, 드롭다운 미표시 — JS 가
-      hidden field 에 자동 organization_id 를 채운다.
-    - 복수 조직 소속: [조직] 선택 시 드롭다운이 표시되며 사용자가 선택한 organization_id 가
-      hidden field 에 반영된다.
+  판정 주체는 항상 조직이다 (task 00093 — 개인 판정 슬롯 완전 제거).
+    - 무소속 사용자: 안내 문구 표시, 저장 버튼 비활성.
+    - 단일 조직 소속: 조직명을 레이블로 표시 (드롭다운 미표시).
+    - 복수 조직 소속: 드롭다운으로 조직 선택.
 
   컨텍스트:
     - current_user                : User | None (None 이면 모달 자체를 렌더하지 않는다)
-    - user_organization_options   : list[{\"id\": int, \"name\": str}] (무소속이면 빈 리스트)
+    - user_organization_options   : list[{"id": int, "name": str}] (무소속이면 빈 리스트)
 
   JS(relevance.js)가 window.openRelevanceModal() 을 통해 이 dialog 를 제어한다.
   <form method="dialog">: JS의 e.preventDefault() 가 자동 닫기를 막고 fetch 응답 후 닫는다.
@@ -28,7 +25,7 @@
       같은 dialog 를 공유하므로 open 직전 currentWrap 의 data-* 로 prefill 된다.
 #}
 {% if current_user %}
-{# 무소속 사용자는 user_organization_options 가 빈 리스트 — 라디오 자체 disabled. #}
+{# 무소속 사용자는 user_organization_options 가 빈 리스트. #}
 {% set has_any_organization = user_organization_options and (user_organization_options | length) > 0 %}
 {% set is_single_organization = has_any_organization and (user_organization_options | length) == 1 %}
 {% set single_organization_id = user_organization_options[0].id if is_single_organization else '' %}
@@ -38,38 +35,15 @@
     <div class="rj-modal__inner">
         <h3 class="rj-modal__title" id="rj-modal-title">관련성 판정</h3>
         <form id="relevance-form" method="dialog">
-            {# 판정 주체 라디오 — 개인/조직 #}
-            <fieldset class="rj-modal__subject-group" aria-label="판정 주체">
-                <legend class="rj-modal__subject-legend">판정 주체</legend>
-                <label class="rj-modal__subject-label">
-                    <input type="radio"
-                           name="rj-subject"
-                           value="personal"
-                           checked> 개인 판정
-                </label>
-                <label class="rj-modal__subject-label {% if not has_any_organization %}rj-modal__subject-label--disabled{% endif %}"
-                       {% if not has_any_organization %}title="소속된 조직이 없습니다."{% endif %}>
-                    <input type="radio"
-                           name="rj-subject"
-                           value="organization"
-                           {% if not has_any_organization %}disabled{% endif %}>
-                    {% if is_single_organization %}
-                    조직 판정 ({{ single_organization_name }})
-                    {% else %}
-                    조직 판정
-                    {% endif %}
-                </label>
-            </fieldset>
-
-            {# 조직 드롭다운 — 복수 조직 소속일 때만 표시 (단일은 hidden 으로 자동 채움). #}
-            {# data-modal-org-mode 로 JS 가 단일/복수/무소속 분기를 단순화한다. #}
+            {# 조직 선택 — 단일 조직은 조직명 표시, 복수 조직은 드롭다운, 무소속은 안내 문구. #}
             {% if has_any_organization %}
             <div id="rj-modal-organization-row"
                  class="rj-modal__organization-row"
                  data-modal-org-mode="{% if is_single_organization %}single{% else %}multiple{% endif %}"
-                 data-single-organization-id="{{ single_organization_id }}"
-                 style="display:none">
-                {% if not is_single_organization %}
+                 data-single-organization-id="{{ single_organization_id }}">
+                {% if is_single_organization %}
+                <span class="rj-modal__organization-label">조직: {{ single_organization_name }}</span>
+                {% else %}
                 <label class="rj-modal__organization-label" for="rj-modal-organization">소속 조직 선택</label>
                 <select id="rj-modal-organization"
                         class="rj-modal__organization-select"
@@ -80,6 +54,8 @@
                 </select>
                 {% endif %}
             </div>
+            {% else %}
+            <p class="rj-modal__no-org-notice">판정을 작성하려면 조직에 소속되어야 합니다.</p>
             {% endif %}
 
             {# verdict (관련/무관) — 기존 동작 유지 #}
@@ -100,7 +76,9 @@
                       placeholder="판정 사유를 간단히 입력하세요."></textarea>
             <p class="rj-modal__error" id="modal-error-msg" role="alert" aria-live="polite"></p>
             <div class="rj-modal__actions">
-                <button type="submit" class="rj-modal__save-btn">저장</button>
+                <button type="submit"
+                        class="rj-modal__save-btn"
+                        {% if not has_any_organization %}disabled{% endif %}>저장</button>
                 <button type="button"
                         id="relevance-cancel-btn"
                         class="rj-modal__cancel-btn">닫기</button>

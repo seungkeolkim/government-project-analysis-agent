@@ -388,34 +388,35 @@ def test_detail_page_unfolds_rows_and_owner_actions(
 def test_modal_radio_unaffiliated_user_disables_organization_option(
     client: TestClient, test_engine: Engine
 ) -> None:
-    """무소속 사용자: '조직' 라디오 자체가 disabled 처리되고 드롭다운 행은 렌더되지 않는다."""
+    """무소속 사용자: 드롭다운 행 미렌더, 안내 문구(rj-modal__no-org-notice) 표시."""
     _register_and_login(client, "integ_modal_unaffiliated")
     response = client.get("/")
     assert response.status_code == 200
     html = response.text
-    # 무소속이면 user_organization_options 가 빈 리스트 → 라디오 disabled + 드롭다운 행 미렌더.
-    assert "rj-modal__subject-group" in html
-    assert "rj-modal__subject-label--disabled" in html
-    # 무소속 사용자에게 드롭다운 행 자체가 존재하지 않아야 한다 (modal 의 {% if has_any_organization %}).
+    # 무소속이면 조직 선택 행 자체가 없고 안내 문구만 표시 (task 00093).
     assert "rj-modal-organization-row" not in html
+    assert "rj-modal__no-org-notice" in html
+    # 판정 주체 라디오 UI 는 task 00093 에서 제거됨.
+    assert "rj-modal__subject-group" not in html
 
 
 def test_modal_radio_single_organization_uses_inline_label(
     client: TestClient, test_engine: Engine
 ) -> None:
-    """단일 조직 소속: 라디오 라벨에 조직명이 직접 노출되고 드롭다운 select 는 없다."""
+    """단일 조직 소속: 조직명이 레이블로 직접 노출되고 드롭다운 select 는 없다."""
     me_id = _register_and_login(client, "integ_modal_single")
     _create_organization_with_member("단일조직-라벨", me_id)
     response = client.get("/")
     assert response.status_code == 200
     html = response.text
-    assert "rj-modal__subject-group" in html
-    # 단일 조직 라벨은 "조직 판정 (단일조직-라벨)" 형태로 직접 노출.
+    # 단일 조직 라벨에 조직명이 직접 노출.
     assert "단일조직-라벨" in html
     assert "rj-modal-organization-row" in html
     assert 'data-modal-org-mode="single"' in html
     # 단일 모드에서는 select 요소가 없다 (자동 채움).
     assert 'id="rj-modal-organization"' not in html
+    # 판정 주체 라디오 UI 는 task 00093 에서 제거됨.
+    assert "rj-modal__subject-group" not in html
 
 
 def test_modal_radio_multiple_organizations_renders_dropdown(
@@ -428,12 +429,13 @@ def test_modal_radio_multiple_organizations_renders_dropdown(
     response = client.get("/")
     assert response.status_code == 200
     html = response.text
-    assert "rj-modal__subject-group" in html
     assert "rj-modal-organization-row" in html
     assert 'data-modal-org-mode="multiple"' in html
     assert 'id="rj-modal-organization"' in html, "복수 모드에서는 select 요소가 렌더돼야 한다."
     assert "멀티-조직-A" in html
     assert "멀티-조직-B" in html
+    # 판정 주체 라디오 UI 는 task 00093 에서 제거됨.
+    assert "rj-modal__subject-group" not in html
 
 
 # ---------------------------------------------------------------------------
