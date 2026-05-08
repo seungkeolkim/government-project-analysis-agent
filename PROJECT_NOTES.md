@@ -268,5 +268,6 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
+- [00086] 관련성 카운터 UI 수정 — 미검토(❓) 항목 제거해 관련·무관 두 항목만 표시, CSS overflow 방지로 카운터를 셀 안에 맞춤 — 2026-05-08
 - [00085] 조직 단위 관련성 판정 추가 — RelevanceJudgment·History 에 organization_id FK 컬럼 추가, 단일 UNIQUE (canonical_project_id, user_id, organization_id), 입력 모달 판정 주체 라디오, 목록 셀 본인 배지·카운터, 상세 페이지 행 분리 표시 구현 — 2026-05-07
 - [00084] `.env.example` · `sources.yaml.template` 기능별 섹션 재구성 및 `README.USER.md` 연계 정합 — 2026-05-07
