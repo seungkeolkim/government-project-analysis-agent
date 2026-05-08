@@ -45,6 +45,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -1904,12 +1905,135 @@ class UserOrganization(Base):
         )
 
 
+class SystemSetting(Base):
+    """시스템 전역 설정을 key-value 형태로 영속하는 테이블.
+
+    백업 정책(cron 표현식·최대 보관 수) 등 관리자가 UI 에서 변경하는 설정을
+    DB 에 저장한다. 키 이름 상수는 ``app.backup.constants`` 에 정의한다.
+
+    값은 평문 문자열로 저장하며, 숫자 등 해석은 호출 측이 담당한다.
+    key 가 PRIMARY KEY 이므로 upsert 는 ``session.get`` + ``session.add`` 패턴으로 구현한다.
+    """
+
+    __tablename__ = "system_settings"
+
+    key: Mapped[str] = mapped_column(
+        String(128),
+        primary_key=True,
+        doc="설정 식별 키. 예: 'backup.cron_expression'",
+    )
+
+    value: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="설정 값. 문자열로 저장. 없으면 NULL.",
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+        doc="마지막으로 설정이 변경된 시각(UTC).",
+    )
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현을 반환한다."""
+        return f"<SystemSetting key={self.key!r} value={self.value!r}>"
+
+
+class BackupHistory(Base):
+    """DB 백업 실행 이력 한 건을 나타내는 레코드.
+
+    백업이 실행될 때마다(수동·스케줄 모두) 한 row 가 INSERT 된다.
+    성공/실패 여부, 대상 파일, 생성된 백업 파일, 소요 시간, 총 크기를 기록한다.
+    롤백/복원 기능은 범위 밖 — 이 테이블은 이력 조회 전용이다.
+
+    target_files / backup_files 는 JSON 리스트로 저장한다.
+    예: ``['data/db/app.sqlite3', 'data/db/boards.sqlite3']``
+    """
+
+    __tablename__ = "backup_history"
+
+    __table_args__ = (
+        Index("ix_backup_history_executed_at", "executed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    executed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        doc="백업이 실행된 시각(UTC).",
+    )
+
+    # 'scheduled' 또는 'manual'
+    trigger: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        doc="실행 트리거. 'scheduled': 스케줄 자동 실행, 'manual': 관리자 즉시 실행.",
+    )
+
+    # 백업 대상 DB 파일 경로 목록 (PROJECT_ROOT 기준 상대 경로)
+    target_files: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        doc="백업 대상 DB 파일 경로 목록. 예: ['data/db/app.sqlite3']",
+    )
+
+    # 생성된 백업 파일 경로 목록 (PROJECT_ROOT 기준 상대 경로)
+    backup_files: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        doc="생성된 백업 파일 경로 목록.",
+    )
+
+    success: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        doc="백업 성공 여부.",
+    )
+
+    error_message: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="실패 시 오류 메시지. 성공이면 NULL.",
+    )
+
+    duration_seconds: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+        doc="백업 소요 시간(초).",
+    )
+
+    total_size_bytes: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+        doc="생성된 백업 파일 총 크기(bytes). 실패 시 NULL.",
+    )
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현을 반환한다."""
+        return (
+            f"<BackupHistory id={self.id} trigger={self.trigger!r} "
+            f"success={self.success} executed_at={self.executed_at}>"
+        )
+
+
 __all__ = [
     "Base",
     "Announcement",
     "AnnouncementStatus",
     "AnnouncementUserState",
     "Attachment",
+    "BackupHistory",
     "CanonicalProject",
     "DeltaAnnouncement",
     "DeltaAttachment",
@@ -1923,6 +2047,7 @@ __all__ = [
     "SCRAPE_RUN_STATUSES",
     "SCRAPE_RUN_TERMINAL_STATUSES",
     "SCRAPE_RUN_TRIGGERS",
+    "SystemSetting",
     "User",
     "UserOrganization",
     "UserSession",

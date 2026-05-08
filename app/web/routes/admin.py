@@ -82,6 +82,18 @@ from app.db.repository import (
     get_running_scrape_run,
     list_recent_scrape_runs,
 )
+from app.backup.constants import (
+    BACKUP_TRIGGER_MANUAL,
+    SETTING_KEY_BACKUP_CRON,
+    SETTING_KEY_BACKUP_MAX_COUNT,
+)
+from app.backup.service import (
+    get_backup_settings,
+    list_backup_files,
+    list_backup_history,
+    run_backup,
+    set_setting as set_backup_setting,
+)
 from app.scheduler import (
     ScheduleValidationError,
     add_cron_schedule,
@@ -89,6 +101,7 @@ from app.scheduler import (
     delete_schedule,
     is_scheduler_running,
     list_schedules,
+    register_backup_cron_schedule,
     toggle_schedule,
 )
 from app.scrape_control import (
@@ -1874,6 +1887,177 @@ def admin_usage_page(
             "filter_ips_raw": ips or "",
             "filter_mode": filter_mode,
         },
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# [시스템 백업] 탭 (task 00094-3)
+# ──────────────────────────────────────────────────────────────
+
+
+def _backup_flash_url(message: str, *, level: str) -> str:
+    """/admin/backup?flash=...&flash_level=... redirect URL 빌더."""
+    from urllib.parse import urlencode
+
+    query = urlencode({"flash": message, "flash_level": level})
+    return f"/admin/backup?{query}"
+
+
+@router.get("/backup", response_class=HTMLResponse)
+def backup_page(
+    request: Request,
+    flash: Optional[str] = Query(default=None),
+    flash_level: Optional[str] = Query(default=None),
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """[시스템 백업] 탭 — 백업 설정, 수동 실행, 이력, 파일 목록.
+
+    템플릿 컨텍스트:
+        top_tab:          'scrape_group'.
+        sub_tab:          'backup'.
+        backup_cron:      현재 저장된 cron 표현식.
+        backup_max_count: 현재 저장된 최대 보관 개수 (str).
+        history:          BackupHistory 리스트 (최신 먼저).
+        backup_files:     list[dict] — filename, size_bytes, modified_at.
+        scheduler_running: APScheduler 기동 여부.
+        flash / flash_level: 상단 안내 배지.
+        current_user:     네비 분기용.
+    """
+    logger.debug("admin.backup_page 진입: user_id={}", current_user.id)
+    with session_scope() as session:
+        settings = get_backup_settings(session)
+        history = list_backup_history(session)
+
+    backup_files = list_backup_files()
+
+    return _templates.TemplateResponse(
+        request,
+        "admin/backup.html",
+        {
+            "top_tab": "scrape_group",
+            "sub_tab": "backup",
+            "backup_cron": settings["cron_expression"],
+            "backup_max_count": settings["max_count"],
+            "history": history,
+            "backup_files": backup_files,
+            "scheduler_running": is_scheduler_running(),
+            "flash": flash,
+            "flash_level": flash_level or "success",
+            "current_user": current_user,
+        },
+    )
+
+
+@router.post("/backup/settings", dependencies=[Depends(ensure_same_origin)])
+def backup_settings_save(
+    request: Request,
+    cron_expression: str = Form(...),
+    max_count: int = Form(...),
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """백업 설정(cron 표현식·보관 개수)을 저장하고 스케줄을 갱신한다.
+
+    Form 필드:
+        cron_expression: 5-필드 cron 표현식.
+        max_count:       보관할 최대 백업 그룹 수 (1 이상).
+
+    흐름:
+        1. max_count 최솟값 검증 (< 1 이면 flash error redirect).
+        2. register_backup_cron_schedule 로 APScheduler 잡 갱신.
+           ScheduleValidationError → flash error redirect.
+        3. SystemSetting 에 cron_expression · max_count 저장.
+        4. 성공 → PRG 패턴(303) /admin/backup.
+    """
+    if max_count < 1:
+        return RedirectResponse(
+            url=_backup_flash_url("보관 개수는 1 이상이어야 합니다.", level="error"),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    try:
+        register_backup_cron_schedule(cron_expression=cron_expression)
+    except ScheduleValidationError as exc:
+        logger.info(
+            "백업 스케줄 등록 거부 — 검증 실패: 관리자={} ({})",
+            current_user.username, exc,
+        )
+        return RedirectResponse(
+            url=_backup_flash_url(str(exc), level="error"),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    except Exception as exc:
+        logger.exception(
+            "백업 스케줄 등록 실패(예기치 못한 예외): 관리자={} ({}: {})",
+            current_user.username, type(exc).__name__, exc,
+        )
+        return RedirectResponse(
+            url=_backup_flash_url(
+                f"스케줄 등록 실패({type(exc).__name__}): {exc}", level="error"
+            ),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    with session_scope() as session:
+        set_backup_setting(session, SETTING_KEY_BACKUP_CRON, cron_expression)
+        set_backup_setting(session, SETTING_KEY_BACKUP_MAX_COUNT, str(max_count))
+
+    logger.info(
+        "백업 설정 저장: 관리자={} cron={!r} max_count={}",
+        current_user.username, cron_expression, max_count,
+    )
+    return RedirectResponse(
+        url=_backup_flash_url(
+            f"설정이 저장되었습니다 (cron={cron_expression}, 보관={max_count}개).",
+            level="success",
+        ),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.post("/backup/run", dependencies=[Depends(ensure_same_origin)])
+def backup_run_manual(
+    request: Request,
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """백업을 즉시 수동으로 실행한다.
+
+    흐름:
+        1. run_backup(trigger='manual') 호출.
+        2. 예기치 못한 예외 → flash error redirect.
+        3. history.success=False → 오류 메시지 flash error redirect.
+        4. 성공 → 파일 목록 포함 flash success redirect (PRG 패턴).
+    """
+    try:
+        history = run_backup(trigger=BACKUP_TRIGGER_MANUAL)
+    except Exception as exc:
+        logger.exception(
+            "수동 백업 실패: 관리자={} ({}: {})",
+            current_user.username, type(exc).__name__, exc,
+        )
+        return RedirectResponse(
+            url=_backup_flash_url(
+                f"백업 실패({type(exc).__name__}): {exc}", level="error"
+            ),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+
+    if history.success:
+        files_str = ", ".join(history.backup_files) if history.backup_files else "(없음)"
+        message = (
+            f"백업 완료 (파일: {files_str}, {history.duration_seconds}초)."
+        )
+        level = "success"
+    else:
+        message = f"백업 중 오류 발생: {history.error_message}"
+        level = "error"
+
+    logger.info(
+        "수동 백업 완료: 관리자={} success={} files={}",
+        current_user.username, history.success, history.backup_files,
+    )
+    return RedirectResponse(
+        url=_backup_flash_url(message, level=level),
+        status_code=status.HTTP_303_SEE_OTHER,
     )
 
 

@@ -1,0 +1,178 @@
+{#
+  [시스템 백업] 탭 — DB 백업 설정·수동 실행·이력·파일 목록 (task 00094-3).
+
+  구성:
+    1. flash 배지
+    2. 백업 설정 폼 (cron 표현식, 최대 보관 개수)
+    3. 수동 즉시 실행 버튼
+    4. 백업 이력 테이블
+    5. 현재 백업 파일 목록 테이블
+
+  컨텍스트 규약:
+    - top_tab:          'scrape_group'
+    - sub_tab:          'backup'
+    - backup_cron:      현재 저장된 cron 표현식 (str)
+    - backup_max_count: 현재 저장된 최대 보관 개수 (str)
+    - history:          BackupHistory 리스트 (최신 먼저)
+    - backup_files:     list[dict] — filename, size_bytes, modified_at
+    - scheduler_running: bool
+    - flash / flash_level: 상단 배지 내용.
+    - current_user:     네비 분기용.
+#}
+{% extends "admin/base.html" %}
+
+{% block admin_content %}
+{% if flash %}
+<div class="admin-flash admin-flash--{{ flash_level | default('success') }}" role="status">
+    {{ flash }}
+</div>
+{% endif %}
+
+{% if not scheduler_running %}
+<div class="admin-flash admin-flash--error" role="alert">
+    APScheduler 가 기동되지 않았습니다. 스케줄 백업이 동작하지 않을 수 있습니다.
+    웹 서버를 재기동해도 이 메시지가 계속 보이면 로그에서 <code>APScheduler 기동 실패</code> 항목을 확인하세요.
+</div>
+{% endif %}
+
+{# ── 백업 설정 ────────────────────────────────────────────── #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">백업 설정</h3>
+    <p class="admin-state__muted">
+        백업 스케줄을 cron 표현식으로 지정하고, 보관할 최대 백업 수를 설정합니다.
+        보관 개수를 초과한 오래된 백업은 다음 백업 실행 시 자동으로 삭제됩니다.
+    </p>
+    <form method="post" action="/admin/backup/settings" class="admin-form">
+        <label class="admin-schedule__text">
+            <span>백업 스케줄 (5-필드 cron: 분 시 일 월 요일)</span>
+            <input type="text" name="cron_expression"
+                   class="admin-schedule__input"
+                   value="{{ backup_cron }}"
+                   placeholder="예) 0 3 * * *"
+                   spellcheck="false" autocomplete="off" required>
+        </label>
+        <label class="admin-schedule__text">
+            <span>최대 보관 개수 (초과분 자동 삭제, 최소 1)</span>
+            <input type="number" name="max_count"
+                   class="admin-schedule__input"
+                   value="{{ backup_max_count }}"
+                   min="1" autocomplete="off" required>
+        </label>
+        <button type="submit" class="admin-button admin-button--primary"
+                {% if not scheduler_running %}disabled{% endif %}>
+            설정 저장
+        </button>
+    </form>
+</section>
+
+{# ── 수동 즉시 실행 ──────────────────────────────────────── #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">즉시 백업 실행</h3>
+    <p class="admin-state__muted">
+        지금 바로 DB 파일을 백업합니다 (첨부 파일 제외). 설정에 저장된 보관 개수를
+        초과하면 오래된 백업이 자동으로 삭제됩니다.
+    </p>
+    <form method="post" action="/admin/backup/run"
+          onsubmit="return confirm('지금 즉시 DB 백업을 실행할까요?');">
+        <button type="submit" class="admin-button admin-button--primary">
+            지금 백업 실행
+        </button>
+    </form>
+</section>
+
+{# ── 백업 이력 ────────────────────────────────────────────── #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">백업 이력</h3>
+
+    {% if history %}
+    <table class="admin-table">
+        <thead>
+            <tr>
+                <th>실행 시각 (KST)</th>
+                <th>트리거</th>
+                <th>결과</th>
+                <th>백업 파일</th>
+                <th>전체 크기</th>
+                <th>소요 시간</th>
+                <th>오류</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for h in history %}
+            <tr>
+                <td>{{ (h.executed_at | kst_format) or '—' }}</td>
+                <td>{{ h.trigger }}</td>
+                <td>
+                    {% if h.success %}
+                        <span class="admin-badge admin-badge--running">성공</span>
+                    {% else %}
+                        <span class="admin-badge admin-badge--idle">실패</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if h.backup_files %}
+                        {% for f in h.backup_files %}
+                            <div>{{ f }}</div>
+                        {% endfor %}
+                    {% else %}
+                        <span class="admin-state__muted">—</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if h.total_size_bytes is not none %}
+                        {{ (h.total_size_bytes / 1024 / 1024) | round(2) }} MB
+                    {% else %}
+                        <span class="admin-state__muted">—</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if h.duration_seconds is not none %}
+                        {{ h.duration_seconds }}s
+                    {% else %}
+                        <span class="admin-state__muted">—</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if h.error_message %}
+                        {{ h.error_message }}
+                    {% else %}
+                        <span class="admin-state__muted">—</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="admin-state__muted">백업 이력이 없습니다.</p>
+    {% endif %}
+</section>
+
+{# ── 현재 백업 파일 목록 ──────────────────────────────────── #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">백업 파일 목록</h3>
+
+    {% if backup_files %}
+    <table class="admin-table">
+        <thead>
+            <tr>
+                <th>파일명</th>
+                <th>크기</th>
+                <th>수정 시각 (KST)</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for f in backup_files %}
+            <tr>
+                <td>{{ f.filename }}</td>
+                <td>{{ (f.size_bytes / 1024 / 1024) | round(2) }} MB</td>
+                <td>{{ (f.modified_at | kst_format) or '—' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="admin-state__muted">백업 파일이 없습니다.</p>
+    {% endif %}
+</section>
+{% endblock %}

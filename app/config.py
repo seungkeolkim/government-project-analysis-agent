@@ -69,6 +69,13 @@ class Settings(BaseSettings):
         description="게시판(건의사항·공지사항) 전용 SQLAlchemy 접속 문자열. 메인 DB 와 격리.",
     )
 
+    # task 00094 — DB 백업 파일 저장 디렉터리.
+    # 환경변수 BACKUP_DIR 로 재지정 가능.
+    backup_dir: Path = Field(
+        default=PROJECT_ROOT / "data" / "backups",
+        description="DB 백업 파일 저장 디렉터리.",
+    )
+
     # task 00073 — IP 접근 이력 날짜별 로그파일 저장 디렉터리.
     # 파일명 형식: access_history_YYMMDD.log (예: access_history_260506.log)
     # 환경변수 ACCESS_LOG_DIR 로 재지정 가능.
@@ -152,6 +159,9 @@ class Settings(BaseSettings):
 
         # task 00073 — 접근 이력 로그 디렉터리 생성.
         self.access_log_dir.mkdir(parents=True, exist_ok=True)
+
+        # task 00094 — 백업 파일 저장 디렉터리 생성.
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache(maxsize=1)
