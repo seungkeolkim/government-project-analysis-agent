@@ -533,6 +533,87 @@ verdict 라디오 + 사유 입력 → **저장** 만 — 별도 '판정 취소' 
 보인다. 단, 본인 작성·수정·삭제 영역은 비활성 (배지가 readonly span 으로 렌더되어
 클릭 불가). 로그인 후에 라벨링이 가능하다.
 
+### 공고 진행 상태 (task 00097, Phase C)
+
+같은 공고를 여러 조직이 모르고 중복 진행하는 사고를 방지하기 위해, canonical 단위로
+**조직별 진행 상태**를 표명·열람할 수 있다 (관련성 판정과는 별개 시스템).
+설계 근거는 `docs/progress_org_design.md`.
+
+**4 단계 status enum** — 한글 값 그대로 저장된다.
+
+- **관심**: 관심 공고 표시. 여러 조직 동시 가능.
+- **검토**: 검토 단계. 여러 조직 동시 가능.
+- **진행**: 실제 진행 단계. **한 canonical 당 단일 조직 선점** — 다른 조직이 이미
+  '진행' 인 상태에서 본인 조직을 '진행' 으로 올리려고 하면 409 + "조직 X 가 이미
+  진행 중입니다" 안내. 선점은 partial unique index 가 아닌 repository app-level
+  transactional 체크가 보장한다 (`docs/db_portability.md` §3 회피 결정 + SQLite
+  단일 writer 가정).
+- **종료**: 종료 단계. 카운터·필터·본인 활동 단계 어디에도 노출하지 않는다 (의미
+  없음). 다른 단계로 자유 롤백 가능 — 모든 4 단계 사이 양방향 전이 허용.
+
+**권한 = 조직 멤버 누구나** (관련성 판정의 'row 작성자 본인만' 과 의도적으로 다름).
+본인이 row 의 organization_id 에 소속되어 있기만 하면 작성자가 누구든 수정·삭제
+가능 — 작성자 휴가/퇴사 시 다른 멤버가 변경할 수 있도록 한 협업 결정. 무소속
+사용자는 작성·수정·삭제 모두 거부 (422). 본인 소속 외 조직 row 변경 시도 → 403.
+`created_by_user_id` 는 "마지막 수정자" 메타로만 보존된다.
+
+**목록 셀 표시**:
+
+- 선점 라인: 🚩 + 조직명 + ': 진행' 큰 글씨. 본인 조직이 진행이면 조직명 강조 색
+  + underline.
+- 카운터 라인: `검토 N · 관심 M` (0 인 항목 생략, 둘 다 0 이면 라인 미렌더). 본인
+  조직이 활동 중인 단계는 파란색·굵게 강조.
+- 빈 셀 (선점 없음 + 카운터 0/0): em dash `—`.
+- hover 툴팁 (Phase B 의 viewport 기준 fixed 레이어, 00088 패턴 재사용) — 선점
+  조직명 + 단계별 카운트 요약. 셀 클릭 시 조직별 단계·작성자·시점·note 가
+  hidden `<tr>` expand 로 펼쳐진다 (Phase 3b 의 동일 과제 expand 와 시각적 일관).
+
+**상세 페이지 인라인 섹션**:
+
+- 본인 소속 조직마다 row 슬롯 풀어 표시 — 이미 row 가 있으면 status select(4 옵션) +
+  note textarea + [저장][삭제]. 없으면 `[ 우리 조직 입장 표명하기 ]` 버튼 → 인라인
+  폼 펼침 → status 선택 + note + 저장.
+- 다른 조직 row 는 read-only — 조직명 + 단계 배지 + 마지막 수정자 + 시점 + note.
+- 비로그인은 본인 영역 미렌더 (안내 문구만), 다른 조직 row 는 그대로 노출.
+- 무소속 사용자는 "소속된 조직이 없습니다" 안내.
+- 저장·삭제 후 페이지 reload — 선점 충돌 / 권한 거부 / 무소속 등의 4xx 응답 시
+  row 안 feedback 박스에 한국어 detail 표시 (페이지 이동 없음, 입력값 보존).
+
+**다중 체크박스 필터** (`?progress=...`):
+
+| UI 라벨 | URL 파라미터 키 | 의미 |
+|---------|-----------------|------|
+| 선점 미발생 | `none` | 아무 조직도 진행 단계가 아닌 canonical |
+| 다른 조직이 진행 | `other_in_progress` | 본인 외 조직이 진행 단계 (충돌 회피용 핵심) |
+| 내 조직이 진행 | `mine_in_progress` | 본인 소속 조직이 진행 단계 |
+| 내 조직 검토 중 | `mine_in_review` | 본인 소속 조직이 검토 단계 |
+
+- URL 키는 영문 채택 (한글 percent-encoding 회피). 다중 선택 시 **OR** 의미 — 해당
+  조건 중 하나라도 만족하는 canonical. AND / 복잡 boolean 은 범위 밖.
+- URL 형식 두 종류 모두 허용: `?progress=A&progress=B` (HTML 폼 표준) 또는
+  `?progress=A,B` (가독성 좋은 콤마 형식). 서버가 자동 평탄화.
+- 비로그인 사용자: "내 조직 ..." 두 옵션 disabled + "로그인 후 사용 가능" 안내.
+  URL 에 `mine_*` 키가 직접 와도 서버가 silent drop (401 거부 아님 — 다른 조건은
+  적용).
+- 페이지네이션 정합 — `progress` 파라미터가 페이지 링크에 보존된다.
+
+**비로그인 노출**: 로그인 사용자와 **동일** — 카운터·선점 조직명·다른 조직 row 모두
+그대로 보인다. 변경 영역만 비활성. 사용자 결정 (Phase B 와 동일 정책).
+
+**API 엔드포인트**:
+
+| 메서드 | 경로 | 권한 |
+|--------|------|------|
+| `POST` | `/canonical/{id}/progress` | current_user_required + 본인 소속 조직 검증 (외부 조직 / 무소속 → 422) |
+| `PATCH` | `/canonical/{id}/progress/{progress_id}` | 같은 조직 멤버 누구나 (외부 조직 → 403, 무소속 → 422). 선점 충돌 → 409. |
+| `DELETE` | `/canonical/{id}/progress/{progress_id}` | PATCH 와 동일 권한 |
+| `GET` | `/canonical/{id}/progress/history` | 비로그인 허용 (Phase B GET history 패턴) |
+
+`content_changed` reset (canonical 의 title/agency/deadline_at 변경 감지) 시
+`announcement_progress` 도 history 로 일괄 이관 (`archive_reason='content_changed'`)
+— 관련성 판정과 동일 hook (`_reset_user_state_on_content_change`) 에서 함께
+처리된다.
+
 ### 읽음 일괄 처리
 
 목록 페이지에서 체크박스로 선택 → 툴바의 **읽음 / 안읽음 / 선택 해제** 버튼.

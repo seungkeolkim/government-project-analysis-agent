@@ -56,10 +56,13 @@ from app.db.repository import (
 )
 from app.organizations.service import get_user_organization_ids
 from app.progress.repository import (
+    PROGRESS_FILTER_REQUIRES_LOGIN_KEYS,
     PROGRESS_SUMMARY_EMPTY,
     get_progress,
     get_progress_rows_by_canonical_id_map,
     get_progress_summary_by_canonical_id_map,
+    list_user_organization_ids,
+    sanitize_progress_filter_options,
 )
 from app.db.session import SessionLocal
 from app.logging_setup import configure_logging
@@ -491,6 +494,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         group: str = Query(default="off"),
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+        progress: Optional[list[str]] = Query(default=None),
         session: Session = Depends(get_session),
         current_user: User | None = Depends(current_user_optional),
     ) -> HTMLResponse:
@@ -511,6 +515,19 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         group_on = group.strip().lower() == "on"
         safe_offset = (page - 1) * page_size
 
+        # task 00097-6 — 진행 상태 다중 체크박스 필터 파싱.
+        # ① sanitize 로 알 수 없는 키 / 비로그인 mine_* 옵션 silent drop.
+        # ② 본인 소속 조직 PK 집합은 list_user_organization_ids 로 단일 SELECT 조회 —
+        #    페이지당 추가 쿼리 1 회 (시나리오 17 가드 유지). 비로그인이면 빈 list.
+        progress_filter_options = sanitize_progress_filter_options(
+            progress, is_authenticated=current_user is not None
+        )
+        progress_filter_my_organization_ids = list_user_organization_ids(
+            session, current_user.id if current_user is not None else None
+        )
+        # 페이지네이션·체크박스 상태 보존용 — 정렬된 콤마 구분 문자열 (URL 키 영문).
+        progress_filter_param_value = ",".join(sorted(progress_filter_options))
+
         if group_on:
             # ── 묶어 보기 모드: canonical 그룹 단위 ─────────────────────────────
             groups = list_canonical_groups(
@@ -521,12 +538,16 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 sort=sort_str,
                 limit=page_size,
                 offset=safe_offset,
+                progress_filter_options=progress_filter_options,
+                progress_filter_my_organization_ids=progress_filter_my_organization_ids,
             )
             total_count = count_canonical_groups(
                 session,
                 status=status_enum,
                 source=source_str,
                 search=search,
+                progress_filter_options=progress_filter_options,
+                progress_filter_my_organization_ids=progress_filter_my_organization_ids,
             )
             total_pages = ceil(total_count / page_size) if total_count > 0 else 1
 
@@ -601,6 +622,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     "progress_summary_empty": PROGRESS_SUMMARY_EMPTY,
                     # task 00097-5 — 셀 expand 본문 (canonical_id → ProgressRowDetail 리스트).
                     "progress_rows_map": progress_rows_map,
+                    # task 00097-6 — 진행 상태 다중 체크박스 필터 상태.
+                    "progress_filter_options": progress_filter_options,
+                    "progress_filter_param_value": progress_filter_param_value,
+                    "progress_filter_requires_login_keys": PROGRESS_FILTER_REQUIRES_LOGIN_KEYS,
                     # Phase 3b — group_mode 에서는 expand/별 없음; undefined 방지.
                     "siblings_map": {},
                     "favorite_entry_map": {},
@@ -616,6 +641,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 search=search,
                 source=source_str,
                 sort=sort_str,
+                progress_filter_options=progress_filter_options,
+                progress_filter_my_organization_ids=progress_filter_my_organization_ids,
             )
 
             # group_size 일괄 조회 (N+1 방지)
@@ -642,6 +669,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 status=status_enum,
                 search=search,
                 source=source_str,
+                progress_filter_options=progress_filter_options,
+                progress_filter_my_organization_ids=progress_filter_my_organization_ids,
             )
             total_pages = ceil(total_count / page_size) if total_count > 0 else 1
 
@@ -719,6 +748,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     "progress_summary_empty": PROGRESS_SUMMARY_EMPTY,
                     # task 00097-5 — 셀 expand 본문 (분리 모드).
                     "progress_rows_map": progress_rows_map,
+                    # task 00097-6 — 진행 상태 다중 체크박스 필터 상태.
+                    "progress_filter_options": progress_filter_options,
+                    "progress_filter_param_value": progress_filter_param_value,
+                    "progress_filter_requires_login_keys": PROGRESS_FILTER_REQUIRES_LOGIN_KEYS,
                     # Phase 3b — 동일과제 expand 데이터 (비로그인 포함).
                     "siblings_map": siblings_map,
                     # Phase 3b — 별 아이콘 초기 상태 (로그인 시만).

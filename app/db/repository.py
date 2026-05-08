@@ -1231,6 +1231,8 @@ def list_announcements(
     search: str | None = None,
     source: str | None = None,
     sort: str = "received_desc",
+    progress_filter_options: Iterable[str] | None = None,
+    progress_filter_my_organization_ids: Iterable[int] | None = None,
 ) -> list[Announcement]:
     """공고 목록을 조회한다 (현재 버전 is_current=True 한정).
 
@@ -1240,7 +1242,8 @@ def list_announcements(
         - 'title_asc':            공고명 가나다순.
 
     기존 호출부 호환성:
-        새 파라미터(source, sort)는 기본값을 가지므로 기존 호출은 변경 없이 동작한다.
+        새 파라미터(source, sort, progress_filter_*)는 기본값을 가지므로 기존
+        호출은 변경 없이 동작한다.
 
     Args:
         session: 호출자가 제어하는 SQLAlchemy 세션.
@@ -1250,15 +1253,25 @@ def list_announcements(
         search:  제목 부분일치(LIKE) 검색어. 공백은 무시(strip).
         source:  source_type 필터. None 이면 전체.
         sort:    정렬 기준. 허용값: received_desc | deadline_asc | title_asc.
+        progress_filter_options: task 00097-6 진행 상태 필터 옵션 키 집합. 비어
+            있거나 None 이면 필터 미적용.
+        progress_filter_my_organization_ids: 본인 소속 조직 PK 집합 (mine_*
+            옵션에서 사용). 비로그인이면 빈 iterable.
 
     Returns:
         조건에 맞는 Announcement 리스트 (is_current=True 만 포함).
     """
+    # 함수-로컬 import 로 app.progress → app.db.repository 의 정방향 의존성 유지.
+    from app.progress.repository import apply_progress_filter
+
     # is_current=True 만 표시한다 — 이력(구버전) row 는 목록에 노출하지 않는다.
     statement = select(Announcement).where(Announcement.is_current.is_(True))
 
     status_enum = _coerce_status(status) if status is not None else None
     statement = _apply_common_filters(statement, status_enum, source, search)
+    statement = apply_progress_filter(
+        statement, progress_filter_options, progress_filter_my_organization_ids
+    )
     statement = _apply_sort_order(statement, sort)
 
     safe_limit = max(int(limit), 1)
@@ -1273,6 +1286,8 @@ def count_announcements(
     status: AnnouncementStatus | str | None = None,
     search: str | None = None,
     source: str | None = None,
+    progress_filter_options: Iterable[str] | None = None,
+    progress_filter_my_organization_ids: Iterable[int] | None = None,
 ) -> int:
     """list_announcements 와 동일 조건의 전체 개수를 반환한다 (is_current=True 한정).
 
@@ -1283,16 +1298,23 @@ def count_announcements(
         status:  상태 필터. None 이면 전체.
         search:  제목 부분일치 검색어. None 이면 검색 없음.
         source:  source_type 필터. None 이면 전체.
+        progress_filter_options: task 00097-6 진행 상태 필터 옵션 키 집합.
+        progress_filter_my_organization_ids: 본인 소속 조직 PK 집합.
 
     Returns:
         조건에 맞는 공고 수.
     """
+    from app.progress.repository import apply_progress_filter
+
     statement = (
         select(func.count()).select_from(Announcement).where(Announcement.is_current.is_(True))
     )
 
     status_enum = _coerce_status(status) if status is not None else None
     statement = _apply_common_filters(statement, status_enum, source, search)
+    statement = apply_progress_filter(
+        statement, progress_filter_options, progress_filter_my_organization_ids
+    )
 
     return int(session.execute(statement).scalar_one())
 
@@ -1333,6 +1355,8 @@ def list_canonical_groups(
     sort: str = "received_desc",
     limit: int = 50,
     offset: int = 0,
+    progress_filter_options: Iterable[str] | None = None,
+    progress_filter_my_organization_ids: Iterable[int] | None = None,
 ) -> list[CanonicalGroupRow]:
     """canonical 그룹 단위로 공고 목록을 조회한다 (묶어 보기 모드).
 
@@ -1357,6 +1381,8 @@ def list_canonical_groups(
     Returns:
         CanonicalGroupRow 리스트. 정렬·페이지네이션 적용됨.
     """
+    from app.progress.repository import apply_progress_filter
+
     status_enum = _coerce_status(status) if status is not None else None
 
     # ── window function 서브쿼리: 그룹별 대표 선택 + group_size 집계 ─────────────
@@ -1402,16 +1428,28 @@ def list_canonical_groups(
         rep_subq, Announcement.id == rep_subq.c.ann_id
     )
     grouped_stmt = _apply_common_filters(grouped_stmt, status_enum, source, search)
+    grouped_stmt = apply_progress_filter(
+        grouped_stmt,
+        progress_filter_options,
+        progress_filter_my_organization_ids,
+    )
     grouped_rows: list[tuple[Announcement, int]] = list(
         session.execute(grouped_stmt).all()
     )
 
     # ── 고아 공고 (canonical_group_id IS NULL): 각각 단독 그룹 ─────────────────
+    # canonical_group_id 가 NULL 이면 EXISTS 서브쿼리가 절대 매칭되지 않으므로
+    # progress 필터 옵션 중 'none' 외의 옵션은 자동 제외된다 (논리적 정합).
     orphan_stmt = select(Announcement).where(
         Announcement.is_current.is_(True),
         Announcement.canonical_group_id.is_(None),
     )
     orphan_stmt = _apply_common_filters(orphan_stmt, status_enum, source, search)
+    orphan_stmt = apply_progress_filter(
+        orphan_stmt,
+        progress_filter_options,
+        progress_filter_my_organization_ids,
+    )
     orphan_rows: list[Announcement] = list(session.execute(orphan_stmt).scalars().all())
 
     # ── 합산 → Python 정렬 → 페이지네이션 ──────────────────────────────────────
@@ -1445,6 +1483,8 @@ def count_canonical_groups(
     status: AnnouncementStatus | str | None = None,
     source: str | None = None,
     search: str | None = None,
+    progress_filter_options: Iterable[str] | None = None,
+    progress_filter_my_organization_ids: Iterable[int] | None = None,
 ) -> int:
     """list_canonical_groups 와 동일 조건의 전체 그룹 수를 반환한다.
 
@@ -1459,6 +1499,8 @@ def count_canonical_groups(
     Returns:
         조건에 맞는 canonical 그룹 수 (고아 공고 + 그룹 대표 합산).
     """
+    from app.progress.repository import apply_progress_filter
+
     status_enum = _coerce_status(status) if status is not None else None
 
     # 그룹 대표 수 — ranked_subq 재사용
@@ -1495,6 +1537,11 @@ def count_canonical_groups(
         .join(rep_subq, Announcement.id == rep_subq.c.ann_id)
     )
     grouped_count_stmt = _apply_common_filters(grouped_count_stmt, status_enum, source, search)
+    grouped_count_stmt = apply_progress_filter(
+        grouped_count_stmt,
+        progress_filter_options,
+        progress_filter_my_organization_ids,
+    )
     grouped_count = int(session.execute(grouped_count_stmt).scalar_one())
 
     # 고아 공고 수
@@ -1507,6 +1554,11 @@ def count_canonical_groups(
         )
     )
     orphan_count_stmt = _apply_common_filters(orphan_count_stmt, status_enum, source, search)
+    orphan_count_stmt = apply_progress_filter(
+        orphan_count_stmt,
+        progress_filter_options,
+        progress_filter_my_organization_ids,
+    )
     orphan_count = int(session.execute(orphan_count_stmt).scalar_one())
 
     return grouped_count + orphan_count

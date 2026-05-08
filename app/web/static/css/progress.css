@@ -474,6 +474,57 @@
     display: none !important;
 }
 
+/* ── 진행 상태 다중 체크박스 필터 (task 00097-6) ──────────────────────── */
+.filter-progress {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    margin-top: 6px;
+    padding: 6px 10px;
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    background: #fafafa;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.filter-progress__legend {
+    font-size: 12px;
+    color: #4b5563;
+    font-weight: 600;
+    padding: 0 4px;
+}
+
+.filter-progress__option {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 13px;
+    color: #1f2937;
+    cursor: pointer;
+}
+
+.filter-progress__option input[type="checkbox"] {
+    cursor: inherit;
+}
+
+/* 비로그인 시 mine_* 옵션 — 시각적 비활성 + cursor 차단. */
+.filter-progress__option--disabled {
+    color: #9ca3af;
+    cursor: not-allowed;
+}
+
+.filter-progress__option--disabled input[type="checkbox"] {
+    cursor: not-allowed;
+}
+
+.filter-progress__hint {
+    font-size: 11px;
+    color: #9ca3af;
+    font-style: italic;
+}
+
 /* ── 셀 expand 행 (시나리오 12 — 셀 클릭 시 조직별 상세 풀어 표시) ───── */
 .pg-expand-row > .pg-expand-row__cell {
     background: #f8fafc;

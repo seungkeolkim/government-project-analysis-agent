@@ -34,10 +34,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import exists, or_, select
 from sqlalchemy.orm import Session
 
 from app.db.models import (
+    Announcement,
     AnnouncementProgress,
     AnnouncementProgressArchiveReason,
     AnnouncementProgressHistory,
@@ -847,6 +848,149 @@ def get_progress_rows_by_canonical_id_map(
     return buckets
 
 
+# ── 다중 체크박스 필터 (task 00097-6 시나리오 15·16) ──────────────────────
+#
+# UI 라벨 ↔ URL 파라미터 키 매핑 (설계 문서 §8.1 — 영문 키 채택).
+# 비로그인은 mine_* 두 키를 자동 무시 (silent drop, 시나리오 16).
+
+PROGRESS_FILTER_NONE: str = "none"
+PROGRESS_FILTER_OTHER_IN_PROGRESS: str = "other_in_progress"
+PROGRESS_FILTER_MINE_IN_PROGRESS: str = "mine_in_progress"
+PROGRESS_FILTER_MINE_IN_REVIEW: str = "mine_in_review"
+
+PROGRESS_FILTER_ALL_KEYS: frozenset[str] = frozenset(
+    {
+        PROGRESS_FILTER_NONE,
+        PROGRESS_FILTER_OTHER_IN_PROGRESS,
+        PROGRESS_FILTER_MINE_IN_PROGRESS,
+        PROGRESS_FILTER_MINE_IN_REVIEW,
+    }
+)
+
+# 비로그인 컨텍스트에서만 silent drop 되는 옵션 — 본인 소속 조직 정보가 없으면
+# mine_* 두 옵션은 의미가 없다 (사용자 결정 + 설계 문서 §8.2).
+PROGRESS_FILTER_REQUIRES_LOGIN_KEYS: frozenset[str] = frozenset(
+    {PROGRESS_FILTER_MINE_IN_PROGRESS, PROGRESS_FILTER_MINE_IN_REVIEW}
+)
+
+
+def sanitize_progress_filter_options(
+    raw_options: Iterable[str] | None,
+    *,
+    is_authenticated: bool,
+) -> frozenset[str]:
+    """진행 상태 필터 query param 값을 정규화·검증한다.
+
+    동작:
+        - 알 수 없는 키 (PROGRESS_FILTER_ALL_KEYS 밖) 은 silent drop.
+        - 비로그인 (``is_authenticated=False``) 은 mine_* 두 키 silent drop.
+        - 빈 문자열·None 은 빈 frozenset.
+        - 콤마 구분 형식 ('progress=A,B') 도 허용 — 각 토큰을 분리해 평탄화한다.
+
+    Args:
+        raw_options: query param 으로 들어온 값들 (각 원소는 'A' 또는 'A,B' 형태 가능).
+        is_authenticated: 현재 사용자가 로그인 상태인지 여부.
+
+    Returns:
+        정규화된 옵션 키 frozenset. 호출자가 ``apply_progress_filter`` 에 그대로 전달.
+    """
+    if raw_options is None:
+        return frozenset()
+    flattened: set[str] = set()
+    for entry in raw_options:
+        if entry is None:
+            continue
+        for token in str(entry).split(","):
+            token = token.strip()
+            if not token:
+                continue
+            if token not in PROGRESS_FILTER_ALL_KEYS:
+                # 알 수 없는 키 — silent drop (정상 사용자 호출 외 봇·구버전 URL 방어).
+                continue
+            if not is_authenticated and token in PROGRESS_FILTER_REQUIRES_LOGIN_KEYS:
+                # 비로그인은 mine_* silent drop — 401 거부 아님 (설계 문서 §8.2).
+                continue
+            flattened.add(token)
+    return frozenset(flattened)
+
+
+def apply_progress_filter(
+    statement,
+    options: Iterable[str] | None,
+    my_organization_ids: Iterable[int] | None,
+):
+    """진행 상태 다중 체크박스 필터를 announcements 쿼리에 적용한다.
+
+    설계 문서 §8.4 의 EXISTS 서브쿼리 패턴. 옵션이 여러 개면 OR 결합 (다중 선택
+    의미: '하나라도 만족').
+
+    EXISTS 서브쿼리는 ``Announcement.canonical_group_id`` 와
+    ``AnnouncementProgress.canonical_project_id`` 를 매칭한다 — 모델 컬럼명이 다르나
+    같은 canonical_projects.id 를 가리킨다 (정합).
+
+    Args:
+        statement: SQLAlchemy select / count statement.
+        options: sanitize_progress_filter_options 의 반환값 (또는 비어 있는 iterable).
+        my_organization_ids: 본인 소속 조직 PK 집합. 비로그인 / 무소속이면 빈 iterable.
+            mine_* 옵션은 sanitize 단계에서 이미 silent drop 되었으므로 본 함수에서는
+            ``my_organization_ids`` 가 비어 있어도 안전하다.
+
+    Returns:
+        WHERE 절이 추가된 statement. options 가 비어 있으면 statement 그대로 반환.
+    """
+    options_set = set(options) if options is not None else set()
+    if not options_set:
+        return statement
+
+    my_org_ids_list = list(my_organization_ids) if my_organization_ids is not None else []
+
+    or_clauses = []
+
+    if PROGRESS_FILTER_NONE in options_set:
+        # 아무 조직도 status='진행' 이 아닌 canonical.
+        or_clauses.append(
+            ~exists().where(
+                AnnouncementProgress.canonical_project_id == Announcement.canonical_group_id,
+                AnnouncementProgress.status == AnnouncementProgressStatus.IN_PROGRESS,
+            )
+        )
+
+    if PROGRESS_FILTER_OTHER_IN_PROGRESS in options_set:
+        # 본인 소속 외 조직이 status='진행'. 무소속이면 'NOT IN (-1)' 로
+        # 사실상 모든 진행 row 매칭 (다른 조직 = 모든 조직).
+        excluded_org_ids = my_org_ids_list or [-1]
+        or_clauses.append(
+            exists().where(
+                AnnouncementProgress.canonical_project_id == Announcement.canonical_group_id,
+                AnnouncementProgress.status == AnnouncementProgressStatus.IN_PROGRESS,
+                AnnouncementProgress.organization_id.notin_(excluded_org_ids),
+            )
+        )
+
+    # mine_* 두 옵션은 sanitize 에서 비로그인이면 이미 drop. 안전망으로 my_org_ids 도 검사.
+    if PROGRESS_FILTER_MINE_IN_PROGRESS in options_set and my_org_ids_list:
+        or_clauses.append(
+            exists().where(
+                AnnouncementProgress.canonical_project_id == Announcement.canonical_group_id,
+                AnnouncementProgress.status == AnnouncementProgressStatus.IN_PROGRESS,
+                AnnouncementProgress.organization_id.in_(my_org_ids_list),
+            )
+        )
+
+    if PROGRESS_FILTER_MINE_IN_REVIEW in options_set and my_org_ids_list:
+        or_clauses.append(
+            exists().where(
+                AnnouncementProgress.canonical_project_id == Announcement.canonical_group_id,
+                AnnouncementProgress.status == AnnouncementProgressStatus.REVIEW,
+                AnnouncementProgress.organization_id.in_(my_org_ids_list),
+            )
+        )
+
+    if not or_clauses:
+        return statement
+    return statement.where(or_(*or_clauses))
+
+
 # ── 유저 소속 조직 노출 (라우터 / 필터에서 재사용) ──────────────────────────
 
 
@@ -860,11 +1004,18 @@ def list_user_organization_ids(session: Session, user_id: int | None) -> list[in
 
 
 __all__: Sequence[str] = (
-    "PreemptionConflict",
+    "PROGRESS_FILTER_ALL_KEYS",
+    "PROGRESS_FILTER_MINE_IN_PROGRESS",
+    "PROGRESS_FILTER_MINE_IN_REVIEW",
+    "PROGRESS_FILTER_NONE",
+    "PROGRESS_FILTER_OTHER_IN_PROGRESS",
+    "PROGRESS_FILTER_REQUIRES_LOGIN_KEYS",
     "PROGRESS_SUMMARY_EMPTY",
+    "PreemptionConflict",
     "ProgressOrganizationRef",
     "ProgressRowDetail",
     "ProgressSummary",
+    "apply_progress_filter",
     "create_progress",
     "delete_progress",
     "ensure_in_progress_unique",
@@ -876,5 +1027,6 @@ __all__: Sequence[str] = (
     "list_progress_history",
     "list_user_organization_ids",
     "reset_progress_for_canonical",
+    "sanitize_progress_filter_options",
     "update_progress",
 )

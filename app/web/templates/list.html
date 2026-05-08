@@ -31,6 +31,9 @@
     - progress_summary_map:     dict[int, ProgressSummary]   (task 00097 — canonical_id → 진행 상태 요약)
     - progress_summary_empty:   ProgressSummary              (task 00097 — 미존재 canonical default)
     - progress_rows_map:        dict[int, list[ProgressRowDetail]]  (task 00097-5 — canonical_id → 셀 expand 본문)
+    - progress_filter_options:  frozenset[str]               (task 00097-6 — 활성 진행 상태 필터 옵션 키 집합)
+    - progress_filter_param_value: str                       (task 00097-6 — 페이지네이션·체크박스 상태 보존용 콤마 구분 문자열)
+    - progress_filter_requires_login_keys: frozenset[str]    (task 00097-6 — 비로그인 시 disabled 처리할 mine_* 키 집합)
     - siblings_map:             dict[int, list[dict]]        (Phase 3b — canonical_id → 동일 과제 목록)
     - favorite_entry_map:       dict[int, int]               (Phase 3b — canonical_id → entry_id. 비로그인 시 빈 dict.)
 
@@ -93,10 +96,50 @@
 
         <button type="submit" class="filter-submit">적용</button>
 
-        {# 기본값이 아닌 필터·정렬·토글 중 하나라도 활성 상태이면 초기화 링크를 노출한다. #}
-        {% if status or source or search or sort != "received_desc" or group == "on" %}
+        {# 기본값이 아닌 필터·정렬·토글 중 하나라도 활성 상태이면 초기화 링크를 노출한다.
+           task 00097-6 — progress 필터도 초기화 트리거에 포함. #}
+        {% if status or source or search or sort != "received_desc" or group == "on" or progress_filter_options %}
         <a class="filter-reset" href="/">초기화</a>
         {% endif %}
+
+        {# task 00097-6 — 진행 상태 다중 체크박스 필터. 같은 form 안에 두어 '적용'
+           버튼이 모든 필터를 함께 제출한다. 같은 name='progress' 의 다중 체크박스 →
+           HTML 표준에 따라 ?progress=A&progress=B 로 제출된다 (서버는 콤마 형식과
+           둘 다 sanitize 단계에서 평탄화한다).
+
+           비로그인은 mine_* 두 옵션 disabled + 한국어 안내. URL 직접 호출 시에도
+           서버가 silent drop. #}
+        <fieldset class="filter-progress" aria-label="진행 상태 필터">
+            <legend class="filter-progress__legend">진행 상태</legend>
+            <label class="filter-progress__option">
+                <input type="checkbox" name="progress" value="none"
+                       {% if 'none' in progress_filter_options %}checked{% endif %}>
+                <span>선점 미발생</span>
+            </label>
+            <label class="filter-progress__option">
+                <input type="checkbox" name="progress" value="other_in_progress"
+                       {% if 'other_in_progress' in progress_filter_options %}checked{% endif %}>
+                <span>다른 조직이 진행</span>
+            </label>
+            <label class="filter-progress__option {% if not current_user %}filter-progress__option--disabled{% endif %}">
+                <input type="checkbox" name="progress" value="mine_in_progress"
+                       {% if 'mine_in_progress' in progress_filter_options %}checked{% endif %}
+                       {% if not current_user %}disabled{% endif %}>
+                <span>내 조직이 진행</span>
+                {% if not current_user %}
+                <span class="filter-progress__hint" title="로그인 후 사용 가능">로그인 후 사용 가능</span>
+                {% endif %}
+            </label>
+            <label class="filter-progress__option {% if not current_user %}filter-progress__option--disabled{% endif %}">
+                <input type="checkbox" name="progress" value="mine_in_review"
+                       {% if 'mine_in_review' in progress_filter_options %}checked{% endif %}
+                       {% if not current_user %}disabled{% endif %}>
+                <span>내 조직 검토 중</span>
+                {% if not current_user %}
+                <span class="filter-progress__hint" title="로그인 후 사용 가능">로그인 후 사용 가능</span>
+                {% endif %}
+            </label>
+        </fieldset>
     </form>
 
     <p class="list-summary">
@@ -409,7 +452,7 @@
 <nav class="pagination" aria-label="페이지 이동">
     {# 필터·정렬·그룹 값을 보존하며 페이지 번호만 바꿔 링크한다.
        기본값(sort=received_desc, group=off)은 URL 간결화를 위해 생략한다. #}
-    {% set base_query %}{% if status %}&status={{ status }}{% endif %}{% if search %}&search={{ search }}{% endif %}{% if source %}&source={{ source }}{% endif %}{% if sort != "received_desc" %}&sort={{ sort }}{% endif %}{% if group == "on" %}&group=on{% endif %}{% endset %}
+    {% set base_query %}{% if status %}&status={{ status }}{% endif %}{% if search %}&search={{ search }}{% endif %}{% if source %}&source={{ source }}{% endif %}{% if sort != "received_desc" %}&sort={{ sort }}{% endif %}{% if group == "on" %}&group=on{% endif %}{% if progress_filter_param_value %}&progress={{ progress_filter_param_value }}{% endif %}{% endset %}
 
     {% if page > 1 %}
     <a class="pagination-link" href="/?page={{ page - 1 }}{{ base_query }}">← 이전</a>
