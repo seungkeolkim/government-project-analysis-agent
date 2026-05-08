@@ -522,9 +522,9 @@ def test_summary_logged_in_personal_priority_and_other_counter(
     others_usernames = sorted(meta.username for meta in summary.others)
     assert others_usernames == ["summary_peer1", "summary_peer1", "summary_peer2"]
 
-    # 카운터: 관련 2 (peer1 개인, peer2 개인), 무관 1 (peer1 조직)
-    assert summary.others_count_related == 2
-    assert summary.others_count_unrelated == 1
+    # 카운터: 관련 3 (본인 개인 + peer1 개인 + peer2 개인), 무관 2 (본인 조직 A + peer1 조직 A)
+    assert summary.count_related == 3
+    assert summary.count_unrelated == 2
 
 
 def test_summary_logged_in_only_organization_rows_uses_latest_as_badge(
@@ -572,10 +572,10 @@ def test_summary_logged_in_only_organization_rows_uses_latest_as_badge(
     assert summary.mine_organization[0].judgment.verdict == RELEVANCE_VERDICT_UNRELATED
     assert summary.mine_organization[1].judgment.organization_id == org_a_id
 
-    # OTHERS 비어 있음 + 카운터 0
+    # OTHERS 비어 있음 + 전체 카운터 (본인 조직 2개: 관련 1 + 무관 1)
     assert summary.others == ()
-    assert summary.others_count_related == 0
-    assert summary.others_count_unrelated == 0
+    assert summary.count_related == 1
+    assert summary.count_unrelated == 1
 
 
 def test_summary_anonymous_user_treats_all_as_others(test_engine: Engine):
@@ -611,9 +611,9 @@ def test_summary_anonymous_user_treats_all_as_others(test_engine: Engine):
     assert summary.mine_organization == ()
     # OTHERS 에 두 row 모두 들어감
     assert len(summary.others) == 2
-    # 카운터 분리
-    assert summary.others_count_related == 1
-    assert summary.others_count_unrelated == 1
+    # 카운터 분리 (비로그인 = mine 없음, others = 전체 = 관련 1 + 무관 1)
+    assert summary.count_related == 1
+    assert summary.count_unrelated == 1
 
 
 def test_summary_empty_inputs(test_engine: Engine):
@@ -692,8 +692,9 @@ def test_summary_n_plus_1_avoidance_single_query(test_engine: Engine):
     assert sample.mine_personal is not None
     assert len(sample.mine_organization) == 1
     assert len(sample.others) == 1
-    assert sample.others_count_related == 1
-    assert sample.others_count_unrelated == 0
+    # 카운터: 관련 2 (본인 개인 + peer 개인), 무관 1 (본인 조직)
+    assert sample.count_related == 2
+    assert sample.count_unrelated == 1
 
 
 def test_summary_returns_only_canonicals_with_rows(test_engine: Engine):
@@ -721,3 +722,51 @@ def test_summary_returns_only_canonicals_with_rows(test_engine: Engine):
     # 호출자는 RELEVANCE_SUMMARY_EMPTY 를 default 로 사용 가능.
     fallback = result.get(cid_empty, RELEVANCE_SUMMARY_EMPTY)
     assert fallback is RELEVANCE_SUMMARY_EMPTY
+
+
+def test_summary_only_self_judgment_shows_counter(test_engine: Engine):
+    """본인만 판정하고 다른 사용자가 아무도 판정하지 않은 경우에도 카운터가 올바르게 표시되어야 한다.
+
+    회귀 테스트 (task 00090): 이전에는 others 만 카운트해 본인만 판정하면
+    0/0 이 되어 카운터가 숨겨지는 버그가 있었다.
+    """
+    me_id = _make_user(session_scope, "summary_self_only_me")
+    cid_related = _make_canonical(session_scope, "official:summary-self-related")
+    cid_unrelated = _make_canonical(session_scope, "official:summary-self-unrelated")
+
+    with session_scope() as s:
+        # 본인만 '관련' 1건 판정
+        set_relevance_judgment(
+            s,
+            canonical_project_id=cid_related,
+            user_id=me_id,
+            verdict=RELEVANCE_VERDICT_RELATED,
+            organization_id=None,
+        )
+        # 본인만 '무관' 1건 판정
+        set_relevance_judgment(
+            s,
+            canonical_project_id=cid_unrelated,
+            user_id=me_id,
+            verdict=RELEVANCE_VERDICT_UNRELATED,
+            organization_id=None,
+        )
+
+    with session_scope() as s:
+        summary_map = get_relevance_summary_by_canonical_id_map(
+            s, user_id=me_id, canonical_project_ids=[cid_related, cid_unrelated]
+        )
+
+    # 본인만 '관련' 판정 → count_related == 1, count_unrelated == 0
+    s_related = summary_map[cid_related]
+    assert s_related.mine_personal is not None
+    assert s_related.others == ()
+    assert s_related.count_related == 1
+    assert s_related.count_unrelated == 0
+
+    # 본인만 '무관' 판정 → count_related == 0, count_unrelated == 1
+    s_unrelated = summary_map[cid_unrelated]
+    assert s_unrelated.mine_personal is not None
+    assert s_unrelated.others == ()
+    assert s_unrelated.count_related == 0
+    assert s_unrelated.count_unrelated == 1

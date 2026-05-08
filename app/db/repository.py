@@ -549,7 +549,7 @@ class RelevanceJudgmentWithMeta:
 class RelevanceSummary:
     """canonical_project 단위 관련성 요약.
 
-    task 00085 — 목록 셀의 본인 큰 배지 / hover 툴팁 / OTHERS 카운터 / 상세
+    task 00085 — 목록 셀의 본인 큰 배지 / hover 툴팁 / 전체 카운터 / 상세
     페이지 행 풀어 표시 렌더링에 필요한 데이터를 한 묶음으로 제공한다.
 
     user_id=None 인 비로그인 호출에서는 mine_personal / mine_organization 가
@@ -565,15 +565,17 @@ class RelevanceSummary:
             user_id == 호출자), decided_at DESC 정렬. 비어 있을 수 있다.
         others: 본인이 작성하지 않은 모든 row (다른 사용자의 개인 + 조직),
             decided_at DESC 정렬.
-        others_count_related: others 중 verdict='관련' 인 row 수.
-        others_count_unrelated: others 중 verdict='무관' 인 row 수.
+        count_related: 본인 + 타인 + 모든 조직 row 중 verdict='관련' 인 총 수.
+            user_id=None(비로그인) 시 mine_* 가 비어 있으므로 others 카운트와 동일해진다.
+        count_unrelated: 본인 + 타인 + 모든 조직 row 중 verdict='무관' 인 총 수.
+            user_id=None(비로그인) 시 mine_* 가 비어 있으므로 others 카운트와 동일해진다.
     """
 
     mine_personal: RelevanceJudgmentWithMeta | None
     mine_organization: tuple[RelevanceJudgmentWithMeta, ...]
     others: tuple[RelevanceJudgmentWithMeta, ...]
-    others_count_related: int
-    others_count_unrelated: int
+    count_related: int
+    count_unrelated: int
 
 
 # 기본값(빈 요약) — 호출자가 ``summary_map.get(canonical_id, RELEVANCE_SUMMARY_EMPTY)``
@@ -582,8 +584,8 @@ RELEVANCE_SUMMARY_EMPTY: RelevanceSummary = RelevanceSummary(
     mine_personal=None,
     mine_organization=(),
     others=(),
-    others_count_related=0,
-    others_count_unrelated=0,
+    count_related=0,
+    count_unrelated=0,
 )
 
 
@@ -2057,7 +2059,7 @@ def get_relevance_summary_by_canonical_id_map(
         - mine_organization: 본인이 만든 조직 row, decided_at DESC.
         - others: 본인이 작성하지 않은 모든 row (다른 사용자의 개인 + 조직),
             decided_at DESC.
-        - others_count_*: others 의 verdict 별 카운트 (관련 / 무관).
+        - count_*: 본인 + 타인 + 모든 조직 row 의 verdict 별 총 카운트 (관련 / 무관).
 
     user_id=None (비로그인) 일 때는 mine_personal=None, mine_organization=(),
     others 에 해당 canonical 의 모든 row 가 들어가고 카운터도 전체 row 기준이다.
@@ -2141,16 +2143,22 @@ def get_relevance_summary_by_canonical_id_map(
         mine_organization_metas = tuple(mine_organization_buckets.get(canonical_id, []))
         others_metas = tuple(others_buckets.get(canonical_id, []))
 
-        # OTHERS 카운터 — verdict 별 분리.
-        count_related = sum(1 for m in others_metas if m.judgment.verdict == RELEVANCE_VERDICT_RELATED)
-        count_unrelated = sum(1 for m in others_metas if m.judgment.verdict == RELEVANCE_VERDICT_UNRELATED)
+        # 전체 카운터 — 본인(개인 + 조직) + others 모두 포함해 verdict 별 집계.
+        # mine_personal 은 None 일 수 있으므로 빈 tuple 로 치환해 안전하게 합산한다.
+        all_metas = (
+            ((mine_personal_meta,) if mine_personal_meta is not None else ())
+            + mine_organization_metas
+            + others_metas
+        )
+        count_related = sum(1 for m in all_metas if m.judgment.verdict == RELEVANCE_VERDICT_RELATED)
+        count_unrelated = sum(1 for m in all_metas if m.judgment.verdict == RELEVANCE_VERDICT_UNRELATED)
 
         summary_map[canonical_id] = RelevanceSummary(
             mine_personal=mine_personal_meta,
             mine_organization=mine_organization_metas,
             others=others_metas,
-            others_count_related=count_related,
-            others_count_unrelated=count_unrelated,
+            count_related=count_related,
+            count_unrelated=count_unrelated,
         )
 
     return summary_map

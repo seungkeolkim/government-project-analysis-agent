@@ -16,14 +16,13 @@
         1) 본인 개인 row (organization_id IS NULL & user_id == 본인)
         2) 본인 조직 row 중 decided_at DESC 의 첫 항목 (mine_organization 첫 번째)
         3) 미검토 (빈 배지)
-    - 카운터: ✅(관련) ❌(무관) — OTHERS row 만 카운트.
-      OTHERS = 본인 user_id 가 아닌 모든 row (다른 사용자의 개인 + 조직 모두).
+    - 카운터: ✅(관련) ❌(무관) — 본인 + 타인 + 조직 모든 row 카운트.
       카운터 자체가 0/0 이면 카운터 div 자체를 렌더하지 않는다 (시각적 노이즈 감소).
     - hover 툴팁: 본인 조직 row (mine_organization) 와 다른 사용자/조직 판정 (others) 을 모두 나열.
       둘 다 비어 있으면 툴팁을 렌더하지 않는다.
     - 비로그인 (current_user is None): 큰 배지는 항상 미검토. mine_personal /
-      mine_organization 가 비어 있어 자동으로 그렇게 된다. 카운터는 동일하게
-      OTHERS 기준 (= 결정 3 — 비로그인 = 로그인 동일 노출).
+      mine_organization 가 비어 있어 자동으로 그렇게 된다. 카운터는 others 기준
+      (= 결정 3 — 비로그인 = 로그인 동일 노출).
 
   클릭 동작:
     - 로그인: 큰 배지가 <button> 으로 렌더되어 클릭 시 openRelevanceModal 호출.
@@ -79,12 +78,12 @@
     </span>
     {% endif %}
 
-    {# OTHERS 카운터 — 0/0 이면 렌더하지 않음. #}
-    {% set others_total = summary.others_count_related + summary.others_count_unrelated %}
-    {% if others_total > 0 %}
-    <span class="rj-counter" aria-label="다른 사용자·조직의 평가 카운트">
-        <span class="rj-counter__cell rj-counter__cell--related">✅ {{ summary.others_count_related }}</span>
-        <span class="rj-counter__cell rj-counter__cell--unrelated">❌ {{ summary.others_count_unrelated }}</span>
+    {# 전체 카운터 — 0/0 이면 렌더하지 않음. #}
+    {% set total = summary.count_related + summary.count_unrelated %}
+    {% if total > 0 %}
+    <span class="rj-counter" aria-label="전체 평가 카운트">
+        <span class="rj-counter__cell rj-counter__cell--related">✅ {{ summary.count_related }}</span>
+        <span class="rj-counter__cell rj-counter__cell--unrelated">❌ {{ summary.count_unrelated }}</span>
     </span>
     {% endif %}
 
