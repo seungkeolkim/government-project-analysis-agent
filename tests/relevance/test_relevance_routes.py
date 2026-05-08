@@ -474,3 +474,102 @@ def test_anonymous_history_sees_organization_rows(
     assert len(items) == 1
     assert items[0]["organization_id"] == org_id
     assert items[0]["username"] == "rj_route_user"
+
+
+# ---------------------------------------------------------------------------
+# task 00089 — GET /canonical/{id}/relevance/mine 본인 판정 목록 조회
+# ---------------------------------------------------------------------------
+
+
+def test_get_mine_requires_login(client: TestClient, canonical_id: int) -> None:
+    """비로그인 GET /relevance/mine → 401."""
+    resp = client.get(f"/canonical/{canonical_id}/relevance/mine")
+    assert resp.status_code == 401
+
+
+def test_get_mine_canonical_not_found(logged_in_client: TestClient) -> None:
+    """존재하지 않는 canonical → 404."""
+    resp = logged_in_client.get("/canonical/999999/relevance/mine")
+    assert resp.status_code == 404
+
+
+def test_get_mine_empty_when_no_judgments(
+    logged_in_client: TestClient, canonical_id: int
+) -> None:
+    """판정이 하나도 없으면 items = []."""
+    resp = logged_in_client.get(f"/canonical/{canonical_id}/relevance/mine")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["canonical_project_id"] == canonical_id
+    assert data["items"] == []
+
+
+def test_get_mine_returns_personal_judgment(
+    logged_in_client: TestClient, canonical_id: int
+) -> None:
+    """개인 판정 작성 후 mine 에서 조회되고 키 구조가 맞아야 한다."""
+    logged_in_client.post(
+        f"/canonical/{canonical_id}/relevance",
+        json={"verdict": "관련", "reason": "개인 사유"},
+    )
+    resp = logged_in_client.get(f"/canonical/{canonical_id}/relevance/mine")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["items"]) == 1
+    item = data["items"][0]
+    assert item["verdict"] == "관련"
+    assert item["reason"] == "개인 사유"
+    assert item["organization_id"] is None
+    assert item["organization_name"] is None
+    assert item["decided_at"] is not None
+
+
+def test_get_mine_returns_organization_judgment_with_name(
+    logged_in_client: TestClient, canonical_id: int
+) -> None:
+    """조직 판정을 작성하면 organization_name 이 포함되어 반환된다."""
+    org_id = _create_organization("mine-org-test")
+    _add_user_to_organization("rj_route_user", org_id)
+
+    logged_in_client.post(
+        f"/canonical/{canonical_id}/relevance",
+        json={"verdict": "무관", "organization_id": org_id},
+    )
+    resp = logged_in_client.get(f"/canonical/{canonical_id}/relevance/mine")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["items"]) == 1
+    item = data["items"][0]
+    assert item["organization_id"] == org_id
+    assert item["organization_name"] == "mine-org-test"
+    assert item["verdict"] == "무관"
+    assert item["decided_at"] is not None
+
+
+def test_get_mine_excludes_other_users_rows(
+    client: TestClient,
+    logged_in_client: TestClient,
+    canonical_id: int,
+) -> None:
+    """다른 사용자가 작성한 판정은 mine 응답에 포함되지 않는다."""
+    from fastapi.testclient import TestClient as _TestClient
+    from app.web.main import create_app
+
+    peer_app = create_app()
+    with _TestClient(peer_app) as peer_client:
+        peer_client.post(
+            "/auth/register",
+            data={"username": "rj_mine_peer", "password": "pass_mine_456"},
+            follow_redirects=False,
+        )
+        # 다른 사용자(peer) 가 개인 판정 작성
+        peer_resp = peer_client.post(
+            f"/canonical/{canonical_id}/relevance",
+            json={"verdict": "관련"},
+        )
+        assert peer_resp.status_code == 200
+
+    # 본인(rj_route_user) 은 판정 미작성 → items = []
+    resp = logged_in_client.get(f"/canonical/{canonical_id}/relevance/mine")
+    assert resp.status_code == 200
+    assert resp.json()["items"] == []

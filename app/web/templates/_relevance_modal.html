@@ -102,14 +102,17 @@
             <div class="rj-modal__actions">
                 <button type="submit" class="rj-modal__save-btn">저장</button>
                 <button type="button"
-                        id="relevance-delete-btn"
-                        class="rj-modal__delete-btn"
-                        style="display:none">판정 취소</button>
-                <button type="button"
                         id="relevance-cancel-btn"
                         class="rj-modal__cancel-btn">닫기</button>
             </div>
         </form>
+        {# task 00089 — 모달 하단 본인 판정 목록. JS(loadMyJudgmentsList)가 모달 열릴 때마다 갱신한다. #}
+        <section class="rj-modal__mine-section" id="rj-modal-mine-section">
+            <h4 class="rj-modal__mine-title">내 판정 목록</h4>
+            <ul class="rj-modal__mine-list" id="rj-modal-mine-list">
+                <li class="rj-modal__mine-empty">등록된 판정이 없습니다.</li>
+            </ul>
+        </section>
     </div>
 </dialog>
 {% endif %}

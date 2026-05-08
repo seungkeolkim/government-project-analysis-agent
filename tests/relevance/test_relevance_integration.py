@@ -449,6 +449,39 @@ def test_modal_radio_multiple_organizations_renders_dropdown(
 
 
 # ---------------------------------------------------------------------------
+# task 00089 — 모달 마크업 검증 (판정 취소 버튼 제거 + 내 판정 목록 섹션 추가)
+# ---------------------------------------------------------------------------
+
+
+def test_modal_has_no_cancel_judgment_button(
+    client: TestClient, test_engine: Engine
+) -> None:
+    """task 00089 — 모달 HTML 에 '판정 취소' 버튼이 존재하지 않아야 한다."""
+    _register_and_login(client, "integ_modal_no_cancel_btn")
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+    # 모달 자체는 렌더되어야 한다 (로그인 상태).
+    assert "relevance-modal" in html
+    # 판정 취소 버튼 마크업이 완전히 제거되어 있어야 한다.
+    assert "relevance-delete-btn" not in html
+    assert "판정 취소" not in html
+
+
+def test_modal_has_mine_judgment_list_section(
+    client: TestClient, test_engine: Engine
+) -> None:
+    """task 00089 — 모달 HTML 에 내 판정 목록 섹션(rj-modal-mine-section)이 렌더되어야 한다."""
+    _register_and_login(client, "integ_modal_mine_section")
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+    assert "rj-modal__mine-section" in html
+    assert "rj-modal-mine-list" in html
+    assert "내 판정 목록" in html
+
+
+# ---------------------------------------------------------------------------
 # 검증 #14 — 목록 페이지 GET 의 N+1 ceiling
 # ---------------------------------------------------------------------------
 

@@ -26,13 +26,14 @@
 
     var form = document.getElementById('relevance-form');
     var reasonTextarea = document.getElementById('modal-reason');
-    var deleteBtn = document.getElementById('relevance-delete-btn');
     var cancelBtn = document.getElementById('relevance-cancel-btn');
     var errorMsg = document.getElementById('modal-error-msg');
     // 판정 주체 라디오 그룹 + 조직 드롭다운 행 (없을 수 있음 — 무소속).
     var subjectRadios = form.querySelectorAll('input[name="rj-subject"]');
     var organizationRow = document.getElementById('rj-modal-organization-row');
     var organizationSelect = document.getElementById('rj-modal-organization');
+    // task 00089 — 내 판정 목록 컨테이너.
+    var myListContainer = document.getElementById('rj-modal-mine-list');
 
     // 현재 열려 있는 호출자 (.rj-wrap 또는 detail-page 의 버튼) 를 저장한다.
     // 호출자의 data-* 가 폼 prefill 의 출처이며, 저장 성공 시 거기 화면도 갱신한다.
@@ -144,12 +145,15 @@
         });
         // 사유 prefill
         reasonTextarea.value = reason;
-        // 삭제 버튼: 기존 verdict 가 있을 때만 표시 (= 수정 모드).
-        deleteBtn.style.display = verdict ? '' : 'none';
         // 에러 초기화
         errorMsg.textContent = '';
 
         syncSubjectVisibility();
+
+        // task 00089 — 모달 열릴 때마다 본인 판정 목록 새로고침.
+        var canonicalId = invokerEl.dataset.canonicalId;
+        loadMyJudgmentsList(canonicalId);
+
         modal.showModal();
     };
 
@@ -221,22 +225,6 @@
         });
     });
 
-    // 모달 안의 '판정 취소' 버튼 — 현재 prefill 된 (origin / organization_id) 를 삭제 대상으로.
-    deleteBtn.addEventListener('click', function () {
-        if (!currentInvoker) { return; }
-        var canonicalId = currentInvoker.dataset.canonicalId;
-        // 현재 폼의 라디오 / 드롭다운 상태 기준으로 삭제 대상 결정.
-        var organizationIdValue = resolveOrganizationId();
-        sendDeleteRequest(canonicalId, organizationIdValue, function () {
-            if (currentInvoker.classList && currentInvoker.classList.contains('rj-wrap')) {
-                updateBadgeWrap(currentInvoker, '', '', 'none', null);
-            } else {
-                window.location.reload();
-            }
-            modal.close();
-        });
-    });
-
     // 닫기 버튼
     cancelBtn.addEventListener('click', function () {
         modal.close();
@@ -267,6 +255,143 @@
         })
         .catch(function () {
             errorMsg.textContent = '네트워크 오류. 다시 시도해 주세요.';
+        });
+    }
+
+    /**
+     * GET /canonical/{id}/relevance/mine 로 본인 판정 목록을 가져와 렌더링한다.
+     *
+     * @param {string} canonicalId   canonical_project PK (문자열)
+     * @param {Function} [onRendered] 렌더 완료 후 items 배열을 인수로 호출하는 콜백 (선택)
+     */
+    function loadMyJudgmentsList(canonicalId, onRendered) {
+        if (!myListContainer) { return; }
+        // 로딩 중 표시
+        myListContainer.innerHTML = '';
+        var loadingLi = document.createElement('li');
+        loadingLi.className = 'rj-modal__mine-empty';
+        loadingLi.textContent = '불러오는 중…';
+        myListContainer.appendChild(loadingLi);
+
+        fetch('/canonical/' + canonicalId + '/relevance/mine')
+        .then(function (resp) {
+            if (!resp.ok) {
+                throw new Error('fetch failed: ' + resp.status);
+            }
+            return resp.json();
+        })
+        .then(function (data) {
+            var items = (data && data.items) ? data.items : [];
+            renderMyJudgmentsList(items, canonicalId);
+            if (onRendered) { onRendered(items); }
+        })
+        .catch(function () {
+            if (myListContainer) {
+                myListContainer.innerHTML = '';
+                var errLi = document.createElement('li');
+                errLi.className = 'rj-modal__mine-empty';
+                errLi.textContent = '목록을 불러올 수 없습니다.';
+                myListContainer.appendChild(errLi);
+            }
+        });
+    }
+
+    /**
+     * 본인 판정 items 배열을 myListContainer 에 DOM 으로 렌더링한다.
+     * XSS 방지를 위해 textContent / DOM 생성 방식을 사용한다.
+     *
+     * @param {Array}  items        GET /relevance/mine 응답의 items 배열
+     * @param {string} canonicalId  DELETE 요청에 쓸 canonical_project PK
+     */
+    function renderMyJudgmentsList(items, canonicalId) {
+        if (!myListContainer) { return; }
+        myListContainer.innerHTML = '';
+
+        if (items.length === 0) {
+            var emptyLi = document.createElement('li');
+            emptyLi.className = 'rj-modal__mine-empty';
+            emptyLi.textContent = '등록된 판정이 없습니다.';
+            myListContainer.appendChild(emptyLi);
+            return;
+        }
+
+        items.forEach(function (item) {
+            var li = document.createElement('li');
+            li.className = 'rj-modal__mine-item';
+
+            // 판정 주체 (개인 또는 조직명)
+            var subjectSpan = document.createElement('span');
+            subjectSpan.className = 'rj-modal__mine-subject';
+            subjectSpan.textContent = item.organization_name || '개인';
+
+            // verdict 배지
+            var verdictSpan = document.createElement('span');
+            verdictSpan.className = 'rj-modal__mine-verdict rj-modal__mine-verdict--' +
+                (item.verdict === '관련' ? 'related' : 'unrelated');
+            verdictSpan.textContent = item.verdict;
+
+            // 작성 시점 — ISO8601 → 사용자 친화 포맷
+            var dateSpan = document.createElement('span');
+            dateSpan.className = 'rj-modal__mine-date';
+            dateSpan.textContent = item.decided_at
+                ? new Date(item.decided_at).toLocaleString('ko-KR')
+                : '';
+
+            // X 삭제 버튼 — 클로저로 organization_id 캡처
+            var delBtn = document.createElement('button');
+            delBtn.type = 'button';
+            delBtn.className = 'rj-modal__mine-delete-btn';
+            delBtn.setAttribute('aria-label', '판정 삭제');
+            delBtn.textContent = '✕';
+            (function (orgId) {
+                delBtn.addEventListener('click', function () {
+                    handleDeleteMineItem(canonicalId, orgId);
+                });
+            }(item.organization_id));
+
+            li.appendChild(subjectSpan);
+            li.appendChild(verdictSpan);
+            li.appendChild(dateSpan);
+            li.appendChild(delBtn);
+            myListContainer.appendChild(li);
+        });
+    }
+
+    /**
+     * 내 판정 목록의 X 버튼 핸들러.
+     * DELETE /canonical/{id}/relevance 후 목록을 재갱신하고 배지도 인플레이스 갱신한다.
+     *
+     * @param {string}   canonicalId      canonical_project PK
+     * @param {number|null} organizationId 삭제 대상 organization_id (개인이면 null)
+     */
+    function handleDeleteMineItem(canonicalId, organizationId) {
+        fetch('/canonical/' + canonicalId + '/relevance', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ organization_id: organizationId }),
+        })
+        .then(function (resp) {
+            if (!resp.ok) {
+                return resp.json().catch(function () { return {}; }).then(function (data) {
+                    alert(data.detail || '삭제 실패. 다시 시도해 주세요.');
+                });
+            }
+            // 삭제 성공 → 목록 재갱신 후 배지 인플레이스 갱신
+            loadMyJudgmentsList(canonicalId, function (items) {
+                if (currentInvoker && currentInvoker.classList && currentInvoker.classList.contains('rj-wrap')) {
+                    if (items.length === 0) {
+                        updateBadgeWrap(currentInvoker, '', '', 'none', null);
+                    } else {
+                        // 첫 항목(개인 판정 우선)으로 배지 갱신
+                        var first = items[0];
+                        var subj = first.organization_id ? 'organization' : 'personal';
+                        updateBadgeWrap(currentInvoker, first.verdict, first.reason || '', subj, first.organization_id !== undefined ? first.organization_id : null);
+                    }
+                }
+            });
+        })
+        .catch(function () {
+            alert('네트워크 오류. 다시 시도해 주세요.');
         });
     }
 

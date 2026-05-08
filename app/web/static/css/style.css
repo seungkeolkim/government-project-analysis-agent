@@ -1774,6 +1774,97 @@ body.is-anonymous .announcement-title-link--read {
     box-sizing: border-box;
 }
 
+/* task 00089 — 모달 내 본인 판정 목록 섹션. */
+.rj-modal__mine-section {
+    margin-top: 20px;
+    border-top: 1px solid #e5e7eb;
+    padding-top: 14px;
+}
+
+.rj-modal__mine-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #374151;
+    margin: 0 0 10px;
+}
+
+.rj-modal__mine-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.rj-modal__mine-empty {
+    font-size: 13px;
+    color: #9ca3af;
+    text-align: center;
+    padding: 8px 0;
+}
+
+.rj-modal__mine-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 0;
+    border-bottom: 1px solid #f3f4f6;
+    font-size: 13px;
+}
+
+.rj-modal__mine-item:last-child {
+    border-bottom: none;
+}
+
+.rj-modal__mine-subject {
+    flex: 1;
+    color: #374151;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+}
+
+.rj-modal__mine-verdict {
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.rj-modal__mine-verdict--related {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.rj-modal__mine-verdict--unrelated {
+    background: #fee2e2;
+    color: #b91c1c;
+}
+
+.rj-modal__mine-date {
+    color: #6b7280;
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.rj-modal__mine-delete-btn {
+    background: none;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    color: #6b7280;
+    cursor: pointer;
+    font-size: 12px;
+    padding: 2px 6px;
+    line-height: 1;
+    flex-shrink: 0;
+}
+
+.rj-modal__mine-delete-btn:hover {
+    background: #fee2e2;
+    border-color: #fca5a5;
+    color: #b91c1c;
+}
+
 /* 상세 페이지 — 관련성 풀어 표시 섹션. */
 .rj-detail-section {
     margin: 28px 0 24px;

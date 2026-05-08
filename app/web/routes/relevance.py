@@ -4,6 +4,7 @@
     POST   /canonical/{canonical_id}/relevance          → 판정 저장/갱신
     DELETE /canonical/{canonical_id}/relevance          → 판정 삭제
     GET    /canonical/{canonical_id}/relevance/history  → 판정 히스토리 조회
+    GET    /canonical/{canonical_id}/relevance/mine     → 본인 판정 목록 조회 (task 00089)
 
 task 00085 — 조직 단위 판정 확장:
     - POST/DELETE body 에 ``organization_id`` (선택) 를 추가한다.
@@ -40,6 +41,7 @@ from app.db.repository import (
     delete_relevance_judgment,
     get_canonical_project_by_id,
     get_relevance_history,
+    get_relevance_summary_by_canonical_id_map,
     set_relevance_judgment,
 )
 from app.db.session import session_scope
@@ -259,5 +261,81 @@ def get_history(
                     }
                     for hw in items
                 ],
+            },
+        )
+
+
+@router.get(
+    "/canonical/{canonical_id}/relevance/mine",
+    status_code=status.HTTP_200_OK,
+)
+def get_my_relevance_judgments(
+    canonical_id: int,
+    current_user: User = Depends(current_user_required),
+) -> JSONResponse:
+    """본인이 해당 canonical 에 작성한 모든 판정(개인 + 본인 작성 조직 row)을 반환한다.
+
+    task 00089 — 관련성 모달 하단 '내 판정 목록' 섹션의 초기 로딩 및 X 삭제 후
+    목록 재갱신에 사용한다. others 는 포함하지 않는다 (사용자 원문 "자신이 한 판정").
+
+    응답 items 의 정렬은 개인 판정(organization_id IS NULL) 먼저, 이후 조직 판정을
+    decided_at DESC 순서로 나열한다 (get_relevance_summary_by_canonical_id_map 의
+    정렬을 그대로 활용).
+
+    Returns:
+        200 + ``{canonical_project_id, items: [{organization_id, organization_name,
+            verdict, reason, decided_at}]}``. 판정이 없으면 items = [].
+        canonical 이 없으면 404. 비로그인이면 401.
+    """
+    with session_scope() as session:
+        project = get_canonical_project_by_id(session, canonical_id)
+        if project is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"canonical_project id={canonical_id} 를 찾을 수 없습니다.",
+            )
+
+        summary_map = get_relevance_summary_by_canonical_id_map(
+            session,
+            user_id=current_user.id,
+            canonical_project_ids=[canonical_id],
+        )
+        summary = summary_map.get(canonical_id)
+
+        items: list[dict] = []
+        if summary is not None:
+            # 개인 판정 row (organization_id IS NULL)
+            if summary.mine_personal is not None:
+                m = summary.mine_personal
+                items.append(
+                    {
+                        "organization_id": m.judgment.organization_id,
+                        "organization_name": m.organization_name,
+                        "verdict": m.judgment.verdict,
+                        "reason": m.judgment.reason,
+                        "decided_at": m.judgment.decided_at.isoformat()
+                        if m.judgment.decided_at
+                        else None,
+                    }
+                )
+            # 본인이 작성한 조직 판정 rows (decided_at DESC)
+            for m in summary.mine_organization:
+                items.append(
+                    {
+                        "organization_id": m.judgment.organization_id,
+                        "organization_name": m.organization_name,
+                        "verdict": m.judgment.verdict,
+                        "reason": m.judgment.reason,
+                        "decided_at": m.judgment.decided_at.isoformat()
+                        if m.judgment.decided_at
+                        else None,
+                    }
+                )
+
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={
+                "canonical_project_id": canonical_id,
+                "items": items,
             },
         )
