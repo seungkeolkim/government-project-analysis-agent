@@ -77,6 +77,7 @@ from app.web.routes import (
     dashboard_router,
     favorites_router,
     notices_router,
+    progress_router,
     relevance_router,
     settings_router,
     suggestions_router,
@@ -425,6 +426,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     # Phase 3a(00035-2): 관련성 판정 라우터(/canonical/{id}/relevance*) mount.
     fastapi_app.include_router(relevance_router)
+
+    # Phase C(00097-4): 공고 진행 상태 / 선점 라우터
+    # (/canonical/{id}/progress, /canonical/{id}/progress/{progress_id},
+    #  /canonical/{id}/progress/history) mount.
+    fastapi_app.include_router(progress_router)
 
     # Phase 3a(00035-4): 읽음 bulk 라우터(/announcements/bulk-mark-*) mount.
     fastapi_app.include_router(bulk_router)
