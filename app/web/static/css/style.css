@@ -1803,8 +1803,7 @@ body.is-anonymous .announcement-title-link--read {
 
 .rj-modal__mine-item {
     display: flex;
-    align-items: center;
-    gap: 8px;
+    flex-direction: column;
     padding: 7px 0;
     border-bottom: 1px solid #f3f4f6;
     font-size: 13px;
@@ -1812,6 +1811,22 @@ body.is-anonymous .announcement-title-link--read {
 
 .rj-modal__mine-item:last-child {
     border-bottom: none;
+}
+
+/* 상단 행: 주체 + verdict + 날짜 + X 버튼 */
+.rj-modal__mine-item-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* 사유 행: verdict 아래 작은 글씨로 표시 */
+.rj-modal__mine-reason {
+    font-size: 12px;
+    color: #6b7280;
+    margin-top: 4px;
+    padding-left: 4px;
+    line-height: 1.4;
 }
 
 .rj-modal__mine-subject {

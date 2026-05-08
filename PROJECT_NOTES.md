@@ -265,11 +265,12 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - **bulk 요청 두 가지 모드 — `ids` vs `filter`**: 페이지 내 선택은 `ids` 모드(명시 목록), "현재 필터 결과 전체 M건 선택" 은 `filter` 모드(서버가 필터 파라미터로 announcement id 추출). `MAX_BULK_MARK` 상수로 한 번에 처리할 수 있는 상한 제한. 클라이언트가 필터 재구성을 서버에 위임해 페이지를 넘는 대량 선택을 지원.
 - **배지 클릭 vs row 클릭 충돌은 `stopPropagation` 으로 해결**: 목록 row 전체가 상세 링크(`<a>`) 로 감싸져 있을 때 내부 배지 클릭이 상세 페이지로 이동하지 않도록 `event.stopPropagation()` + `preventDefault()`. 클릭 이벤트가 있는 인라인 위젯 추가 시 동일 패턴.
 - **테이블 셀 overflow 클리핑을 벗어나는 툴팁은 `position: fixed` + JS `getBoundingClientRect()` 패턴**: CSS `:hover` 트리거 대신 JS `mouseenter/focusin` 이벤트로 전환. `getBoundingClientRect()` 로 viewport 좌표를 계산해 `fixed` 레이어에 배치 — 부모 요소의 `overflow: hidden` 클리핑을 탈출. 위 공간 부족(8px 미만) 시 아래로 자동 반전 (`rj-tooltip--below` 클래스 토글), 좌우 viewport 경계 8px 여백 클램핑. 로그인 여부 무관하게 IIFE 최상단에서 `initTooltips()` 를 호출해 비로그인 사용자에게도 카운터 툴팁이 표시된다.
-- **관련성 모달 — '판정 취소' 버튼 제거, 본인 판정 목록 X 삭제 패턴 채택**: 모달 내 단일 "판정 취소" 버튼 대신, 하단에 `GET /mine` 으로 불러온 본인 판정 목록을 렌더링하고 행마다 X 버튼으로 `DELETE /canonical/{id}/relevance` 를 호출하는 방식으로 통합. 판정 삭제 후 목록 자동 재갱신 (페이지 새로고침 없음). 판정이 없으면 "등록된 판정이 없습니다" 안내 표시. 기존 판정 입력(라디오·사유 입력) 영역은 유지.
+- **관련성 모달 — '판정 취소' 버튼 제거, 본인 판정 목록 X 삭제 패턴 채택**: 모달 내 단일 "판정 취소" 버튼 대신, 하단에 `GET /mine` 으로 불러온 본인 판정 목록을 렌더링하고 행마다 X 버튼으로 `DELETE /canonical/{id}/relevance` 를 호출하는 방식으로 통합. X 버튼 클릭 시 `window.confirm()` 확인 후 삭제 진행 (커스텀 모달 중첩 없이 OS 네이티브 UI 사용). 사유가 있는 항목은 판정 배지 아래에 사유 텍스트를 추가 표시 (`flex-direction: column` + `.rj-modal__mine-reason` 서브 행; 사유 없으면 서브 행 미렌더링). 판정 삭제 후 목록 자동 재갱신 (페이지 새로고침 없음). 판정이 없으면 "등록된 판정이 없습니다" 안내 표시. 기존 판정 입력(라디오·사유 입력) 영역은 유지.
 - **sources.yaml credentials 슬롯 (optional)**: 로그인이 필요한 소스를 위한 `credentials.username` / `credentials.password` 필드를 `SourceConfig` 에 예약. NTIS 는 게스트 수집이 가능해 현재 미사용. 실제 값은 `.env` 로만 주입하고 yaml 에는 키 이름만.
 
 ## 최근 변경 이력
 
+- [00091] 관련성 모달 내 판정 목록 UX 개선 — 사유 있는 항목에 사유 텍스트 표시, X 버튼 클릭 시 window.confirm() 확인 다이얼로그 추가 — 2026-05-08
 - [00090] 관련성 카운터 집계에 본인 판정 포함 — RelevanceSummary 필드 others_count_* → count_* 로 리네임, 집계 범위를 others only 에서 mine_personal + mine_organization + others 전체로 확장 — 2026-05-08
 - [00089] 관련성 모달 UX 개선 — '판정 취소' 버튼 제거, 모달 하단 본인 판정 목록(X 삭제) UI 추가, GET /canonical/{id}/relevance/mine 엔드포인트 신설 — 2026-05-08
 - [00088] 관련성 hover 툴팁을 viewport 기준 fixed 레이어로 전환 — row/셀 overflow:hidden 클리핑 해소, 위/아래 자동 반전 + 좌우 viewport 클램핑 — 2026-05-08
