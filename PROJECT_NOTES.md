@@ -106,7 +106,7 @@ Docker Compose. `app` (FastAPI UI) · `scraper` (1회성 배치, `profiles: [scr
 
 스크래퍼 실행 경로 **3 가지** — (1) 호스트 쉘에서 `docker compose --profile scrape run --rm scraper` (CLI), (2) 웹 UI `/admin/scrape` "지금 시작" 버튼이 app 컨테이너 안에서 호스트 dockerd 를 subprocess 로 조작, (3) APScheduler cron / interval 잡. **세 경로 모두 같은 `scrape_runs.status='running'` row 1개로 lock**.
 
-- **바인드 마운트**: `./data` (DB·다운로드·로그·백업), `./app` (소스 코드), `./sources.yaml:/run/config/sources.yaml` (app 은 `:ro` 제거 — 편집기 쓰기 필요, scraper 는 `:ro` 유지), `/var/run/docker.sock` (**app 서비스만** — 웹이 subprocess 로 docker CLI 호출), `./scripts:/app/scripts` (운영자 CLI), `/etc/localtime:/etc/localtime:ro` (호스트와 컨테이너 시각 일치, slim 이미지의 tzdata 미탑재 보완), `./.env:${HOST_PROJECT_DIR}/.env:ro` (compose subprocess 가 `--project-directory ${HOST_PROJECT_DIR}` 기준으로 `.env` 탐색).
+- **바인드 마운트**: `./data` (DB·다운로드·로그·백업), `./app` (소스 코드), `./sources.yaml:/run/config/sources.yaml` (app 은 `:ro` 제거 — 편집기 쓰기 필요, scraper 는 `:ro` 유지), `/var/run/docker.sock` (**app 서비스만** — 웹이 subprocess 로 docker CLI 호출), `./scripts:/app/scripts` (운영자 CLI), `/etc/localtime:/etc/localtime:ro` (호스트와 컨테이너 시각 일치, slim 이미지의 tzdata 미탑재 보완), `./.env:${HOST_PROJECT_DIR}/.env:ro` (compose subprocess 가 `--project-directory ${HOST_PROJECT_DIR}` 기준으로 `.env` 탐색), `./alembic:/app/alembic:ro` · `./alembic.ini:/app/alembic.ini:ro` (이미지 COPY 보다 우선 적용 — 신규 migration 추가 시 이미지 재빌드 불필요).
 - **docker-in-docker 아님**: app 컨테이너는 자체 dockerd 를 띄우지 않고 호스트 `/var/run/docker.sock` 으로 호스트 dockerd 를 원격 조작. 이미지에 `docker.io` + `docker-cli` (apt — 두 패키지 분리) + compose v2 플러그인 (`docker-compose-linux-<arch>`) + `docker-compose.yml` 자체를 COPY. `docker compose -f /app/docker-compose.yml --project-directory $HOST_PROJECT_DIR ...` 형태로 호출. `HOST_PROJECT_DIR` 미설정 시 `ComposeEnvironmentError` 로 ScrapeRun failed.
 - **호스트 docker 그룹**: docker.sock 접근을 위해 컨테이너 내부 유저가 호스트 `docker` 그룹 gid 를 보조 그룹으로 가져야 한다. `HOST_DOCKER_GID` (`.env`) → `docker-compose.yml` `group_add` 로 전달. gid 불일치 시 "Permission denied on docker.sock".
 - **호스트 UID/GID 매핑**: 두 서비스에 `user: "${HOST_UID}:${HOST_GID}"`. `.env` 명시 설정 필수 (자동 fallback 없음). 컨테이너가 만드는 파일 owner 가 호스트 유저가 됨. `docker-compose.yml` `build.args` 가 `HOST_UID`/`HOST_GID` 를 Dockerfile 의 `useradd` 로 전달해 `/etc/passwd` 엔트리를 생성 — UID 변경 시 `docker compose build` 재실행 없이는 "I have no name!" 재발 (entrypoint 가 동적 패치 불가).
@@ -250,7 +250,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - **외부 CDN 의존 없는 정적 리소스**: 오프라인·격리 환경에서도 UI 가 그대로 동작하도록 CSS·Chart.js 를 `app/web/static/` 패키지 내부에 둔다.
 - **sources.yaml 을 gitignore 전환 + template 도입**: sources.yaml 이 git 에 커밋되어 있으면 브랜치 전환 시 로컬 수정본이 롤백되는 문제. `sources.yaml.template` 만 버전 관리. 이미지에도 template 을 COPY 해 두어 마운트 누락 시 폴백.
 - **sources.yaml 웹 편집기는 원자적 쓰기 + 백업 필수**: 편집 흐름 = "YAML syntax → `SourcesConfig.model_validate` 통과 시에만 저장". 저장 전 `data/backups/sources/YYYYMMDD_HHMMSS.yaml` 타임스탬프 백업. 쓰기는 `NamedTemporaryFile` + `os.replace` 원자적; (a) EXDEV (tmp 와 target 이 다른 mount), (b) EACCES / EPERM (`/run/config/` 부모 dir 가 비쓰기 tmpfs) 두 fallback 은 `_overwrite_with_fsync`. 편집 대상은 bind mount 원본 — 다음 수집부터 반영.
-- **Dockerfile 에 alembic 산출물 포함 필수**: `alembic.ini` 와 `alembic/` 가 이미지에 없으면 entrypoint 의 `alembic upgrade head` 가 "No 'script_location' key found" 로 실패. 빌드 시 반드시 COPY. migration 추가 시 이미지 재빌드 필요.
+- **Dockerfile 에 alembic 산출물 포함 필수**: `alembic.ini` 와 `alembic/` 가 이미지에 없으면 entrypoint 의 `alembic upgrade head` 가 "No 'script_location' key found" 로 실패. 빌드 시 반드시 COPY. 실제 운영에서는 `./alembic` · `./alembic.ini` 바인드 마운트가 COPY 보다 우선 적용되므로 신규 migration 추가 시 이미지 재빌드 불필요 — 이미지 내 COPY 는 마운트 누락 시 standalone 폴백 역할만 한다.
 - **웹 수집 제어는 docker-in-docker 대신 호스트 docker.sock 원격 조작**: dind 는 이미지·권한·볼륨 재설계 부담이 커서, app 컨테이너에 `/var/run/docker.sock` 마운트하고 docker CLI + compose v2 플러그인을 설치해 `docker compose` 를 호출. 호스트 dockerd 가 실제 컨테이너를 관리하므로 scraper 의 바인드가 기존 CLI 경로와 동일하게 적용. 대가: docker.sock 마운트 = 사실상 호스트 root 권한 부여 — FastAPI 외부 노출 금지 전제가 더 강하게 요구된다. 설계 근거는 `docs/scrape_control_design.md §5`.
 - **compose v2 필수 (v1 금지)**: v2 가 SIGTERM 을 관리 컨테이너 PID 1 로 공식 전파한다. v1 `docker-compose` 는 전파 동작이 검증되지 않아 "중단 → 공고 마무리 후 cancelled" 흐름이 깨질 수 있다. Dockerfile 이 compose v2 바이너리를 `/usr/libexec/docker/cli-plugins` 에 직접 배치해 `docker compose` 서브커맨드 형태로만 호출.
 - **subprocess 는 새 프로세스 그룹 + 파일 redirect**: 웹·스케줄러 → scraper subprocess 기동 시 `start_new_session=True` (`os.setsid`) 로 새 프로세스 그룹. 중단은 `os.killpg(pgid, SIGTERM)` 로 그룹 전체 전파 — compose v2 가 컨테이너 PID 1 로 릴레이. detach 금지. stdout / stderr 는 PIPE 가 아닌 `data/logs/scrape_runs/{run_id}.log` **파일 redirect** (PIPE 버퍼 가득 차면 자식이 write 에서 블로킹). Windows 호환 포기 (`os.setsid` POSIX 전용).
@@ -275,6 +275,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
+- [00095] Docker 실행 스크립트 개선 — compose.sh → run_compose.sh/run_admin.sh 분화, dev/prod 분기 제거, alembic 바인드 마운트로 migration 재빌드 불필요화 — 2026-05-08
 - [00094] DB 정기 백업 시스템 구현 — app.sqlite+boards.sqlite 스케줄 백업, SystemSetting·BackupHistory 모델, 관리자 '시스템 백업' 탭(설정·수동 실행·이력·파일 목록) — 2026-05-08
 - [00093] 개인 판정(organization_id=NULL) 기능 완전 제거 — CRUD·API·UI·DB 데이터 일괄 삭제, 조직 판정만 유지, Alembic migration 적용 — 2026-05-08
 - [00091] 관련성 모달 내 판정 목록 UX 개선 — 사유 있는 항목에 사유 텍스트 표시, X 버튼 클릭 시 window.confirm() 확인 다이얼로그 추가 — 2026-05-08
