@@ -55,6 +55,12 @@ from app.db.repository import (
     mark_announcement_read,
 )
 from app.organizations.service import get_user_organization_ids
+from app.progress.repository import (
+    PROGRESS_SUMMARY_EMPTY,
+    get_progress,
+    get_progress_rows_by_canonical_id_map,
+    get_progress_summary_by_canonical_id_map,
+)
 from app.db.session import SessionLocal
 from app.logging_setup import configure_logging
 from app.scheduler import ensure_backup_cron_registered, start_scheduler, stop_scheduler
@@ -549,6 +555,18 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 user_id=current_user.id if current_user is not None else None,
                 canonical_project_ids=canonical_ids,
             )
+            # task 00097 — 진행 상태 summary batch 조회. 페이지당 추가 쿼리 1~2 개로
+            # 선점 조직 / 검토·관심 카운터 / 본인 활동 단계를 모두 받는다.
+            progress_summary_map = get_progress_summary_by_canonical_id_map(
+                session,
+                user_id=current_user.id if current_user is not None else None,
+                canonical_project_ids=canonical_ids,
+            )
+            # task 00097-5 — 셀 expand 본문용 조직 detail rows. 단일 SELECT + JOIN
+            # 으로 페이지당 추가 쿼리 1 회 (N+1 회피 — 시나리오 17 가드 유지).
+            progress_rows_map = get_progress_rows_by_canonical_id_map(
+                session, canonical_project_ids=canonical_ids
+            )
             user_organization_options = _load_user_organization_options(
                 session, current_user
             )
@@ -578,6 +596,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     "relevance_summary_map": relevance_summary_map,
                     "relevance_summary_empty": RELEVANCE_SUMMARY_EMPTY,
                     "user_organization_options": user_organization_options,
+                    # task 00097 — 진행 상태 요약 batch (group_mode).
+                    "progress_summary_map": progress_summary_map,
+                    "progress_summary_empty": PROGRESS_SUMMARY_EMPTY,
+                    # task 00097-5 — 셀 expand 본문 (canonical_id → ProgressRowDetail 리스트).
+                    "progress_rows_map": progress_rows_map,
                     # Phase 3b — group_mode 에서는 expand/별 없음; undefined 방지.
                     "siblings_map": {},
                     "favorite_entry_map": {},
@@ -653,6 +676,16 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 user_id=current_user.id if current_user is not None else None,
                 canonical_project_ids=canonical_ids,
             )
+            # task 00097 — 진행 상태 summary batch 조회 (분리 모드).
+            progress_summary_map = get_progress_summary_by_canonical_id_map(
+                session,
+                user_id=current_user.id if current_user is not None else None,
+                canonical_project_ids=canonical_ids,
+            )
+            # task 00097-5 — 셀 expand 본문용 조직 detail rows (분리 모드도 동일 패턴).
+            progress_rows_map = get_progress_rows_by_canonical_id_map(
+                session, canonical_project_ids=canonical_ids
+            )
             user_organization_options = _load_user_organization_options(
                 session, current_user
             )
@@ -681,6 +714,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     "relevance_summary_map": relevance_summary_map,
                     "relevance_summary_empty": RELEVANCE_SUMMARY_EMPTY,
                     "user_organization_options": user_organization_options,
+                    # task 00097 — 진행 상태 요약 batch (분리 모드).
+                    "progress_summary_map": progress_summary_map,
+                    "progress_summary_empty": PROGRESS_SUMMARY_EMPTY,
+                    # task 00097-5 — 셀 expand 본문 (분리 모드).
+                    "progress_rows_map": progress_rows_map,
                     # Phase 3b — 동일과제 expand 데이터 (비로그인 포함).
                     "siblings_map": siblings_map,
                     # Phase 3b — 별 아이콘 초기 상태 (로그인 시만).
@@ -776,6 +814,21 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             session, current_user
         )
 
+        # task 00097 — Phase C 진행 상태 인라인 섹션 데이터.
+        # canonical 매칭이 없으면 비활성 (None 으로 두고 템플릿이 분기).
+        if canonical_group_id is not None:
+            progress_rows = get_progress(session, canonical_group_id)
+        else:
+            progress_rows = []
+        # 본인 소속 조직 옵션 — 본인 소속 조직별로 row 슬롯을 풀어 표시할 때 사용.
+        # 비로그인 / 무소속이면 빈 리스트 — 템플릿이 분기.
+        progress_my_organizations = _load_user_organization_options(
+            session, current_user
+        )
+        progress_my_organization_ids = {
+            opt["id"] for opt in progress_my_organizations
+        }
+
         # 동일과제 섹션 — 비로그인도 표시. 현재 공고는 목록에서 제외.
         if canonical_group_id is not None:
             _sib_map = get_siblings_by_canonical_id_map(
@@ -803,6 +856,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 "relevance_summary_empty": RELEVANCE_SUMMARY_EMPTY,
                 "history_items": history_items,
                 "user_organization_options": user_organization_options,
+                # task 00097 — 진행 상태 인라인 섹션 데이터.
+                "progress_rows": progress_rows,
+                "progress_my_organizations": progress_my_organizations,
+                "progress_my_organization_ids": progress_my_organization_ids,
                 # Phase 3b — 동일과제 섹션 (비로그인 포함).
                 "siblings": _siblings,
                 # Phase 3b — 별 아이콘 초기 상태 (로그인 시만).

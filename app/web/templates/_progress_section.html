@@ -1,0 +1,155 @@
+{#
+  Phase C — 공고 진행 상태 / 선점 상세 페이지 인라인 섹션 (task 00097-5).
+
+  사용법:
+    {% include \"_progress_section.html\" %}
+
+  입력 컨텍스트 (detail.html 가 주입):
+    - canonical_id:                  int | None              canonical_project_id. None 이면 섹션 미렌더.
+    - current_user:                  User | None             로그인 사용자 또는 None.
+    - progress_rows:                 list[AnnouncementProgress]  canonical 의 모든 active row.
+    - progress_my_organizations:     list[dict]              본인 소속 조직 목록 [{id, name}]. 무소속이면 빈 리스트.
+    - progress_my_organization_ids:  set[int]                progress_my_organizations 의 id 집합 — 매크로 분기에 사용.
+
+  렌더 정책 (docs/progress_org_design.md §4.5):
+    - 본인 소속 조직별로 row 슬롯을 풀어 표시.
+        a) 이미 row 가 있으면 → 인라인 컨트롤 (status select + note textarea + [저장] [삭제]).
+        b) 아직 row 가 없으면 → '[ 우리 조직 입장 표명하기 ]' 버튼 → 클릭 시 인라인 폼 펼치기.
+    - 다른 조직 row 는 read-only (조직명 + 단계 + 마지막 수정자 + 시점 + note).
+    - 비로그인: 모든 row read-only, 컨트롤 미렌더 (current_user 분기).
+
+  4 단계 enum (수정 시 progress.js 의 PROGRESS_STATUS_OPTIONS 와 동기화 필요):
+    '관심' / '검토' / '진행' / '종료'
+
+  주의:
+    - <script> 블록 안에서 Jinja2 태그 금지 — 데이터는 data-* 속성으로 JS 에 전달.
+    - 본인 소속 조직 row 는 작성자 무관 누구나 변경 가능 (Phase B 와의 차이!).
+#}
+{% if canonical_id %}
+<section class="pg-detail-section" data-canonical-id="{{ canonical_id }}">
+    <h3 class="pg-detail-section__title">공고 진행 상태</h3>
+
+    {# 본인 소속 조직 row(있는 것 + 없는 것 모두) — 로그인 사용자만 노출. #}
+    {% if current_user %}
+    <div class="pg-detail-group pg-self-group">
+        <h4 class="pg-detail-group__title">우리 조직의 입장</h4>
+
+        {% if not progress_my_organizations %}
+        {# 무소속 사용자 — 작성·수정·삭제 자체가 불가하므로 안내만 노출. #}
+        <p class="pg-detail-empty">소속된 조직이 없습니다. 진행 상태를 작성하려면 조직에 가입되어 있어야 합니다.</p>
+        {% else %}
+        {# 본인 소속 조직마다 한 슬롯 풀어 표시. #}
+        {% for organization_option in progress_my_organizations %}
+            {# 이 조직의 active row 찾기 — Python 비교 한 번이면 충분. #}
+            {% set ns = namespace(found=none) %}
+            {% for row in progress_rows %}
+                {% if row.organization_id == organization_option.id %}
+                    {% set ns.found = row %}
+                {% endif %}
+            {% endfor %}
+
+            <div class="pg-detail-row pg-detail-row--mine"
+                 data-canonical-id="{{ canonical_id }}"
+                 data-organization-id="{{ organization_option.id }}"
+                 data-organization-name="{{ organization_option.name }}"
+                 {% if ns.found is not none %}data-progress-id="{{ ns.found.id }}"{% endif %}>
+                {% if ns.found is not none %}
+                <div class="pg-detail-row__header">
+                    <span class="pg-detail-row__org">조직: {{ organization_option.name }}</span>
+                    {# 마지막 수정자 / 시점 / 현재 단계 — 인라인 컨트롤로 갱신 가능. #}
+                    <span class="pg-detail-row__meta">
+                        마지막 수정:
+                        {% if ns.found.created_by %}{{ ns.found.created_by.username }}{% else %}(이력 없음){% endif %}
+                        / {{ ns.found.updated_at | kst_format }}
+                    </span>
+                </div>
+                <div class="pg-detail-row__controls">
+                    <label class="pg-detail-row__label">
+                        단계
+                        <select class="pg-status-select" name="status">
+                            {% for opt in ['관심', '검토', '진행', '종료'] %}
+                            <option value="{{ opt }}" {% if ns.found.status.value == opt %}selected{% endif %}>{{ opt }}</option>
+                            {% endfor %}
+                        </select>
+                    </label>
+                    <label class="pg-detail-row__label">
+                        메모
+                        <textarea class="pg-note-textarea" name="note" rows="2"
+                                  placeholder="간단한 메모 (선택)">{{ ns.found.note or '' }}</textarea>
+                    </label>
+                    <div class="pg-detail-row__actions">
+                        <button type="button" class="pg-save-btn" data-action="save">저장</button>
+                        <button type="button" class="pg-delete-btn" data-action="delete">삭제</button>
+                    </div>
+                </div>
+                {% else %}
+                {# row 가 아직 없는 본인 소속 조직 — 표명하기 버튼 + 숨겨진 인라인 폼. #}
+                <div class="pg-detail-row__header">
+                    <span class="pg-detail-row__org">조직: {{ organization_option.name }}</span>
+                    <span class="pg-detail-row__empty-tag">(입장 표명 안 됨)</span>
+                </div>
+                <button type="button" class="pg-create-toggle-btn">[ 우리 조직 입장 표명하기 ]</button>
+                <div class="pg-detail-row__controls" hidden>
+                    <label class="pg-detail-row__label">
+                        단계
+                        <select class="pg-status-select" name="status">
+                            <option value="관심" selected>관심</option>
+                            <option value="검토">검토</option>
+                            <option value="진행">진행</option>
+                            <option value="종료">종료</option>
+                        </select>
+                    </label>
+                    <label class="pg-detail-row__label">
+                        메모
+                        <textarea class="pg-note-textarea" name="note" rows="2"
+                                  placeholder="간단한 메모 (선택)"></textarea>
+                    </label>
+                    <div class="pg-detail-row__actions">
+                        <button type="button" class="pg-save-btn" data-action="create">저장</button>
+                        <button type="button" class="pg-cancel-btn" data-action="cancel">취소</button>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+        {% endfor %}
+        {% endif %}
+    </div>
+    {% else %}
+    {# 비로그인 — 변경 영역 자체 미노출. 다른 조직 row 는 아래 섹션에서 그대로 노출. #}
+    <div class="pg-detail-group pg-self-group pg-self-group--anonymous">
+        <h4 class="pg-detail-group__title">우리 조직의 입장</h4>
+        <p class="pg-detail-empty">로그인 후 본인 소속 조직 입장으로 진행 상태를 작성할 수 있습니다.</p>
+    </div>
+    {% endif %}
+
+    {# 다른 조직 row — read-only. 비로그인도 동일 노출 (사용자 결정 — 비로그인 = 로그인 동일 노출). #}
+    {% set other_rows = [] %}
+    {% for row in progress_rows %}
+        {% if row.organization_id not in progress_my_organization_ids %}
+            {% set _ = other_rows.append(row) %}
+        {% endif %}
+    {% endfor %}
+
+    <div class="pg-detail-group pg-others-group">
+        <h4 class="pg-detail-group__title">다른 조직 입장 ({{ other_rows | length }}건)</h4>
+        {% if (other_rows | length) == 0 %}
+        <p class="pg-detail-empty">아직 다른 조직의 입장 표명이 없습니다.</p>
+        {% else %}
+        {% for row in other_rows %}
+        <div class="pg-detail-row pg-detail-row--other">
+            <span class="pg-detail-row__org">{{ row.organization.name if row.organization else '(조직명 없음)' }}</span>
+            <span class="pg-detail-row__verdict pg-status-badge pg-status-badge--{{ row.status.name | lower }}">{{ row.status.value }}</span>
+            <span class="pg-detail-row__meta">
+                마지막 수정:
+                {% if row.created_by %}{{ row.created_by.username }}{% else %}(이력 없음){% endif %}
+                / {{ row.updated_at | kst_format }}
+            </span>
+            {% if row.note %}
+            <p class="pg-detail-row__note">{{ row.note }}</p>
+            {% endif %}
+        </div>
+        {% endfor %}
+        {% endif %}
+    </div>
+</section>
+{% endif %}

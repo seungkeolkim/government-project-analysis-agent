@@ -1,0 +1,530 @@
+/* ============================================================
+   Phase C — 공고 진행 상태 / 선점 UI (task 00097-5)
+   docs/progress_org_design.md §4 기반.
+
+   포함:
+     - 목록 셀 (.pg-wrap / .pg-occupy / .pg-counter)
+     - hover 툴팁 (.pg-tooltip — Phase B 의 viewport fixed 레이어 패턴 재사용 — task 00088)
+     - 상세 페이지 인라인 섹션 (.pg-detail-section / .pg-detail-row)
+     - 4 단계 status 배지 (.pg-status-badge--in_progress 등)
+   ============================================================ */
+
+/* ── 목록 셀 컨테이너 ─────────────────────────────────────── */
+.col-progress {
+    width: 130px;
+    text-align: left;
+    padding-left: 8px;
+    padding-right: 8px;
+    overflow: hidden;
+}
+
+.pg-wrap {
+    position: relative;
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    max-width: 100%;
+    line-height: 1.3;
+    cursor: default;
+    border-radius: 4px;
+    padding: 1px 3px;
+    transition: background-color 0.12s ease;
+}
+
+/* 셀에 데이터가 있고 클릭 시 expand 가 펼쳐지는 상태에만 클릭 affordance 부여.
+   빈 셀(em dash)은 클릭해도 펼쳐질 게 없어 cursor: default 유지. */
+.pg-wrap--clickable {
+    cursor: pointer;
+}
+
+.pg-wrap--clickable:hover {
+    background-color: #f1f5f9;
+}
+
+/* 키보드 포커스 시 visual outline. 마우스 클릭에선 노출되지 않아 시각적 노이즈 없음. */
+.pg-wrap--clickable:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 1px;
+}
+
+/* expand 펼친 상태 — 살짝 강조해 사용자가 펼쳤음을 인지하도록. */
+.pg-wrap--expanded {
+    background-color: #e0f2fe;
+}
+
+/* 빈 셀 — em dash. 시각적 노이즈 최소화. */
+.pg-empty {
+    color: #9ca3af;
+    font-size: 14px;
+}
+
+/* ── 선점 라인 (큰 글씨) ──────────────────────────────────── */
+.pg-occupy {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #111827;
+    white-space: nowrap;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.pg-occupy__flag {
+    font-size: 12px;
+}
+
+.pg-occupy__org {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 96px;
+}
+
+.pg-occupy__sep {
+    color: #6b7280;
+}
+
+.pg-occupy__status {
+    color: #b91c1c;
+    font-weight: 700;
+}
+
+/* 본인 조직이 진행 중일 때 — 조직명 강조. */
+.pg-occupy--mine .pg-occupy__org {
+    color: #1d4ed8;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+/* ── 카운터 라인 (small text) ─────────────────────────────── */
+.pg-counter {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: #6b7280;
+    line-height: 1.4;
+}
+
+.pg-counter__cell {
+    white-space: nowrap;
+}
+
+.pg-counter__cell--review {
+    color: #4b5563;
+}
+
+.pg-counter__cell--interest {
+    color: #6b7280;
+}
+
+/* 본인 조직이 활동 중인 단계의 카운터 강조. */
+.pg-counter__cell--mine {
+    color: #1d4ed8;
+    font-weight: 700;
+}
+
+.pg-counter__sep {
+    color: #d1d5db;
+}
+
+/* ── hover 툴팁 — viewport 기준 fixed (Phase B 00088 패턴) ── */
+.pg-tooltip {
+    display: none;
+    position: fixed;
+    z-index: 1000;
+    background: #1f2937;
+    color: #f9fafb;
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 12px;
+    min-width: 200px;
+    max-width: 320px;
+    line-height: 1.5;
+    pointer-events: none;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    text-align: left;
+}
+
+.pg-tooltip--visible {
+    display: block;
+}
+
+/* 위에 배치 시 꼬리 (아래 향) */
+.pg-tooltip::after {
+    content: "";
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 6px solid transparent;
+    border-top-color: #1f2937;
+}
+
+/* 아래 배치 시 꼬리 위로 반전 */
+.pg-tooltip--below::after {
+    top: auto;
+    bottom: 100%;
+    border-top-color: transparent;
+    border-bottom-color: #1f2937;
+}
+
+.pg-tooltip__heading {
+    margin: 0 0 4px;
+    font-weight: 700;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #9ca3af;
+}
+
+.pg-tooltip__heading + .pg-tooltip__heading {
+    margin-top: 8px;
+}
+
+.pg-tooltip__row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 4px;
+}
+
+.pg-tooltip__row > span {
+    white-space: normal;
+}
+
+.pg-tooltip__sep {
+    color: #6b7280;
+}
+
+.pg-tooltip__org {
+    font-weight: 600;
+    color: #f9fafb;
+}
+
+.pg-tooltip__status {
+    color: #fca5a5;
+    font-weight: 700;
+}
+
+.pg-tooltip__mine-tag {
+    color: #93c5fd;
+    font-style: italic;
+}
+
+.pg-tooltip__hint {
+    margin: 6px 0 0;
+    font-size: 10px;
+    color: #9ca3af;
+}
+
+/* ── 상세 페이지 인라인 섹션 ─────────────────────────────── */
+.pg-detail-section {
+    margin-top: 24px;
+    padding-top: 16px;
+    border-top: 1px solid #e5e7eb;
+}
+
+.pg-detail-section__title {
+    margin: 0 0 12px;
+    font-size: 16px;
+    font-weight: 700;
+    color: #111827;
+}
+
+.pg-detail-group {
+    margin-bottom: 16px;
+}
+
+.pg-detail-group__title {
+    margin: 0 0 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #4b5563;
+    text-transform: none;
+}
+
+.pg-detail-empty {
+    margin: 4px 0 0;
+    color: #6b7280;
+    font-size: 13px;
+}
+
+/* 본인 조직 row — 인라인 컨트롤 (status select + note textarea + 버튼) */
+.pg-detail-row {
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    background: #ffffff;
+}
+
+.pg-detail-row--mine {
+    background: #f8fafc;
+    border-color: #cbd5e1;
+}
+
+.pg-detail-row__header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: baseline;
+    margin-bottom: 6px;
+}
+
+.pg-detail-row__org {
+    font-weight: 600;
+    color: #111827;
+}
+
+.pg-detail-row__meta {
+    color: #6b7280;
+    font-size: 12px;
+}
+
+.pg-detail-row__empty-tag {
+    color: #9ca3af;
+    font-size: 12px;
+    font-style: italic;
+}
+
+/* '[ 우리 조직 입장 표명하기 ]' 버튼 */
+.pg-create-toggle-btn {
+    background: none;
+    border: 1px dashed #6b7280;
+    color: #4b5563;
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+    font-family: inherit;
+}
+
+.pg-create-toggle-btn:hover {
+    background: #f3f4f6;
+    border-style: solid;
+}
+
+/* 인라인 컨트롤 wrap (status + note + actions) */
+.pg-detail-row__controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: flex-end;
+}
+
+.pg-detail-row__label {
+    display: flex;
+    flex-direction: column;
+    font-size: 12px;
+    color: #4b5563;
+    gap: 2px;
+}
+
+.pg-status-select {
+    padding: 4px 6px;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    font-size: 13px;
+    background: #ffffff;
+    font-family: inherit;
+    min-width: 80px;
+}
+
+.pg-note-textarea {
+    padding: 4px 6px;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    font-size: 13px;
+    background: #ffffff;
+    font-family: inherit;
+    min-width: 240px;
+    resize: vertical;
+}
+
+.pg-detail-row__actions {
+    display: flex;
+    gap: 6px;
+}
+
+.pg-save-btn,
+.pg-delete-btn,
+.pg-cancel-btn {
+    padding: 6px 12px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+    font-family: inherit;
+    background: #ffffff;
+}
+
+.pg-save-btn {
+    background: #2563eb;
+    color: #ffffff;
+    border-color: #1d4ed8;
+}
+
+.pg-save-btn:hover {
+    background: #1d4ed8;
+}
+
+.pg-delete-btn {
+    background: #ffffff;
+    color: #b91c1c;
+    border-color: #fecaca;
+}
+
+.pg-delete-btn:hover {
+    background: #fef2f2;
+}
+
+.pg-cancel-btn {
+    background: #ffffff;
+    color: #6b7280;
+    border-color: #e5e7eb;
+}
+
+.pg-cancel-btn:hover {
+    background: #f9fafb;
+}
+
+/* 인라인 폼 펼침 애니메이션 (visibility 토글 only — animation 없음, 즉시) */
+.pg-detail-row__controls[hidden] {
+    display: none !important;
+}
+
+/* 다른 조직 row — read-only */
+.pg-detail-row--other {
+    display: grid;
+    grid-template-columns: minmax(120px, max-content) auto auto;
+    grid-row-gap: 4px;
+    grid-column-gap: 12px;
+    align-items: baseline;
+}
+
+.pg-detail-row--other .pg-detail-row__note {
+    grid-column: 1 / -1;
+    margin: 4px 0 0;
+    color: #4b5563;
+    font-size: 12px;
+    background: #f9fafb;
+    border-left: 3px solid #d1d5db;
+    padding: 4px 8px;
+    border-radius: 0 4px 4px 0;
+}
+
+/* ── 4 단계 status 배지 (다른 조직 row 의 read-only 배지) ── */
+.pg-status-badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    font-weight: 600;
+    line-height: 1.4;
+    white-space: nowrap;
+}
+
+.pg-status-badge--interest {
+    color: #4b5563;
+    background: #e5e7eb;
+    border-color: #d1d5db;
+}
+
+.pg-status-badge--review {
+    color: #1e40af;
+    background: #dbeafe;
+    border-color: #93c5fd;
+}
+
+.pg-status-badge--in_progress {
+    color: #b91c1c;
+    background: #fee2e2;
+    border-color: #fca5a5;
+}
+
+.pg-status-badge--done {
+    color: #065f46;
+    background: #d1fae5;
+    border-color: #6ee7b7;
+}
+
+/* ── 인라인 폼 안내 메시지 (선점 충돌 등) ─────────────────── */
+.pg-detail-row__feedback {
+    margin-top: 6px;
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    background: #fef2f2;
+    color: #b91c1c;
+    border: 1px solid #fecaca;
+}
+
+.pg-detail-row__feedback--info {
+    background: #eff6ff;
+    color: #1d4ed8;
+    border-color: #bfdbfe;
+}
+
+.pg-detail-row__feedback[hidden] {
+    display: none !important;
+}
+
+/* ── 셀 expand 행 (시나리오 12 — 셀 클릭 시 조직별 상세 풀어 표시) ───── */
+.pg-expand-row > .pg-expand-row__cell {
+    background: #f8fafc;
+    border-top: 1px dashed #cbd5e1;
+    padding: 8px 12px;
+}
+
+.pg-expand-row__list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.pg-expand-row__item {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: 8px;
+    row-gap: 2px;
+    font-size: 12px;
+    color: #1f2937;
+    padding: 4px 6px;
+    border-left: 3px solid #cbd5e1;
+    background: #ffffff;
+    border-radius: 0 4px 4px 0;
+}
+
+.pg-expand-row__org {
+    font-weight: 600;
+    color: #111827;
+}
+
+.pg-expand-row__status {
+    /* pg-status-badge 의 기본 패딩을 그대로 활용. */
+}
+
+.pg-expand-row__meta {
+    color: #6b7280;
+    font-size: 11px;
+}
+
+.pg-expand-row__note {
+    flex-basis: 100%;
+    margin: 4px 0 0;
+    color: #4b5563;
+    font-size: 12px;
+    background: #f9fafb;
+    border-left: 2px solid #d1d5db;
+    padding: 4px 8px;
+    border-radius: 0 4px 4px 0;
+}

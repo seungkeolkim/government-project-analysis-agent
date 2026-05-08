@@ -43,6 +43,7 @@ from app.db.models import (
     AnnouncementProgressHistory,
     AnnouncementProgressStatus,
     Organization,
+    User,
     UserOrganization,
 )
 
@@ -737,6 +738,115 @@ def get_progress_summary_by_canonical_id_map(
     return summary_map
 
 
+# ── 목록 셀 expand 본문용 batch 조회 (task 00097-5) ─────────────────────────
+
+
+@dataclass(frozen=True)
+class ProgressRowDetail:
+    """목록 셀 expand 행에 풀어 표시할 진행 상태 row 의 직렬화 단위.
+
+    AnnouncementProgress + Organization + 마지막 수정자 username 을 single SELECT
+    + LEFT JOIN 으로 미리 묶어두어 템플릿 측에서 lazy load 가 발생하지 않도록 한다.
+    AnnouncementProgress 의 relationship lazy='select' 가 셀 단위로 N+1 을 일으키는
+    회귀를 차단한다.
+
+    Attributes:
+        progress_id: AnnouncementProgress.id.
+        organization_id: 표명 조직 PK.
+        organization_name: 표시용 조직명. 비정상 데이터 방어로 None 허용.
+        status_value: 한글 status enum 문자열 ('관심' / '검토' / '진행' / '종료').
+        status_name: enum.name (interest / review / in_progress / done) — CSS 클래스 분기용.
+        note: 자유 메모 텍스트. 빈 문자열 / None.
+        updated_at: tz-aware UTC datetime — 템플릿이 kst_format 필터로 표시한다.
+        last_modifier_username: 마지막 수정자 username. SET NULL 또는 미존재면 None.
+    """
+
+    progress_id: int
+    organization_id: int
+    organization_name: str | None
+    status_value: str
+    status_name: str
+    note: str | None
+    updated_at: datetime
+    last_modifier_username: str | None
+
+
+def get_progress_rows_by_canonical_id_map(
+    session: Session,
+    canonical_project_ids: Iterable[int],
+) -> dict[int, list[ProgressRowDetail]]:
+    """canonical_id 별로 표시용 ProgressRowDetail 리스트를 페이지당 1 회 SELECT 로 채운다.
+
+    목록 셀 expand 본문 (조직별 단계·작성자·시점·note 풀어 표시) 을 server-side
+    렌더하는 데 사용한다. Phase B ``get_relevance_summary_by_canonical_id_map`` 과
+    동일한 N+1 회피 패턴 — IN clause 로 모든 canonical 을 한 번에 가져오고 Python
+    레벨에서 canonical 별 버킷팅한다.
+
+    정렬: 단계 활동성 우선순위 (진행 → 검토 → 관심 → 종료) 다음에 ``updated_at``
+    내림차순. 셀 expand 가 펼쳐졌을 때 사용자 시선이 가장 강한 활동부터 자연스럽게
+    위로 향하도록 한 결정 (설계 문서 §4.2 와 정합).
+
+    Args:
+        session: 호출자 세션.
+        canonical_project_ids: 요약 대상 canonical_project_id 들의 iterable.
+
+    Returns:
+        ``{canonical_project_id: [ProgressRowDetail, ...]}`` 맵. row 가 하나라도
+        있는 canonical 만 키로 포함된다. canonical_project_ids 가 비어 있으면 빈
+        dict 반환 (쿼리 없음).
+    """
+    ids = list(canonical_project_ids)
+    if not ids:
+        return {}
+
+    rows = session.execute(
+        select(
+            AnnouncementProgress,
+            Organization.name,
+            User.username,
+        )
+        .outerjoin(
+            Organization, Organization.id == AnnouncementProgress.organization_id
+        )
+        .outerjoin(User, User.id == AnnouncementProgress.created_by_user_id)
+        .where(AnnouncementProgress.canonical_project_id.in_(ids))
+    ).all()
+
+    # 활동성 우선순위 정렬 — Python 레벨에서 단순 sort.
+    status_priority: dict[AnnouncementProgressStatus, int] = {
+        AnnouncementProgressStatus.IN_PROGRESS: 0,
+        AnnouncementProgressStatus.REVIEW: 1,
+        AnnouncementProgressStatus.INTEREST: 2,
+        AnnouncementProgressStatus.DONE: 3,
+    }
+
+    buckets: dict[int, list[ProgressRowDetail]] = {}
+    for progress_row, organization_name, last_modifier_username in rows:
+        detail = ProgressRowDetail(
+            progress_id=progress_row.id,
+            organization_id=progress_row.organization_id,
+            organization_name=organization_name,
+            status_value=progress_row.status.value,
+            status_name=progress_row.status.name.lower(),
+            note=progress_row.note,
+            updated_at=progress_row.updated_at,
+            last_modifier_username=last_modifier_username,
+        )
+        buckets.setdefault(progress_row.canonical_project_id, []).append(detail)
+
+    # canonical 별로 (status_priority, -updated_at) 순 정렬.
+    for canonical_id_value, detail_list in buckets.items():
+        detail_list.sort(
+            key=lambda detail: (
+                status_priority.get(
+                    AnnouncementProgressStatus(detail.status_value), 99
+                ),
+                -detail.updated_at.timestamp(),
+            )
+        )
+    return buckets
+
+
 # ── 유저 소속 조직 노출 (라우터 / 필터에서 재사용) ──────────────────────────
 
 
@@ -753,6 +863,7 @@ __all__: Sequence[str] = (
     "PreemptionConflict",
     "PROGRESS_SUMMARY_EMPTY",
     "ProgressOrganizationRef",
+    "ProgressRowDetail",
     "ProgressSummary",
     "create_progress",
     "delete_progress",
@@ -760,6 +871,7 @@ __all__: Sequence[str] = (
     "get_progress",
     "get_progress_by_id",
     "get_progress_for_organization",
+    "get_progress_rows_by_canonical_id_map",
     "get_progress_summary_by_canonical_id_map",
     "list_progress_history",
     "list_user_organization_ids",

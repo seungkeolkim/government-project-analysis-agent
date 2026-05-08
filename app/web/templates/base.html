@@ -23,6 +23,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block page_title %}정부과제 공고 수집/분석 시스템{% endblock %}</title>
     <link rel="stylesheet" href="/static/css/style.css">
+    {# task 00097-5 — Phase C 진행 상태 / 선점 UI 전용 CSS. #}
+    <link rel="stylesheet" href="/static/css/progress.css">
 </head>
 <body class="{% if not current_user %}is-anonymous{% endif %}">
     <header class="site-header">
@@ -88,6 +90,9 @@
     {# Phase 3b — 즐겨찾기 모달. 로그인 시에만 렌더된다. #}
     {% include "_favorites_modal.html" %}
     <script src="/static/js/favorites.js"></script>
+    {# task 00097-5 — Phase C 진행 상태 / 선점 UI. 목록 / 상세 양쪽에 모두 필요.
+       해당 셀 / 섹션이 없는 페이지에서는 early-return 으로 무해. #}
+    <script src="/static/js/progress.js"></script>
     {# 페이지별 추가 스크립트 삽입 지점. #}
     {% block extra_scripts %}{% endblock %}
 </body>
