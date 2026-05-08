@@ -146,7 +146,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - **로컬 Python 직접 실행 금지**: 호스트에서 `python -m app.cli` 실행 미지원. Docker Compose 경유만.
 - **compose 진입점은 `./compose.sh <dev|prod>`**: 직접 `docker compose` 명령은 사용 금지 — wrapper 가 모드별 compose 파일 조합을 강제한다. 모드 외 인자는 그대로 docker compose 에 전달.
 - **lint / format**: ruff (line-length 110, target py311, E501 무시). mypy 는 옵션 dev 의존성으로만.
-- **N+1 제거 패턴 (목록 페이지)**: 로그인 사용자 종속 데이터(읽음·관련성·즐겨찾기·동일과제) 는 페이지의 announcement_id / canonical_id 전체를 `IN` 절로 한 번에 SELECT 해 dict 반환하는 `get_X_map(ids)` 헬퍼로 일괄 조회 후 템플릿에 주입. 목록당 추가 쿼리는 2~3개로 고정. 비로그인은 헬퍼 호출 자체를 skip — 기본 경로 오버헤드 0. 폴더 트리처럼 폴더 수가 가변적이고 `IN` 절보다 GROUP BY 가 더 적합한 경우 (즐겨찾기 사이드바 폴더별 카운트 `count_favorite_entries_by_folder_for_user`) 는 JOIN + GROUP BY 단일 쿼리. 관련성 조회는 `get_relevance_summary_by_canonical_id_map(user_id, canonical_ids)` 헬퍼로 본인 판정 + 본인 소속 조직 판정 + 타인·타 조직 카운터(✅/❌/❓ 분리) 를 한 번의 쿼리 묶음으로 반환. 비로그인은 카운터만 GROUP BY 단일 쿼리. 페이지당 추가 쿼리 1~2개 고정.
+- **N+1 제거 패턴 (목록 페이지)**: 로그인 사용자 종속 데이터(읽음·관련성·즐겨찾기·동일과제) 는 페이지의 announcement_id / canonical_id 전체를 `IN` 절로 한 번에 SELECT 해 dict 반환하는 `get_X_map(ids)` 헬퍼로 일괄 조회 후 템플릿에 주입. 목록당 추가 쿼리는 2~3개로 고정. 비로그인은 헬퍼 호출 자체를 skip — 기본 경로 오버헤드 0. 폴더 트리처럼 폴더 수가 가변적이고 `IN` 절보다 GROUP BY 가 더 적합한 경우 (즐겨찾기 사이드바 폴더별 카운트 `count_favorite_entries_by_folder_for_user`) 는 JOIN + GROUP BY 단일 쿼리. 관련성 조회는 `get_relevance_summary_by_canonical_id_map(user_id, canonical_ids)` 헬퍼로 본인 판정 + 본인 소속 조직 판정 + 타인·타 조직 카운터(✅/❌ 분리) 를 한 번의 쿼리 묶음으로 반환. 비로그인은 카운터만 GROUP BY 단일 쿼리. 페이지당 추가 쿼리 1~2개 고정.
 - **Jinja2 파셜·매크로 재사용**: 위젯 단위 UI (`_relevance_badge_macro.html`, `_relevance_modal.html`, `_favorites_modal.html`) 를 `templates/` 루트에 `_` 접두사 파셜로 두고 `{% from %}` / `{% include %}` 로 목록·상세 양쪽 재사용. 동일 위젯이 두 페이지에 필요할 때 파셜 분리가 기준.
 - **소스·상태 배지 CSS 클래스 단일화**: 소스 배지는 `source-badge source-{source_type_lower}`, 상태 배지는 `status-badge status-{status_key}` 클래스를 목록·대시보드 등 모든 페이지에서 공통 사용. 페이지별 전용 배지 클래스 신설 금지 — 색상 변경은 `style.css` 의 `.source-iris`·`.status-receiving` 등 1곳만 수정하면 전체 반영.
 - **공통 컨테이너는 full-width 설계**: `.container` 클래스는 `max-width: 100%` + 최소 좌우 패딩 (12px) 으로 화면 전체 활용. 인쇄·출력 레이아웃 목적의 고정 폭 제한 재도입 금지 — 목록 컬럼 추가 시 가로 여백 부족이 발생하지 않게.
@@ -180,7 +180,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - **관련성 단위는 canonical, 읽음 단위는 announcement — 혼용 금지**: `RelevanceJudgment` 의 UNIQUE 키는 `(canonical_project_id, user_id, organization_id)` — 개인 판정(organization_id=NULL) + 조직 판정(organization_id=값) 이 단일 UNIQUE 로 공존. 같은 canonical 의 여러 소스 공고가 판정을 공유. `AnnouncementUserState.is_read` 는 announcement 단위. 목록 row 는 announcement 이지만 관련성 배지는 canonical_id 로 조회·표시한다.
 - **organization_id 는 "어떤 입장으로 판정했는지" 메타 정보**: NULL = 개인 판정, 값 있음 = 해당 조직 입장으로 한 판정. 안 2 (조직별 1개 row partial UNIQUE) 대신 **안 1 (단일 UNIQUE)** 채택 — SQLite·Postgres 양쪽 호환을 단순하게 보장하고 dialect 차이 회피. 같은 조직 안 여러 사용자가 각자 row 를 가질 수 있으며, 의견 분기가 그대로 데이터에 표현된다.
 - **관련성 판정 변경은 원자적 이관 (덮어쓰기 금지)**: 기존 판정이 있을 때 새 판정을 저장하면 기존을 `RelevanceJudgmentHistory` 로 이관 (`archive_reason="user_changed"`) 한 뒤 신규 판정 INSERT — 동일 트랜잭션. 직접 UPDATE 로 덮으면 이력이 소실되므로 설계상 금지. `content_changed` 이관과 동일 패턴. `RelevanceJudgmentHistory` 에도 organization_id 컬럼이 동일하게 존재해 이관 시 소속 정보 보존.
-- **관련성 목록 셀 — 본인 배지 개인 우선**: 본인 개인 row + 본인이 만든 조직 row 가 모두 있으면 큰 배지는 개인 row 의 판정 표시. 개인 row 가 없으면 본인이 만든 조직 row 중 가장 최근 것을 큰 배지로. 카운터(✅ N ❌ M ❓ K)는 본인 row(개인 + 본인이 만든 조직 row) 를 제외한 나머지 모든 row 를 집계. 비로그인도 카운터·작성자·조직명 모두 동일하게 노출 — 로그인 사용자와 동일 노출 컨벤션.
+- **관련성 목록 셀 — 본인 배지 개인 우선**: 본인 개인 row + 본인이 만든 조직 row 가 모두 있으면 큰 배지는 개인 row 의 판정 표시. 개인 row 가 없으면 본인이 만든 조직 row 중 가장 최근 것을 큰 배지로. 카운터(✅ N ❌ M)는 본인 row(개인 + 본인이 만든 조직 row) 를 제외한 나머지 모든 row 를 집계 — ❓(미검토) 카운터는 DB CHECK 가 '관련'/'무관' 만 허용하므로 UI·백엔드 모두 제거. 비로그인도 카운터·작성자·조직명 모두 동일하게 노출 — 로그인 사용자와 동일 노출 컨벤션. hover 툴팁은 본인 조직 판정(mine_organization) 또는 다른 사용자 판정(others) 중 하나라도 있으면 노출 — 본인 개인 판정 유무와 무관.
 - **즐겨찾기 항목은 announcement 단위** (이전 canonical 단위 설계 폐기): 별을 누른 바로 그 공고가 아닌 다른 공고가 대표로 등록되거나, 동일 과제의 다른 공고가 즐겨찾기 목록에 보이지 않는 문제로 폐기됨. 이제 별은 announcement 단위로 1건 저장되고, "동일 과제 모두 저장" 라디오는 같은 canonical 그룹의 is_current 공고 전체를 한 번에 등록하는 수단으로 동작한다.
 - **FavoriteFolder depth 2 제약은 ORM validator**: SQLite 의 ALTER TABLE 제약 추가가 어렵고 단순 계층 구조라서 DB CHECK 대신 ORM `@validates` 레벨에서 depth 검증.
 - **SQLite UNIQUE(parent_id IS NULL) 루트 동명 중복은 app-level SELECT 체크**: SQLite·Postgres 모두 UNIQUE 제약에서 NULL 을 "서로 다름" 으로 취급해 parent_id=NULL 루트 폴더의 동명 INSERT 가 DB 제약으로 막히지 않는다. INSERT 전 SELECT 로 직접 중복 확인하는 app-level 체크 패턴 적용. 루트 조직 동명 방지도 동일 패턴.
@@ -268,5 +268,6 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
+- [00087] 관련성 카운터 UI 재수정 — ❓(미검토) 로직 백엔드·프론트 완전 제거, 카운터 셀 오버플로우 수정(rj-wrap flex-column + col-relevance overflow:hidden), 본인 판정 없을 때도 others 있으면 hover 툴팁 표시 — 2026-05-08
 - [00085] 조직 단위 관련성 판정 추가 — RelevanceJudgment·History 에 organization_id FK 컬럼 추가, 단일 UNIQUE (canonical_project_id, user_id, organization_id), 입력 모달 판정 주체 라디오, 목록 셀 본인 배지·카운터, 상세 페이지 행 분리 표시 구현 — 2026-05-07
 - [00084] `.env.example` · `sources.yaml.template` 기능별 섹션 재구성 및 `README.USER.md` 연계 정합 — 2026-05-07

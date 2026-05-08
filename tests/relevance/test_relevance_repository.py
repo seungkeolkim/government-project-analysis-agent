@@ -522,10 +522,9 @@ def test_summary_logged_in_personal_priority_and_other_counter(
     others_usernames = sorted(meta.username for meta in summary.others)
     assert others_usernames == ["summary_peer1", "summary_peer1", "summary_peer2"]
 
-    # 카운터: 관련 2 (peer1 개인, peer2 개인), 무관 1 (peer1 조직), 미검토 0
+    # 카운터: 관련 2 (peer1 개인, peer2 개인), 무관 1 (peer1 조직)
     assert summary.others_count_related == 2
     assert summary.others_count_unrelated == 1
-    assert summary.others_count_unreviewed == 0
 
 
 def test_summary_logged_in_only_organization_rows_uses_latest_as_badge(
@@ -577,7 +576,6 @@ def test_summary_logged_in_only_organization_rows_uses_latest_as_badge(
     assert summary.others == ()
     assert summary.others_count_related == 0
     assert summary.others_count_unrelated == 0
-    assert summary.others_count_unreviewed == 0
 
 
 def test_summary_anonymous_user_treats_all_as_others(test_engine: Engine):
@@ -616,7 +614,6 @@ def test_summary_anonymous_user_treats_all_as_others(test_engine: Engine):
     # 카운터 분리
     assert summary.others_count_related == 1
     assert summary.others_count_unrelated == 1
-    assert summary.others_count_unreviewed == 0
 
 
 def test_summary_empty_inputs(test_engine: Engine):

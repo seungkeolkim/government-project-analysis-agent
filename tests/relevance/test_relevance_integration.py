@@ -239,7 +239,7 @@ def test_list_cell_renders_my_badge_counter_and_organization_tooltip(
     assert "rj-badge--related" in html, "본인 개인 row 의 verdict 가 큰 배지로 노출돼야 한다."
     # 카운터 (OTHERS = 동료 2 건 — 관련 1, 무관 1).
     assert "rj-counter" in html
-    # ✅ 1 ❌ 1 ❓ 0 표기를 단언 — 공백 차이를 허용하기 위해 핵심 토큰만 검증.
+    # ✅ 1 ❌ 1 표기를 단언 — 공백 차이를 허용하기 위해 핵심 토큰만 검증.
     assert "✅ 1" in html
     assert "❌ 1" in html
     # hover 툴팁에 본인 조직명 + verdict — \"렌더링-조직\" 이 mine_organization 영역으로.
@@ -285,6 +285,46 @@ def test_list_cell_anonymous_shows_counter_and_disables_owner_area(
     assert "✅ 1" in html
     # 비로그인이라 모달이 렌더되지 않아야 한다 — _relevance_modal.html 의 {% if current_user %}.
     assert 'id="relevance-modal"' not in html, "비로그인은 모달이 렌더되지 않아야 한다."
+
+
+def test_tooltip_shows_others_when_no_personal_judgment(
+    client: TestClient, test_engine: Engine
+) -> None:
+    """본인 판정이 없어도 OTHERS 가 있으면 hover 툴팁에 다른 사용자/조직 판정이 노출된다.
+
+    검증: 본인 판정 없음 + OTHERS 있음 → rj-tooltip 렌더 + 다른 사용자 username 포함.
+    """
+    _register_and_login(client, "integ_tooltip_no_mine")
+    seeded = _seed_canonical_with_announcement(
+        "official:integ-tooltip-nomine-1", "INTEG-TOOLTIP-NOMINE-1"
+    )
+    canonical_id = seeded["canonical_id"]
+
+    # OTHERS 시드 — 다른 사용자가 개인 row 작성 (본인은 판정 없음).
+    with session_scope() as session:
+        other_user = User(username="integ_tooltip_other_user", password_hash="dummy")
+        session.add(other_user)
+        session.flush()
+        session.add(
+            RelevanceJudgment(
+                canonical_project_id=canonical_id,
+                user_id=other_user.id,
+                organization_id=None,
+                verdict="관련",
+                reason="다른 사용자 사유",
+            )
+        )
+
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.text
+
+    # 본인 판정 없으므로 큰 배지는 미검토.
+    assert "rj-badge--unreviewed" in html
+    # OTHERS 가 있으므로 카운터와 툴팁이 렌더돼야 한다.
+    assert "rj-counter" in html
+    assert "rj-tooltip" in html, "본인 판정 없어도 OTHERS 가 있으면 툴팁이 렌더돼야 한다."
+    assert "integ_tooltip_other_user" in html, "툴팁에 다른 사용자 username 이 노출돼야 한다."
 
 
 # ---------------------------------------------------------------------------

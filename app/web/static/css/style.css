@@ -1413,7 +1413,10 @@ body.is-anonymous .announcement-title-link--read {
 /* 배지 컨테이너 — 툴팁 위치 계산 기준점 */
 .rj-wrap {
     position: relative;
-    display: inline-block;
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    max-width: 100%;
 }
 
 /* 배지 버튼 기본 */
@@ -1461,6 +1464,7 @@ body.is-anonymous .announcement-title-link--read {
 .col-relevance {
     width: 72px;
     text-align: center;
+    overflow: hidden;
 }
 
 /* 툴팁 */
@@ -1676,16 +1680,17 @@ body.is-anonymous .announcement-title-link--read {
     opacity: 0.85;
 }
 
-/* 카운터 (✅ N ❌ M ❓ K) — 큰 배지 옆 인라인. 폭 부족하면 wrap. */
+/* 카운터 (✅ N ❌ M) — 배지 아래 행에 배치 (rj-wrap 이 flex-direction: column). */
 .rj-counter {
     display: inline-flex;
     gap: 4px;
     align-items: center;
-    margin-left: 6px;
+    margin-top: 3px;
     font-size: 11px;
     color: #4b5563;
-    vertical-align: middle;
-    white-space: nowrap;
+    flex-wrap: wrap;
+    justify-content: center;
+    max-width: 100%;
 }
 
 .rj-counter__cell {
@@ -1697,7 +1702,6 @@ body.is-anonymous .announcement-title-link--read {
 
 .rj-counter__cell--related { color: #047857; }
 .rj-counter__cell--unrelated { color: #6b7280; }
-.rj-counter__cell--unreviewed { color: #9ca3af; }
 
 /* 툴팁 안의 조직명 (mine_organization 행). */
 .rj-tooltip__org {
