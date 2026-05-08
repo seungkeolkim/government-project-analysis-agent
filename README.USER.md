@@ -4,7 +4,7 @@
 > 아키텍처 결정 근거는 [PROJECT_NOTES.md](PROJECT_NOTES.md) 를 참고한다.
 >
 > **Docker 전용.** 호스트에서 `python -m app.cli` 직접 실행은 지원하지 않는다.
-> compose 호출은 모두 wrapper `./compose.sh <dev|prod>` 를 거친다.
+> 서버 구동은 `./run_compose.sh`, 관리자 도구는 `./run_admin.sh` 를 사용한다.
 
 ---
 
@@ -39,8 +39,8 @@ cp .env.example .env
 sh ./bootstrap_sources.sh
 
 # 3) 이미지 빌드 + 웹 UI 기동
-./compose.sh dev build
-./compose.sh dev up app
+./run_compose.sh build
+./run_compose.sh up
 # → http://localhost:8000
 ```
 
@@ -61,8 +61,8 @@ sh ./bootstrap_sources.sh
 UID/GID 변경 시 `/etc/passwd` 등록이 빌드 시점 ARG 로 처리되므로 **재빌드 필수**:
 
 ```bash
-./compose.sh dev build
-./compose.sh dev up app
+./run_compose.sh build
+./run_compose.sh up
 ```
 
 이미 root 소유로 생긴 파일이 있다면 일회성 복구:
@@ -92,10 +92,10 @@ CLI 로 한 번 만든다. 관리자 페이지 진입에 필수.
 
 ```bash
 # 대화형 (username/password/email 모두 prompt)
-docker compose run --rm app python scripts/python/create_admin.py
+./run_admin.sh create-admin
 
 # username + email 인자, password 만 prompt
-docker compose run --rm app python scripts/python/create_admin.py root_user --email admin@example.com
+./run_admin.sh create-admin root_user --email admin@example.com
 ```
 
 정책: username 영문 소문자/숫자/밑줄 3~64자, password 8자 이상. bcrypt(rounds=12) 해시
@@ -107,19 +107,22 @@ docker compose run --rm app python scripts/python/create_admin.py root_user --em
 sqlite3 ./data/db/app.sqlite3 "SELECT id, username, is_admin FROM users WHERE is_admin = 1;"
 ```
 
-### dev / prod 모드 (compose.sh)
+### 실행 명령 (run_compose.sh)
 
-| 모드   | 사용 compose 파일                                    | 동작                                                   |
-| ------ | ---------------------------------------------------- | ------------------------------------------------------ |
-| `dev`  | `docker-compose.yml` + `docker-compose.dev.yml`      | uvicorn `--reload` 활성. `./app/` 바인드 마운트로 코드 변경 자동 반영 |
-| `prod` | `docker-compose.yml` 단독                            | 이미지 코드 고정, reloader 끔                          |
+| 서브커맨드 | 동작 |
+|-----------|------|
+| `up` | 앱 서버 기동 (포어그라운드, 코드 변경 자동 반영) |
+| `up -d` | 앱 서버 백그라운드 기동 |
+| `down` | 서비스 중지 및 컨테이너 제거 |
+| `build` | 이미지 빌드 |
+| `logs -f app` | 앱 로그 실시간 확인 |
+| `scrape` | 스크래퍼 1회 실행 후 종료 |
 
-`./compose.sh <mode>` 뒤의 인자는 그대로 `docker compose` 에 전달된다. 직접 `docker
-compose` 명령은 모드 조합 오용을 막기 위해 사용하지 말 것.
+직접 `docker compose` 명령은 사용하지 않는다 — wrapper 스크립트를 통해서만 실행한다.
 
 ### 운영 스크립트 위치
 
-- 사용자 실행 shell: 프로젝트 루트의 `./compose.sh`, `./bootstrap_sources.sh`.
+- 사용자 실행 shell: 프로젝트 루트의 `./run_compose.sh`, `./run_admin.sh`, `./bootstrap_sources.sh`.
 - Python 운영 스크립트: `scripts/python/<name>.py` — 모두 `docker compose run` 으로 호출.
 - 이미지 안에서 자동 실행되는 shell: `docker/entrypoint.sh`.
 
@@ -749,11 +752,11 @@ INFO  apply_delta_to_main 트랜잭션 commit 완료: status=completed
 
 | 증상 | 원인 / 조치 |
 |------|------------|
-| `Permission denied on /var/run/docker.sock` (수동 시작 클릭 시) | `HOST_DOCKER_GID` 가 빠지거나 잘못된 값. `getent group docker | cut -d: -f3` 결과로 `.env` 갱신 → `./compose.sh dev up app` 재기동 |
+| `Permission denied on /var/run/docker.sock` (수동 시작 클릭 시) | `HOST_DOCKER_GID` 가 빠지거나 잘못된 값. `getent group docker | cut -d: -f3` 결과로 `.env` 갱신 → `./run_compose.sh up` 재기동 |
 | `ComposeEnvironmentError` flash | `HOST_PROJECT_DIR` 미설정. `pwd` 결과를 `.env` 에 추가 |
 | `./data/` 하위 파일이 root:root 소유 | `HOST_UID`/`HOST_GID` 빠진 채 기동된 적이 있음. `sudo chown -R "$(id -u):$(id -g)" ./data/` + `.env` 보강 + 재빌드 |
 | 컨테이너 안에서 사용자명이 `I have no name!` | UID 변경 후 재빌드 안 됨. `docker compose build` 다시 |
-| dev 모드인데 코드 변경 자동 반영 안 됨 | `./compose.sh dev` 가 아닌 `prod` 로 떠 있음 / 이전 prod 컨테이너 잔존. `./compose.sh dev down` 후 `./compose.sh dev up app` |
+| 코드 변경이 자동 반영 안 됨 | 컨테이너가 실행 중인지 확인. `./run_compose.sh logs -f app` 으로 uvicorn reload 로그 확인 |
 | 기동 시 `sources.yaml 마운트 없음 — template 기본값으로 기동합니다` 경고 | 호스트에 `sources.yaml` 부재. `sh ./bootstrap_sources.sh` 후 편집 → `docker compose restart app` |
 
 ### 수집
@@ -804,7 +807,7 @@ INFO  apply_delta_to_main 트랜잭션 commit 완료: status=completed
 
 ### 업데이트 후
 
-- [ ] `./compose.sh dev build` 또는 `prod build` 로 이미지 재빌드
+- [ ] `./run_compose.sh build` 로 이미지 재빌드
 - [ ] `docker compose run --rm scraper alembic current` 가 `head` 인지 확인
 - [ ] `scrape.dry_run: true, max_pages: 1` 로 한 번 돌려 기본 동작 확인
 - [ ] 웹 UI `/` 정상 렌더링 확인

@@ -119,9 +119,9 @@ Docker Compose. `app` (FastAPI UI) · `scraper` (1회성 배치, `profiles: [scr
 ### 초기 설정 / 개발 환경
 
 - `sources.yaml` 은 `.gitignore` 대상 (브랜치 전환 시 보존). 최초 기동 전 `sh ./bootstrap_sources.sh` 또는 `cp -n sources.yaml.template sources.yaml`. 이미지에도 template 이 포함되어 마운트 누락 시 폴백 가동(경고 로그).
-- **compose 진입점**: `./compose.sh <dev|prod>` 만 사용. `dev` = `docker-compose.yml` + `docker-compose.dev.yml` (uvicorn `--reload --reload-dir /app/app`), `prod` = `docker-compose.yml` 단독. 모드 누락·오타 시 exit 2.
+- **실행 스크립트**: `./run_compose.sh`(서버 구동: up/down/build/logs/restart/ps/scrape) + `./run_admin.sh`(관리자 도구: create-admin). dev/prod 분기 없음 — uvicorn `--reload --reload-dir /app/app` 는 단일 `docker-compose.yml` 에서 항상 활성. 서브커맨드 없이 실행하면 도움말과 함께 exit 2.
 - **Dockerfile 레이어 순서**: 변경 빈도 오름차순 — Layer 1 시스템 패키지 + docker CLI → Layer 2 playwright + chromium (`ARG PLAYWRIGHT_VERSION` 핀) → Layer 3 pyproject deps + editable 설치 → Layer 4 앱 소스·scripts·alembic → Layer 5a 컨테이너 실행 유저 등록(`ARG HOST_UID/HOST_GID` idempotent `useradd`) → Layer 5 런타임 디렉터리·권한. editable 설치 시 스텁 `app/__init__.py` 먼저 → `pip install -e .` → 실제 소스 COPY 로 덮어써 소스 변경이 의존성 레이어를 무효화하지 않게. playwright 버전은 Dockerfile ARG (운영 핀) 와 pyproject `playwright>=1.44,<2.0` (호환 범위) 두 곳에 분리.
-- **Dockerfile 포함물**: `alembic.ini`·`alembic/`·`sources.yaml.template`·`scripts/` 모두 이미지에 COPY. entrypoint 가 `alembic upgrade head` 를 실행하므로 migration 산출물이 이미지에 반드시 포함되어야 한다. `scripts/` 는 `create_admin.py` 같은 운영자 CLI 를 컨테이너 안에서 실행하기 위해 포함 (compose 바인드 마운트와 병행).
+- **Dockerfile 포함물**: `alembic.ini`·`alembic/`·`sources.yaml.template`·`scripts/` 모두 이미지에 COPY. 이미지 단독 완결성 폴백용이며, 실제 운영 시 `./alembic` 와 `./alembic.ini` 는 호스트 바인드 마운트(`:ro`)가 Dockerfile COPY 보다 우선 적용되어 빌드 없이 신규 migration 이 자동 반영된다. `scripts/` 는 `create_admin.py` 같은 운영자 CLI 를 컨테이너 안에서 실행하기 위해 포함 (compose 바인드 마운트와 병행).
 
 ### 외부 의존성
 
@@ -146,7 +146,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - **Jinja2 `<script>` 블록 내 태그 리터럴 금지**: Jinja2 파서는 `<script>` 안의 JavaScript 주석까지 포함해 `{% %}` 태그를 해석한다. script 블록 주석에서 Jinja 태그 문자열을 언급해야 하면 `{% else %}` 같은 리터럴 대신 "else 분기" 등 플레인 텍스트로 대체한다 — 위반 시 `TemplateSyntaxError` 로 페이지 전체 500.
 - **Jinja2 템플릿에서 Python 빌트인 생성자 호출 금지**: `set()`, `dict()`, `tuple()` 등을 Jinja2 표현식에서 호출하면 렌더링 500. 빈 컬렉션 기본값은 리터럴 `[]` / `{}` 로.
 - **로컬 Python 직접 실행 금지**: 호스트에서 `python -m app.cli` 실행 미지원. Docker Compose 경유만.
-- **compose 진입점은 `./compose.sh <dev|prod>`**: 직접 `docker compose` 명령은 사용 금지 — wrapper 가 모드별 compose 파일 조합을 강제한다. 모드 외 인자는 그대로 docker compose 에 전달.
+- **실행 스크립트는 `./run_compose.sh` / `./run_admin.sh`**: 직접 `docker compose` 명령은 사용 금지 — wrapper 가 단일 `docker-compose.yml` 을 항상 사용. 서브커맨드(up/down/build/logs/restart/ps/scrape) 뒤의 인자는 그대로 docker compose 에 전달.
 - **lint / format**: ruff (line-length 110, target py311, E501 무시). mypy 는 옵션 dev 의존성으로만.
 - **N+1 제거 패턴 (목록 페이지)**: 로그인 사용자 종속 데이터(읽음·관련성·즐겨찾기·동일과제) 는 페이지의 announcement_id / canonical_id 전체를 `IN` 절로 한 번에 SELECT 해 dict 반환하는 `get_X_map(ids)` 헬퍼로 일괄 조회 후 템플릿에 주입. 목록당 추가 쿼리는 2~3개로 고정. 비로그인은 헬퍼 호출 자체를 skip — 기본 경로 오버헤드 0. 폴더 트리처럼 폴더 수가 가변적이고 `IN` 절보다 GROUP BY 가 더 적합한 경우 (즐겨찾기 사이드바 폴더별 카운트 `count_favorite_entries_by_folder_for_user`) 는 JOIN + GROUP BY 단일 쿼리. 관련성 조회는 `get_relevance_summary_by_canonical_id_map(user_id, canonical_ids)` 헬퍼로 본인 소속 조직 판정 + 전체 카운터(✅/❌ 분리) 를 한 번의 쿼리 묶음으로 반환. 비로그인은 카운터만 GROUP BY 단일 쿼리. 페이지당 추가 쿼리 1~2개 고정.
 - **Jinja2 파셜·매크로 재사용**: 위젯 단위 UI (`_relevance_badge_macro.html`, `_relevance_modal.html`, `_favorites_modal.html`) 를 `templates/` 루트에 `_` 접두사 파셜로 두고 `{% from %}` / `{% include %}` 로 목록·상세 양쪽 재사용. 동일 위젯이 두 페이지에 필요할 때 파셜 분리가 기준.
