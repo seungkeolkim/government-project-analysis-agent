@@ -80,7 +80,7 @@ def _payload_for(
 
 
 def _seed_user_state_and_judgment(
-    session: Session, user: User, announcement: Announcement, *, is_read: bool = True
+    session: Session, user: User, announcement: Announcement, *, is_read: bool = True, organization_id: int
 ) -> None:
     """공고 × 사용자 읽음 상태 + canonical 관련성 판정을 한 세트로 심는다."""
     session.add(
@@ -99,6 +99,7 @@ def _seed_user_state_and_judgment(
         RelevanceJudgment(
             canonical_project_id=announcement.canonical_group_id,
             user_id=user.id,
+            organization_id=organization_id,
             verdict="관련",
             reason="유닛 테스트",
             decided_at=datetime.now(tz=UTC),
@@ -167,7 +168,10 @@ def test_status_transitioned_no_reset(db_session: Session) -> None:
     canonical_id = announcement.canonical_group_id
 
     # 읽음 + 관련성 판정 심기
-    _seed_user_state_and_judgment(db_session, user, announcement, is_read=True)
+    org = Organization(name="sttr-org")
+    db_session.add(org)
+    db_session.flush()
+    _seed_user_state_and_judgment(db_session, user, announcement, is_read=True, organization_id=org.id)
 
     # status 만 변경
     second = upsert_announcement(
@@ -216,7 +220,10 @@ def test_new_version_triggers_reset(db_session: Session) -> None:
     original_id = first.announcement.id
     canonical_id = first.announcement.canonical_group_id
 
-    _seed_user_state_and_judgment(db_session, user, first.announcement, is_read=True)
+    org = Organization(name="nv-org")
+    db_session.add(org)
+    db_session.flush()
+    _seed_user_state_and_judgment(db_session, user, first.announcement, is_read=True, organization_id=org.id)
 
     # title 변경
     second = upsert_announcement(
@@ -275,7 +282,10 @@ def test_attachment_signature_change_triggers_second_pass(db_session: Session) -
     canonical_id = announcement.canonical_group_id
 
     # 사용자 상태/판정 + 첨부 2개
-    _seed_user_state_and_judgment(db_session, user, announcement, is_read=True)
+    org = Organization(name="sec-org")
+    db_session.add(org)
+    db_session.flush()
+    _seed_user_state_and_judgment(db_session, user, announcement, is_read=True, organization_id=org.id)
     db_session.add(
         Attachment(
             announcement_id=original_id,
@@ -377,29 +387,31 @@ def test_content_changed_reset_preserves_organization_id(db_session: Session) ->
     """task 00085 회귀: content_changed reset 시 organization_id 가 History 에 보존돼야 한다.
 
     검증 시나리오 (사용자 원문 검증 13):
-      - 본인 개인 row (organization_id IS NULL) + 본인 조직 row (organization_id 정수)
-        가 같은 canonical 에 공존하는 상태에서 title 변경 → new_version + 리셋.
+      - 두 조직 row (organization_id org_a.id / org_b.id) 가 같은 canonical 에 공존하는
+        상태에서 title 변경 → new_version + 리셋.
       - 두 row 모두 RelevanceJudgmentHistory 로 이관되어야 하며,
         archive_reason='content_changed' 이고 organization_id 값이 정확히 복사돼야 한다.
     """
     user = _make_user(db_session, "org_reset_user")
-    org = Organization(name="조직-content-changed")
-    db_session.add(org)
+    org_a = Organization(name="조직-content-changed-A")
+    org_b = Organization(name="조직-content-changed-B")
+    db_session.add(org_a)
+    db_session.add(org_b)
     db_session.flush()
 
     first = upsert_announcement(db_session, _payload_for("ORG-RESET-1"))
     canonical_id = first.announcement.canonical_group_id
     assert canonical_id is not None
 
-    # 본인 개인 row + 본인 조직 row 동시 생성 — task 00085 의 안 1 단일 UNIQUE 가
-    # 트리플 (canonical, user, organization_id) 로 슬롯이 분리됨을 활용.
+    # 같은 사용자의 두 조직 row — (canonical, user, organization_id) 트리플이
+    # 다르므로 UNIQUE 제약 위반 없이 공존할 수 있다.
     db_session.add(
         RelevanceJudgment(
             canonical_project_id=canonical_id,
             user_id=user.id,
-            organization_id=None,
+            organization_id=org_a.id,
             verdict="관련",
-            reason="개인",
+            reason="조직A",
             decided_at=datetime.now(tz=UTC),
         )
     )
@@ -407,9 +419,9 @@ def test_content_changed_reset_preserves_organization_id(db_session: Session) ->
         RelevanceJudgment(
             canonical_project_id=canonical_id,
             user_id=user.id,
-            organization_id=org.id,
+            organization_id=org_b.id,
             verdict="무관",
-            reason="조직",
+            reason="조직B",
             decided_at=datetime.now(tz=UTC),
         )
     )
@@ -432,14 +444,10 @@ def test_content_changed_reset_preserves_organization_id(db_session: Session) ->
         ).scalars()
     )
     assert len(active) == 0, "원본 RelevanceJudgment 가 모두 이관·삭제돼야 한다."
-    assert len(history) == 2, "개인 row + 조직 row 두 건 모두 History 로 이관돼야 한다."
+    assert len(history) == 2, "조직A row + 조직B row 두 건 모두 History 로 이관돼야 한다."
 
-    # archive_reason 모두 content_changed 이고 organization_id 가 1 개는 NULL,
-    # 1 개는 org.id 로 보존됨을 검증.
+    # archive_reason 모두 content_changed 이고 organization_id 가 org_a.id, org_b.id 로 보존됨을 검증.
     assert all(h.archive_reason == "content_changed" for h in history)
-    organization_ids_archived = sorted(
-        h.organization_id for h in history if h.organization_id is not None
-    )
-    none_count = sum(1 for h in history if h.organization_id is None)
-    assert organization_ids_archived == [org.id]
-    assert none_count == 1
+    organization_ids_archived = sorted(h.organization_id for h in history)
+    assert organization_ids_archived == sorted([org_a.id, org_b.id])
+    assert all(h.organization_id is not None for h in history)

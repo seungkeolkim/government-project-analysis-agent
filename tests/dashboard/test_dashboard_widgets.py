@@ -25,6 +25,7 @@ from app.db.models import (
     AnnouncementStatus,
     AnnouncementUserState,
     CanonicalProject,
+    Organization,
     RelevanceJudgment,
     User,
 )
@@ -126,11 +127,13 @@ def _judge(
     user_id: int,
     canonical_project_id: int,
     verdict: str = "관련",
+    organization_id: int,
 ) -> None:
     """RelevanceJudgment INSERT."""
     rj = RelevanceJudgment(
         canonical_project_id=canonical_project_id,
         user_id=user_id,
+        organization_id=organization_id,
         verdict=verdict,
     )
     session.add(rj)
@@ -216,7 +219,10 @@ class TestCountUnjudgedCanonicalForUser:
             session, canonical_key="key-cj", title="판정",
             source_announcement_id="CJ-1",
         )
-        _judge(session, user_id=user.id, canonical_project_id=canonical_judged.id)
+        org = Organization(name="cj-org")
+        session.add(org)
+        session.flush()
+        _judge(session, user_id=user.id, canonical_project_id=canonical_judged.id, organization_id=org.id)
 
         assert count_unjudged_canonical_for_user(session, user_id=user.id) == 1
 
@@ -228,7 +234,10 @@ class TestCountUnjudgedCanonicalForUser:
             session, canonical_key="key-shared", title="공유 canonical",
             source_announcement_id="S-1",
         )
-        _judge(session, user_id=user_b.id, canonical_project_id=canonical.id)
+        org = Organization(name="shared-org")
+        session.add(org)
+        session.flush()
+        _judge(session, user_id=user_b.id, canonical_project_id=canonical.id, organization_id=org.id)
 
         assert count_unjudged_canonical_for_user(session, user_id=user_a.id) == 1
         assert count_unjudged_canonical_for_user(session, user_id=user_b.id) == 0
@@ -355,7 +364,10 @@ class TestCountUnjudgedInCanonicalIds:
             session, canonical_key="k-w4b", title="B",
             source_announcement_id="W4-B",
         )
-        _judge(session, user_id=user.id, canonical_project_id=canonical_b.id)
+        org = Organization(name="w4-org")
+        session.add(org)
+        session.flush()
+        _judge(session, user_id=user.id, canonical_project_id=canonical_b.id, organization_id=org.id)
 
         # 주어진 ID = {a, b}, 미판정 = {a} → 1.
         assert (
@@ -412,7 +424,10 @@ class TestBuildUserLabelWidgets:
         # 사용자 상태:
         #   - ann_a 읽음 / canonical_a 판정 / canonical_b 미판정 / ann_b 미읽음
         _mark_read(session, user_id=user.id, announcement_id=ann_a.id)
-        _judge(session, user_id=user.id, canonical_project_id=canonical_a.id)
+        org = Organization(name="wb-org")
+        session.add(org)
+        session.flush()
+        _judge(session, user_id=user.id, canonical_project_id=canonical_a.id, organization_id=org.id)
 
         result = build_user_label_widgets(
             session,

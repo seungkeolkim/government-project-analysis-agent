@@ -6,7 +6,7 @@
     - attachments:                list[Attachment]
     - current_user:               User | None
     - canonical_id:               int | None         (canonical_project_id. None 이면 관련성 섹션 숨김)
-    - relevance_summary:          RelevanceSummary   (task 00085 — mine_personal/mine_organization/others/카운터)
+    - relevance_summary:          RelevanceSummary   (task 00085 — mine_organization/others/카운터)
     - relevance_summary_empty:    RelevanceSummary   (task 00085 — 빈 default 상수)
     - history_items:              list[HistoryWithUser]  (task 00085 — canonical 단위 판정 이력)
     - user_organization_options:  list[dict]         (task 00085 — 모달 드롭다운)
@@ -195,9 +195,9 @@
     {% if current_user %}
     <div class="rj-detail-group rj-self-group">
         <h4 class="rj-detail-group__title">본인 판정</h4>
-        {% set has_my_personal = relevance_summary.mine_personal is not none %}
+        {# task 00093 — 개인 판정 슬롯 제거. 조직 판정만 표시. #}
         {% set has_my_organizations = (relevance_summary.mine_organization | length) > 0 %}
-        {% if not has_my_personal and not has_my_organizations %}
+        {% if not has_my_organizations %}
         <p class="rj-detail-empty">아직 본인 판정이 없습니다.</p>
         <button type="button"
                 class="rj-detail-create-btn"
@@ -209,31 +209,6 @@
             판정 작성하기
         </button>
         {% else %}
-        {# 개인 row 가 있으면 한 행으로 표시. #}
-        {% if has_my_personal %}
-        {% set personal_meta = relevance_summary.mine_personal %}
-        <div class="rj-detail-row rj-detail-row--mine">
-            <span class="rj-detail-row__author">개인</span>
-            <span class="rj-detail-row__verdict rj-verdict--{{ 'related' if personal_meta.judgment.verdict == '관련' else 'unrelated' }}">{{ personal_meta.judgment.verdict }}</span>
-            <span class="rj-detail-row__decided-at">{{ personal_meta.judgment.decided_at | kst_format }}</span>
-            {% if personal_meta.judgment.reason %}
-            <span class="rj-detail-row__reason">{{ personal_meta.judgment.reason }}</span>
-            {% endif %}
-            <span class="rj-detail-row__actions">
-                <button type="button"
-                        class="rj-detail-edit-btn"
-                        data-canonical-id="{{ canonical_id }}"
-                        data-my-verdict="{{ personal_meta.judgment.verdict }}"
-                        data-my-reason="{{ personal_meta.judgment.reason or '' }}"
-                        data-my-origin="personal"
-                        data-my-organization-id="">수정</button>
-                <button type="button"
-                        class="rj-detail-delete-btn"
-                        data-canonical-id="{{ canonical_id }}"
-                        data-my-organization-id="">삭제</button>
-            </span>
-        </div>
-        {% endif %}
         {# 본인이 만든 조직 row 들. 각 행마다 [수정][삭제]. #}
         {% for org_meta in relevance_summary.mine_organization %}
         <div class="rj-detail-row rj-detail-row--mine">
@@ -258,7 +233,6 @@
             </span>
         </div>
         {% endfor %}
-        {# 새 추가 버튼 — 개인이 없으면 개인 추가 / 조직이 있어도 더 작성 가능 #}
         <button type="button"
                 class="rj-detail-create-btn"
                 data-canonical-id="{{ canonical_id }}"
