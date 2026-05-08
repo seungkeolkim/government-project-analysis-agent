@@ -116,6 +116,8 @@ services:
     # docs/scrape_control_design.md §5.2 참조.
     group_add:
       - "${HOST_DOCKER_GID:-999}"
+    # --reload 와 ./app 바인드 마운트가 짝을 이뤄 코드 변경을 자동 반영한다.
+    # prod/dev 구분 없이 항상 reload 를 켠다(docker-compose.dev.yml 통합).
     command:
       - uvicorn
       - app.web.main:app
@@ -123,6 +125,9 @@ services:
       - 0.0.0.0
       - --port
       - "8000"
+      - --reload
+      - --reload-dir
+      - /app/app
     restart: unless-stopped
 
   scraper:
