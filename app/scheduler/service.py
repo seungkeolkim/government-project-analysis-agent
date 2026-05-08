@@ -410,6 +410,27 @@ def list_schedules() -> list[ScheduleSummary]:
     return summaries
 
 
+def list_general_schedules() -> list[ScheduleSummary]:
+    """백업 잡(JOB_ID_BACKUP)을 제외한 일반 스케줄 목록을 반환한다.
+
+    [스케줄] 탭은 일반 수집 스케줄만 표시하고, 백업 잡은 [시스템 백업] 탭에서
+    별도 노출한다(task 00096). JOB_ID_BACKUP 기반 필터링이며 trigger_spec
+    매칭은 false-match 위험이 있으므로 사용하지 않는다.
+    """
+    return [s for s in list_schedules() if s.job_id != JOB_ID_BACKUP]
+
+
+def get_backup_schedule_summary() -> "ScheduleSummary | None":
+    """APScheduler 에 등록된 백업 잡의 ScheduleSummary 를 반환한다.
+
+    백업 잡이 존재하지 않거나 스케줄러가 미기동 상태면 None.
+    """
+    for s in list_schedules():
+        if s.job_id == JOB_ID_BACKUP:
+            return s
+    return None
+
+
 def _require_running_scheduler() -> Any:
     """CRUD 호출 시점에 scheduler 가 start 되어 있어야 함을 보장한다."""
     scheduler = _get_or_build_scheduler()

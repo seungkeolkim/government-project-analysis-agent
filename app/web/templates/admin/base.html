@@ -7,10 +7,12 @@
           하위: [수집 제어] [sources.yaml] [스케줄]
       상위 탭 [조직 관리]
           하위: [조직 구성] [사용자 관리]
+      상위 탭 [시스템 관리]
+          하위: [시스템 백업]
 
   컨텍스트 규약:
-    - top_tab:  'scrape_group' | 'org_group'. 상위 탭 active 판별에 사용.
-    - sub_tab:  'scrape' | 'sources' | 'schedule' | 'organizations' | 'users'.
+    - top_tab:  'scrape_group' | 'org_group' | 'system_group'. 상위 탭 active 판별에 사용.
+    - sub_tab:  'scrape' | 'sources' | 'schedule' | 'organizations' | 'users' | 'backup'.
                 현재 하위 탭 active 판별에 사용.
     - current_user: 상단 네비용. admin 페이는 current_user.is_admin=True 보장.
 #}
@@ -33,6 +35,8 @@
            href="/admin/organizations">조직 관리</a>
         <a class="admin-top-tab {% if top_tab == 'usage_group' %}admin-top-tab--active{% endif %}"
            href="/admin/usage">이용 통계</a>
+        <a class="admin-top-tab {% if top_tab == 'system_group' %}admin-top-tab--active{% endif %}"
+           href="/admin/backup">시스템 관리</a>
     </nav>
 
     {# ── 하위 탭 — 상위 탭에 따라 다른 하위 탭을 노출 ───────── #}
@@ -44,8 +48,6 @@
            href="/admin/sources/yaml">sources.yaml</a>
         <a class="admin-tab {% if sub_tab == 'schedule' %}admin-tab--active{% endif %}"
            href="/admin/schedule">스케줄</a>
-        <a class="admin-tab {% if sub_tab == 'backup' %}admin-tab--active{% endif %}"
-           href="/admin/backup">시스템 백업</a>
     </nav>
     {% elif top_tab == 'org_group' %}
     <nav class="admin-tabs" aria-label="조직 관리 하위 탭">
@@ -53,6 +55,11 @@
            href="/admin/organizations">조직 구성</a>
         <a class="admin-tab {% if sub_tab == 'users' %}admin-tab--active{% endif %}"
            href="/admin/users">사용자 관리</a>
+    </nav>
+    {% elif top_tab == 'system_group' %}
+    <nav class="admin-tabs" aria-label="시스템 관리 하위 탭">
+        <a class="admin-tab {% if sub_tab == 'backup' %}admin-tab--active{% endif %}"
+           href="/admin/backup">시스템 백업</a>
     </nav>
     {% endif %}
     {# usage_group 은 하위 탭이 1개이므로 sub-nav 를 표시하지 않는다. #}

@@ -99,8 +99,9 @@ from app.scheduler import (
     add_cron_schedule,
     add_interval_schedule,
     delete_schedule,
+    get_backup_schedule_summary,
     is_scheduler_running,
-    list_schedules,
+    list_general_schedules,
     register_backup_cron_schedule,
     toggle_schedule,
 )
@@ -876,7 +877,8 @@ def schedule_page(
     """
     logger.debug("admin.schedule_page 진입: user_id={}", current_user.id)
     try:
-        schedules = list_schedules()
+        # 백업 잡은 [시스템 관리 > 시스템 백업] 탭에서 별도 노출하므로 여기서는 제외한다.
+        schedules = list_general_schedules()
     except Exception as exc:
         # jobstore 접근 실패 등 예외. UI 는 빈 목록으로 폴백하되 에러를 flash 로 노출.
         logger.exception(
@@ -1913,10 +1915,11 @@ def backup_page(
     """[시스템 백업] 탭 — 백업 설정, 수동 실행, 이력, 파일 목록.
 
     템플릿 컨텍스트:
-        top_tab:          'scrape_group'.
+        top_tab:          'system_group'.
         sub_tab:          'backup'.
         backup_cron:      현재 저장된 cron 표현식.
         backup_max_count: 현재 저장된 최대 보관 개수 (str).
+        backup_schedule:  APScheduler 에 등록된 백업 잡 ScheduleSummary | None.
         history:          BackupHistory 리스트 (최신 먼저).
         backup_files:     list[dict] — filename, size_bytes, modified_at.
         scheduler_running: APScheduler 기동 여부.
@@ -1934,10 +1937,11 @@ def backup_page(
         request,
         "admin/backup.html",
         {
-            "top_tab": "scrape_group",
+            "top_tab": "system_group",
             "sub_tab": "backup",
             "backup_cron": settings["cron_expression"],
             "backup_max_count": settings["max_count"],
+            "backup_schedule": get_backup_schedule_summary(),
             "history": history,
             "backup_files": backup_files,
             "scheduler_running": is_scheduler_running(),
