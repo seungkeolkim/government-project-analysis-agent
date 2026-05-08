@@ -319,6 +319,10 @@
             var li = document.createElement('li');
             li.className = 'rj-modal__mine-item';
 
+            // 상단 행: 주체 + verdict 배지 + 날짜 + X 버튼
+            var topRow = document.createElement('div');
+            topRow.className = 'rj-modal__mine-item-row';
+
             // 판정 주체 (개인 또는 조직명)
             var subjectSpan = document.createElement('span');
             subjectSpan.className = 'rj-modal__mine-subject';
@@ -349,10 +353,20 @@
                 });
             }(item.organization_id));
 
-            li.appendChild(subjectSpan);
-            li.appendChild(verdictSpan);
-            li.appendChild(dateSpan);
-            li.appendChild(delBtn);
+            topRow.appendChild(subjectSpan);
+            topRow.appendChild(verdictSpan);
+            topRow.appendChild(dateSpan);
+            topRow.appendChild(delBtn);
+            li.appendChild(topRow);
+
+            // 사유 행: item.reason 이 truthy 일 때만 렌더링 (null, 빈 문자열 모두 제외)
+            if (item.reason) {
+                var reasonDiv = document.createElement('div');
+                reasonDiv.className = 'rj-modal__mine-reason';
+                reasonDiv.textContent = item.reason;
+                li.appendChild(reasonDiv);
+            }
+
             myListContainer.appendChild(li);
         });
     }
@@ -365,6 +379,7 @@
      * @param {number|null} organizationId 삭제 대상 organization_id (개인이면 null)
      */
     function handleDeleteMineItem(canonicalId, organizationId) {
+        if (!window.confirm('이 판정을 삭제하시겠습니까?')) { return; }
         fetch('/canonical/' + canonicalId + '/relevance', {
             method: 'DELETE',
             headers: { 'Content-Type': 'application/json' },
