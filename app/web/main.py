@@ -57,7 +57,7 @@ from app.db.repository import (
 from app.organizations.service import get_user_organization_ids
 from app.db.session import SessionLocal
 from app.logging_setup import configure_logging
-from app.scheduler import start_scheduler, stop_scheduler
+from app.scheduler import ensure_backup_cron_registered, start_scheduler, stop_scheduler
 from app.scrape_control import cleanup_stale_running_runs
 from app.suggestions import (
     ensure_deleted_at_columns,
@@ -358,6 +358,18 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     except Exception as exc:
         logger.exception(
             "APScheduler 기동 실패(스킵, 수동 수집은 계속 가능): ({}: {})",
+            type(exc).__name__, exc,
+        )
+
+    # task 00094-2 — startup 시 백업 cron 잡이 없으면 자동 등록한다.
+    # APScheduler 가 jobstore 에서 자동 복원한 경우 no-op. 첫 실행 시 DB 설정
+    # (없으면 DEFAULT_BACKUP_CRON) 으로 등록한다. 스케줄러 기동 실패 시에도
+    # 이 호출은 내부에서 조용히 skip 하므로 웹 기동을 막지 않는다.
+    try:
+        ensure_backup_cron_registered()
+    except Exception as exc:
+        logger.warning(
+            "백업 cron startup 등록 실패(스킵, 웹 기동 계속): ({}: {})",
             type(exc).__name__, exc,
         )
 

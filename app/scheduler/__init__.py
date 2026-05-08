@@ -16,15 +16,18 @@ from app.scheduler.constants import (
     DEFAULT_MISFIRE_GRACE_TIME_SEC,
     SCHEDULER_JOBS_TABLENAME,
 )
-from app.scheduler.job_runner import scheduled_scrape
+from app.scheduler.job_runner import scheduled_backup_job, scheduled_scrape
 from app.scheduler.service import (
     ScheduleSummary,
     ScheduleValidationError,
     add_cron_schedule,
     add_interval_schedule,
     delete_schedule,
+    ensure_backup_cron_registered,
     is_scheduler_running,
     list_schedules,
+    register_backup_cron_schedule,
+    remove_backup_cron_schedule,
     start as start_scheduler,
     stop as stop_scheduler,
     toggle_schedule,
@@ -38,8 +41,12 @@ __all__ = [
     "add_cron_schedule",
     "add_interval_schedule",
     "delete_schedule",
+    "ensure_backup_cron_registered",
     "is_scheduler_running",
     "list_schedules",
+    "register_backup_cron_schedule",
+    "remove_backup_cron_schedule",
+    "scheduled_backup_job",
     "scheduled_scrape",
     "start_scheduler",
     "stop_scheduler",

@@ -27,14 +27,16 @@ from loguru import logger
 from app.db.session import get_engine
 from app.scheduler.constants import (
     DEFAULT_MISFIRE_GRACE_TIME_SEC,
+    JOB_ID_BACKUP,
     JOB_ID_PREFIX_CRON,
     JOB_ID_PREFIX_INTERVAL,
+    JOB_NAME_BACKUP_PREFIX,
     JOB_NAME_CRON_PREFIX,
     JOB_NAME_INTERVAL_PREFIX,
     MAX_INTERVAL_HOURS,
     SCHEDULER_JOBS_TABLENAME,
 )
-from app.scheduler.job_runner import gc_orphan_attachments_job, scheduled_scrape
+from app.scheduler.job_runner import gc_orphan_attachments_job, scheduled_backup_job, scheduled_scrape
 # task 00040-4 — APScheduler 의 글로벌/트리거 timezone 을 Asia/Seoul 로 통일.
 # ``app.timezone`` 이 KST 의 단일 진실 소스이므로 직접 ``ZoneInfo("Asia/Seoul")``
 # 을 만들지 않고 그곳의 상수를 가져온다.
@@ -195,9 +197,13 @@ def _reinterpret_existing_jobs_to_kst(scheduler: Any) -> int:
             continue
 
         if isinstance(old_trigger, CronTrigger):
-            # Job.name 의 'cron-spec:0 3 * * *' prefix 를 벗겨 원본 cron 표현식 복원.
+            # Job.name 의 prefix 를 벗겨 원본 cron 표현식 복원.
+            # scrape 잡: "cron:0 3 * * *", backup 잡: "backup-cron:0 3 * * *"
             if isinstance(job.name, str) and job.name.startswith(JOB_NAME_CRON_PREFIX):
                 cron_expression = job.name[len(JOB_NAME_CRON_PREFIX):]
+            elif isinstance(job.name, str) and job.name.startswith(JOB_NAME_BACKUP_PREFIX):
+                # task 00094-2 — 백업 잡 prefix 인식
+                cron_expression = job.name[len(JOB_NAME_BACKUP_PREFIX):]
             else:
                 logger.warning(
                     "tz 재해석 스킵 — cron job.name 파싱 실패: job_id={} name={!r}",
@@ -348,6 +354,9 @@ def _summary_from_job(job: Any) -> ScheduleSummary:
         trigger_type = "cron"
         if isinstance(job.name, str) and job.name.startswith(JOB_NAME_CRON_PREFIX):
             trigger_spec = job.name[len(JOB_NAME_CRON_PREFIX):]
+        elif isinstance(job.name, str) and job.name.startswith(JOB_NAME_BACKUP_PREFIX):
+            # task 00094-2 — 백업 잡 prefix 인식
+            trigger_spec = job.name[len(JOB_NAME_BACKUP_PREFIX):]
         else:
             # 폴백: cron field 직접 표현. fmt 는 'CronTrigger(...)' 형태.
             trigger_spec = repr(job.trigger)
@@ -653,6 +662,126 @@ def delete_schedule(job_id: str) -> None:
     logger.info("스케줄 삭제: job_id={}", job_id)
 
 
+# ──────────────────────────────────────────────────────────────
+# task 00094-2 — 백업 전용 스케줄 CRUD
+# ──────────────────────────────────────────────────────────────
+
+
+def register_backup_cron_schedule(*, cron_expression: str) -> ScheduleSummary:
+    """백업 cron 잡을 등록하거나 기존 잡의 trigger 를 갱신한다.
+
+    ``JOB_ID_BACKUP`` 으로 고정 ID 를 사용해 백업 잡은 **항상 1건**만 존재한다.
+    잡이 이미 있으면 ``reschedule_job`` 으로 trigger 만 교체한다 (새 row 가 아님).
+    잡이 없으면 새로 ``add_job`` 한다.
+
+    Args:
+        cron_expression: 5-필드 cron (분 시 일 월 요일). 예) ``0 3 * * *``.
+                         Asia/Seoul 기준으로 파싱된다.
+
+    Returns:
+        등록/갱신된 잡의 ScheduleSummary.
+
+    Raises:
+        ScheduleValidationError: cron 표현식이 잘못됐거나 빈 문자열.
+    """
+    cron_expression = (cron_expression or "").strip()
+    if not cron_expression:
+        raise ScheduleValidationError("백업 cron 표현식이 비어 있습니다.")
+
+    from apscheduler.triggers.cron import CronTrigger
+
+    try:
+        trigger = CronTrigger.from_crontab(cron_expression, timezone=KST)
+    except Exception as exc:
+        raise ScheduleValidationError(
+            f"백업 cron 표현식 파싱 실패: {exc}"
+        ) from exc
+
+    scheduler = _require_running_scheduler()
+    existing = scheduler.get_job(JOB_ID_BACKUP)
+
+    if existing is not None:
+        # trigger 갱신 — next_run_time 도 함께 재계산
+        scheduler.reschedule_job(JOB_ID_BACKUP, trigger=trigger)
+        # name 도 새 cron 표현식으로 갱신 (_summary_from_job 이 name 으로 spec 을 복원함)
+        scheduler.modify_job(JOB_ID_BACKUP, name=f"{JOB_NAME_BACKUP_PREFIX}{cron_expression}")
+        updated = scheduler.get_job(JOB_ID_BACKUP)
+        logger.info(
+            "백업 cron 갱신: job_id={} expr={!r} next_run_time={}",
+            JOB_ID_BACKUP, cron_expression, getattr(updated, "next_run_time", None),
+        )
+    else:
+        scheduler.add_job(
+            scheduled_backup_job,
+            trigger=trigger,
+            args=[],
+            id=JOB_ID_BACKUP,
+            name=f"{JOB_NAME_BACKUP_PREFIX}{cron_expression}",
+            replace_existing=True,
+        )
+        updated = scheduler.get_job(JOB_ID_BACKUP)
+        logger.info(
+            "백업 cron 등록: job_id={} expr={!r} next_run_time={}",
+            JOB_ID_BACKUP, cron_expression, getattr(updated, "next_run_time", None),
+        )
+
+    return _summary_from_job(updated)
+
+
+def remove_backup_cron_schedule() -> None:
+    """백업 cron 잡을 제거한다. 잡이 없어도 에러 없이 no-op 으로 처리한다."""
+    scheduler = _require_running_scheduler()
+    existing = scheduler.get_job(JOB_ID_BACKUP)
+    if existing is None:
+        logger.debug("백업 cron 제거 요청: 잡이 이미 없음 (no-op)")
+        return
+    scheduler.remove_job(JOB_ID_BACKUP)
+    logger.info("백업 cron 제거: job_id={}", JOB_ID_BACKUP)
+
+
+def ensure_backup_cron_registered() -> None:
+    """startup 시 백업 cron 잡이 없으면 등록한다.
+
+    APScheduler 가 ``SQLAlchemyJobStore`` 에서 자동 복원한 경우(재기동): no-op.
+    첫 실행이거나 잡이 없는 경우: ``SystemSetting`` 의 cron 설정(없으면 기본값)으로
+    등록한다. 기본값은 ``app.backup.constants.DEFAULT_BACKUP_CRON`` (KST 03:00 매일).
+
+    ``create_app()`` 에서 ``start_scheduler()`` 직후 호출해야 한다.
+    스케줄러가 아직 running 이 아닌 경우 조용히 no-op 처리한다.
+    """
+    with _scheduler_lock:
+        scheduler = _scheduler
+    if scheduler is None or not getattr(scheduler, "running", False):
+        logger.debug("ensure_backup_cron_registered: 스케줄러 미기동 — 스킵")
+        return
+
+    existing = scheduler.get_job(JOB_ID_BACKUP)
+    if existing is not None:
+        # jobstore 에서 자동 복원된 경우 — 건드리지 않는다
+        logger.debug(
+            "백업 cron 잡 이미 존재 (jobstore 자동 복원): next_run_time={}",
+            getattr(existing, "next_run_time", None),
+        )
+        return
+
+    # 첫 실행이거나 잡이 없는 경우 — DB 설정 또는 기본값으로 등록
+    from app.backup.constants import DEFAULT_BACKUP_CRON, SETTING_KEY_BACKUP_CRON
+    from app.backup.service import get_setting
+    from app.db.session import session_scope
+
+    with session_scope() as session:
+        cron_expression = get_setting(session, SETTING_KEY_BACKUP_CRON) or DEFAULT_BACKUP_CRON
+
+    try:
+        register_backup_cron_schedule(cron_expression=cron_expression)
+        logger.info(
+            "백업 cron 잡 startup 자동 등록: expr={!r}", cron_expression
+        )
+    except ScheduleValidationError as exc:
+        # 저장된 cron 이 잘못된 경우 — 운영자가 admin 페이지에서 수정해야 함
+        logger.warning("백업 cron startup 자동 등록 실패 (admin 페이지에서 수동 등록 필요): {}", exc)
+
+
 __all__ = [
     "GC_ORPHAN_DEFAULT_CRON",
     "JOB_ID_PREFIX_GC_ORPHAN",
@@ -663,8 +792,11 @@ __all__ = [
     "add_gc_orphan_cron_schedule",
     "add_interval_schedule",
     "delete_schedule",
+    "ensure_backup_cron_registered",
     "is_scheduler_running",
     "list_schedules",
+    "register_backup_cron_schedule",
+    "remove_backup_cron_schedule",
     "start",
     "stop",
     "toggle_schedule",

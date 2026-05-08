@@ -126,7 +126,41 @@ def gc_orphan_attachments_job() -> None:
         )
 
 
+def scheduled_backup_job() -> None:
+    """APScheduler 가 호출하는 DB 백업 진입점 (task 00094-2).
+
+    APScheduler jobstore 에 ``app.scheduler.job_runner.scheduled_backup_job``
+    경로로 pickle 되므로, 이 함수의 모듈 경로·이름은 **절대 변경 금지**.
+
+    설계:
+        - 인자 없음 — pickle 에 args 를 저장하면 운영 중 max_count 변경이
+          즉시 반영되지 않는다. run_backup 이 실행 시점에 DB 에서 설정을 읽는다.
+        - ``app.backup.service`` 를 함수 안에서 lazy import — 순환 import 방지.
+        - 모든 예외를 swallow + ``logger.exception`` — APScheduler 스레드가
+          조용히 죽지 않게 한다 (``scheduled_scrape`` 와 동일 정책).
+    """
+    try:
+        # 순환 import 방지를 위해 함수 내부 lazy import 사용.
+        from app.backup.constants import BACKUP_TRIGGER_SCHEDULED
+        from app.backup.service import run_backup
+
+        history = run_backup(trigger=BACKUP_TRIGGER_SCHEDULED)
+        logger.info(
+            "스케줄 백업 완료: id={} success={} backup_files={} duration={}s",
+            history.id,
+            history.success,
+            history.backup_files,
+            history.duration_seconds,
+        )
+    except Exception as exc:
+        logger.exception(
+            "스케줄 백업 중 예기치 못한 예외(다음 주기로 이월): {}: {}",
+            type(exc).__name__, exc,
+        )
+
+
 __all__ = [
     "gc_orphan_attachments_job",
+    "scheduled_backup_job",
     "scheduled_scrape",
 ]

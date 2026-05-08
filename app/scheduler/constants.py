@@ -33,11 +33,20 @@ JOB_ID_PREFIX_INTERVAL: Final[str] = "interval"
 JOB_NAME_CRON_PREFIX: Final[str] = "cron:"
 JOB_NAME_INTERVAL_PREFIX: Final[str] = "interval:"
 
+# ── 백업 잡 식별자 (task 00094-2) ─────────────────────────────────────────────
+# 백업 잡은 항상 1건만 존재한다. 고정 ID 를 사용해 중복 등록을 방지한다.
+JOB_ID_BACKUP: Final[str] = "backup-db"
+# job.name 에 저장할 prefix. 예) "backup-cron:0 3 * * *"
+# _reinterpret_existing_jobs_to_kst 가 이 prefix 로 cron 표현식을 복원한다.
+JOB_NAME_BACKUP_PREFIX: Final[str] = "backup-cron:"
+
 
 __all__ = [
     "DEFAULT_MISFIRE_GRACE_TIME_SEC",
+    "JOB_ID_BACKUP",
     "JOB_ID_PREFIX_CRON",
     "JOB_ID_PREFIX_INTERVAL",
+    "JOB_NAME_BACKUP_PREFIX",
     "JOB_NAME_CRON_PREFIX",
     "JOB_NAME_INTERVAL_PREFIX",
     "MAX_INTERVAL_HOURS",
