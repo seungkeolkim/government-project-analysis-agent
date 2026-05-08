@@ -567,9 +567,6 @@ class RelevanceSummary:
             decided_at DESC 정렬.
         others_count_related: others 중 verdict='관련' 인 row 수.
         others_count_unrelated: others 중 verdict='무관' 인 row 수.
-        others_count_unreviewed: others 중 verdict 가 그 외인 row 수. DB CHECK 가
-            '관련'/'무관' 만 허용하므로 정상 데이터에서는 항상 0 이다 (UI 가
-            ❓ 0 을 노출할지 숨길지는 UI subtask 결정).
     """
 
     mine_personal: RelevanceJudgmentWithMeta | None
@@ -577,7 +574,6 @@ class RelevanceSummary:
     others: tuple[RelevanceJudgmentWithMeta, ...]
     others_count_related: int
     others_count_unrelated: int
-    others_count_unreviewed: int
 
 
 # 기본값(빈 요약) — 호출자가 ``summary_map.get(canonical_id, RELEVANCE_SUMMARY_EMPTY)``
@@ -588,7 +584,6 @@ RELEVANCE_SUMMARY_EMPTY: RelevanceSummary = RelevanceSummary(
     others=(),
     others_count_related=0,
     others_count_unrelated=0,
-    others_count_unreviewed=0,
 )
 
 
@@ -2062,7 +2057,7 @@ def get_relevance_summary_by_canonical_id_map(
         - mine_organization: 본인이 만든 조직 row, decided_at DESC.
         - others: 본인이 작성하지 않은 모든 row (다른 사용자의 개인 + 조직),
             decided_at DESC.
-        - others_count_*: others 의 verdict 별 카운트 (관련 / 무관 / 미검토).
+        - others_count_*: others 의 verdict 별 카운트 (관련 / 무관).
 
     user_id=None (비로그인) 일 때는 mine_personal=None, mine_organization=(),
     others 에 해당 canonical 의 모든 row 가 들어가고 카운터도 전체 row 기준이다.
@@ -2146,18 +2141,9 @@ def get_relevance_summary_by_canonical_id_map(
         mine_organization_metas = tuple(mine_organization_buckets.get(canonical_id, []))
         others_metas = tuple(others_buckets.get(canonical_id, []))
 
-        # OTHERS 카운터 — verdict 별 분리. DB CHECK 가 '관련'/'무관' 만 허용하므로
-        # unreviewed 는 정상 데이터에서 항상 0 이다.
-        count_related = 0
-        count_unrelated = 0
-        count_unreviewed = 0
-        for meta in others_metas:
-            if meta.judgment.verdict == RELEVANCE_VERDICT_RELATED:
-                count_related += 1
-            elif meta.judgment.verdict == RELEVANCE_VERDICT_UNRELATED:
-                count_unrelated += 1
-            else:
-                count_unreviewed += 1
+        # OTHERS 카운터 — verdict 별 분리.
+        count_related = sum(1 for m in others_metas if m.judgment.verdict == RELEVANCE_VERDICT_RELATED)
+        count_unrelated = sum(1 for m in others_metas if m.judgment.verdict == RELEVANCE_VERDICT_UNRELATED)
 
         summary_map[canonical_id] = RelevanceSummary(
             mine_personal=mine_personal_meta,
@@ -2165,7 +2151,6 @@ def get_relevance_summary_by_canonical_id_map(
             others=others_metas,
             others_count_related=count_related,
             others_count_unrelated=count_unrelated,
-            others_count_unreviewed=count_unreviewed,
         )
 
     return summary_map

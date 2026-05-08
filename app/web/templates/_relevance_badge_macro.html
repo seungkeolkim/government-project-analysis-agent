@@ -16,11 +16,11 @@
         1) 본인 개인 row (organization_id IS NULL & user_id == 본인)
         2) 본인 조직 row 중 decided_at DESC 의 첫 항목 (mine_organization 첫 번째)
         3) 미검토 (빈 배지)
-    - 카운터: ✅(관련) ❌(무관) ❓(미검토) — OTHERS row 만 카운트.
+    - 카운터: ✅(관련) ❌(무관) — OTHERS row 만 카운트.
       OTHERS = 본인 user_id 가 아닌 모든 row (다른 사용자의 개인 + 조직 모두).
-      카운터 자체가 0/0/0 이면 카운터 div 자체를 렌더하지 않는다 (시각적 노이즈 감소).
-    - hover 툴팁: 본인이 만든 조직 row (mine_organization) 를 모두 나열.
-      비어 있으면 툴팁을 렌더하지 않는다.
+      카운터 자체가 0/0 이면 카운터 div 자체를 렌더하지 않는다 (시각적 노이즈 감소).
+    - hover 툴팁: 본인 조직 row (mine_organization) 와 다른 사용자/조직 판정 (others) 을 모두 나열.
+      둘 다 비어 있으면 툴팁을 렌더하지 않는다.
     - 비로그인 (current_user is None): 큰 배지는 항상 미검토. mine_personal /
       mine_organization 가 비어 있어 자동으로 그렇게 된다. 카운터는 동일하게
       OTHERS 기준 (= 결정 3 — 비로그인 = 로그인 동일 노출).
@@ -79,19 +79,19 @@
     </span>
     {% endif %}
 
-    {# OTHERS 카운터 — 0/0/0 이면 렌더하지 않음. #}
-    {% set others_total = summary.others_count_related + summary.others_count_unrelated + summary.others_count_unreviewed %}
+    {# OTHERS 카운터 — 0/0 이면 렌더하지 않음. #}
+    {% set others_total = summary.others_count_related + summary.others_count_unrelated %}
     {% if others_total > 0 %}
     <span class="rj-counter" aria-label="다른 사용자·조직의 평가 카운트">
         <span class="rj-counter__cell rj-counter__cell--related">✅ {{ summary.others_count_related }}</span>
         <span class="rj-counter__cell rj-counter__cell--unrelated">❌ {{ summary.others_count_unrelated }}</span>
-        <span class="rj-counter__cell rj-counter__cell--unreviewed">❓ {{ summary.others_count_unreviewed }}</span>
     </span>
     {% endif %}
 
-    {# hover 툴팁 — 본인이 만든 조직 row 가 있을 때만 노출 (조직명 + 판정). #}
-    {% if my_org_judgments %}
+    {# hover 툴팁 — 본인 조직 row 또는 다른 사용자/조직 판정이 있을 때 노출. #}
+    {% if my_org_judgments or summary.others %}
     <div class="rj-tooltip" role="tooltip">
+        {% if my_org_judgments %}
         <p class="rj-tooltip__heading">본인 조직 입장 ({{ my_org_judgments | length }}건)</p>
         {% for meta in my_org_judgments %}
         <div class="rj-tooltip__item">
@@ -100,6 +100,17 @@
             {% if meta.judgment.reason %} <span class="rj-tooltip__reason">— {{ meta.judgment.reason }}</span>{% endif %}
         </div>
         {% endfor %}
+        {% endif %}
+        {% if summary.others %}
+        <p class="rj-tooltip__heading">다른 사용자 판정 ({{ summary.others | length }}건)</p>
+        {% for meta in summary.others %}
+        <div class="rj-tooltip__item">
+            <span class="rj-tooltip__user">{{ meta.username }}{% if meta.organization_name %} · {{ meta.organization_name }}{% endif %}</span>:
+            <span class="rj-verdict--{{ 'related' if meta.judgment.verdict == '관련' else 'unrelated' }}">{{ meta.judgment.verdict }}</span>
+            {% if meta.judgment.reason %} <span class="rj-tooltip__reason">— {{ meta.judgment.reason }}</span>{% endif %}
+        </div>
+        {% endfor %}
+        {% endif %}
     </div>
     {% endif %}
 </span>
