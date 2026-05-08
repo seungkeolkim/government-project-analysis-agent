@@ -13,6 +13,9 @@
 (function () {
     'use strict';
 
+    // 툴팁 hover 는 로그인 여부 무관하게 항상 초기화한다.
+    initTooltips();
+
     var modal = document.getElementById('relevance-modal');
     if (!modal) {
         // 비로그인 페이지에서도 detail 페이지의 .rj-detail-delete-btn 은 존재할 수 있다.
@@ -329,4 +332,78 @@
             });
         });
     });
+
+    /**
+     * 각 .rj-wrap 에 mouseenter/mouseleave 와 focusin/focusout 이벤트를 직접 등록하여
+     * position: fixed 기준의 툴팁을 viewport 좌표로 배치한다.
+     * 로그인 여부 무관하게 실행되므로 IIFE 최상단에서 호출한다.
+     */
+    function initTooltips() {
+        document.querySelectorAll('.rj-wrap').forEach(function (wrap) {
+            var tooltip = wrap.querySelector('.rj-tooltip');
+            if (!tooltip) { return; }
+
+            wrap.addEventListener('mouseenter', function () {
+                showTooltip(wrap, tooltip);
+            });
+            wrap.addEventListener('mouseleave', function () {
+                hideTooltip(tooltip);
+            });
+            // 키보드 사용자를 위한 접근성 지원 (.rj-badge 가 button 이므로 자연스럽게 focus 가능)
+            wrap.addEventListener('focusin', function () {
+                showTooltip(wrap, tooltip);
+            });
+            wrap.addEventListener('focusout', function () {
+                hideTooltip(tooltip);
+            });
+        });
+    }
+
+    /**
+     * 툴팁을 viewport 기준 fixed 좌표로 배치하고 표시한다.
+     * 배지 위에 배치하되, 위 공간이 부족하면 아래로 자동 반전한다.
+     * 좌우는 viewport 경계(8px 여백)에 클램핑한다.
+     *
+     * @param {HTMLElement} wrapEl    .rj-wrap 컨테이너
+     * @param {HTMLElement} tooltipEl .rj-tooltip 요소
+     */
+    function showTooltip(wrapEl, tooltipEl) {
+        var rect = wrapEl.getBoundingClientRect();
+        var vpW = window.innerWidth;
+
+        // 화면 밖에 배치 후 크기 측정 (렌더링 직전 reflow 강제, 시각적 flicker 없음)
+        tooltipEl.style.top = '-9999px';
+        tooltipEl.style.left = '-9999px';
+        tooltipEl.classList.add('rj-tooltip--visible');
+
+        var tipW = tooltipEl.offsetWidth;
+        var tipH = tooltipEl.offsetHeight;
+
+        // 기본: 배지 위에 배치 (아래 화살표)
+        var tipTop = rect.top - tipH - 8;
+        var tipLeft = rect.left + rect.width / 2 - tipW / 2;
+
+        // 위에 공간 부족(8px 이상 필요) → 아래로 반전 (위 화살표)
+        if (tipTop < 8) {
+            tipTop = rect.bottom + 8;
+            tooltipEl.classList.add('rj-tooltip--below');
+        } else {
+            tooltipEl.classList.remove('rj-tooltip--below');
+        }
+
+        // 좌우 뷰포트 경계 클램핑 (8px 여백)
+        tipLeft = Math.max(8, Math.min(vpW - tipW - 8, tipLeft));
+
+        tooltipEl.style.top = tipTop + 'px';
+        tooltipEl.style.left = tipLeft + 'px';
+    }
+
+    /**
+     * 툴팁을 숨기고 방향 클래스를 초기화한다.
+     *
+     * @param {HTMLElement} tooltipEl .rj-tooltip 요소
+     */
+    function hideTooltip(tooltipEl) {
+        tooltipEl.classList.remove('rj-tooltip--visible', 'rj-tooltip--below');
+    }
 }());

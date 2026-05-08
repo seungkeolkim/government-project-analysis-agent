@@ -1467,14 +1467,11 @@ body.is-anonymous .announcement-title-link--read {
     overflow: hidden;
 }
 
-/* 툴팁 */
+/* 툴팁 — position: fixed 로 row/셀 overflow 클리핑 탈출 */
 .rj-tooltip {
     display: none;
-    position: absolute;
-    z-index: 200;
-    left: 50%;
-    transform: translateX(-50%);
-    bottom: calc(100% + 8px);
+    position: fixed;
+    z-index: 1000;
     background: #1f2937;
     color: #f9fafb;
     border-radius: 6px;
@@ -1489,7 +1486,12 @@ body.is-anonymous .announcement-title-link--read {
     text-align: left;
 }
 
-/* 툴팁 말풍선 꼬리 */
+/* JS 가 토글하는 표시 클래스 */
+.rj-tooltip--visible {
+    display: block;
+}
+
+/* 툴팁 말풍선 꼬리 — 기본(위 배치): 아래를 향하는 화살표 */
 .rj-tooltip::after {
     content: '';
     position: absolute;
@@ -1500,9 +1502,12 @@ body.is-anonymous .announcement-title-link--read {
     border-top-color: #1f2937;
 }
 
-/* 호버 시 툴팁 표시 */
-.rj-wrap:hover .rj-tooltip {
-    display: block;
+/* 아래 배치 시 꼬리를 위쪽으로 반전 */
+.rj-tooltip--below::after {
+    top: auto;
+    bottom: 100%;
+    border-top-color: transparent;
+    border-bottom-color: #1f2937;
 }
 
 .rj-tooltip__heading {
