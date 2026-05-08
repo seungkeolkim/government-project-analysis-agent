@@ -769,11 +769,29 @@ class AnnouncementUserState(Base):
 
 
 class RelevanceJudgment(Base):
-    """canonical_project × user 단위 현재 유효 판정.
+    """canonical_project × user × organization 단위 현재 유효 판정.
 
-    (canonical_project_id, user_id) 조합당 1건만 존재한다.
+    UNIQUE 키 (canonical_project_id, user_id, organization_id) — task 00085 에서
+    organization_id 컬럼이 추가되었다. organization_id 의 의미는 "이 사용자가 어떤
+    조직 입장으로 한 판정인지" 라는 메타 정보이며, NULL 이면 개인 판정, 정수면
+    그 조직 입장으로 표명한 판정이다.
+
+    같은 사용자가 같은 canonical 에 대해
+        - 개인 row 1 개 (organization_id IS NULL)
+        - 본인이 소속된 각 조직마다 row 1 개씩 (organization_id 가 그 조직 PK)
+    까지 가질 수 있다 (UNIQUE 키 조합이 다름). 같은 조직 안의 다른 멤버가 만든
+    row 도 user_id 가 달라 본 row 와 독립적이다.
+
     내용 변경(status 단독 제외) 감지 시 해당 canonical 의 모든 row 는
-    `relevance_judgment_history` 로 이관되어 이 테이블에서 제거된다.
+    `relevance_judgment_history` 로 이관되어 이 테이블에서 제거된다 (organization_id
+    값을 그대로 복사하여 이력 보존).
+
+    NULL UNIQUE semantics:
+        SQLite·Postgres 모두 UNIQUE 제약에서 NULL 은 "서로 다름" 으로 취급되므로,
+        organization_id IS NULL 인 row 두 개를 DB 레벨에서 막지는 못한다. "사용자별
+        개인 판정 1 개" 보장은 repository 의 set_relevance_judgment 트랜잭션이
+        담당한다 (기존 row 를 History 이관 후 교체하는 흐름 — task 00085-3 에서
+        organization_id 키도 매칭하도록 보강).
 
     verdict 허용값: '관련', '무관' — DB CHECK 및 app-level 상수로 이중 강제.
     """
@@ -805,6 +823,23 @@ class RelevanceJudgment(Base):
         doc="판정한 사용자 PK.",
     )
 
+    # organization_id: NULL 이면 개인 판정, 정수면 그 조직 입장으로 표명한 판정.
+    # 조직 삭제 시 그 조직 입장으로 한 판정도 CASCADE 로 함께 사라진다
+    # (user_organizations 의 정합성 — "조직이 사라지면 그 조직 입장의 판정도 의미를 잃음").
+    organization_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "organizations.id",
+            name="fk_relevance_judgments_organization_id",
+            ondelete="CASCADE",
+        ),
+        nullable=True,
+        index=True,
+        doc=(
+            "판정 주체 조직 PK. NULL 이면 개인 판정, 정수면 그 조직 입장의 판정."
+        ),
+    )
+
     # verdict: '관련' | '무관'. 한글 2글자 + 여유로 String(8).
     verdict: Mapped[str] = mapped_column(
         String(8),
@@ -831,10 +866,14 @@ class RelevanceJudgment(Base):
     )
 
     __table_args__ = (
+        # task 00085 에서 (canonical, user) → (canonical, user, organization_id) 단일
+        # UNIQUE 로 교체. partial unique index 는 사용하지 않는다 (SQLite·Postgres
+        # 양쪽 호환성 단순화).
         UniqueConstraint(
             "canonical_project_id",
             "user_id",
-            name="uq_relevance_project_user",
+            "organization_id",
+            name="uq_relevance_judgments_canonical_user_org",
         ),
         CheckConstraint(
             "verdict IN ('관련', '무관')",
@@ -847,6 +886,7 @@ class RelevanceJudgment(Base):
         return (
             f"<RelevanceJudgment id={self.id} "
             f"canonical={self.canonical_project_id} user_id={self.user_id} "
+            f"organization_id={self.organization_id} "
             f"verdict={self.verdict!r}>"
         )
 
@@ -856,6 +896,11 @@ class RelevanceJudgmentHistory(Base):
 
     새 판정/내용 변경 시 `relevance_judgments` 의 row 를 이 테이블로 복사한다.
     이 테이블은 append-only 로 취급하며, 이관된 레코드는 수정하지 않는다.
+
+    organization_id 컬럼은 task 00085 에서 추가되었다 — `relevance_judgments` 의
+    동명 컬럼을 이관 시점에 그대로 복사하여 "이 사용자가 어떤 조직 입장으로 한
+    판정이었는지" 의 메타 정보를 이력에도 보존한다. content_changed reset 패턴은
+    row 단위로 모든 컬럼을 복사하므로 컬럼 추가만으로 자동 동작한다.
 
     archive_reason 허용값(app-level 상수): 'content_changed', 'user_overwrite',
     'admin_override'. DB CHECK 는 유연성 위해 설치하지 않는다.
@@ -885,6 +930,23 @@ class RelevanceJudgmentHistory(Base):
         ),
         nullable=False,
         doc="이관 시점의 사용자 PK.",
+    )
+
+    # organization_id: 이관 시점의 RelevanceJudgment.organization_id 값을 그대로 복사.
+    # NULL 이면 그 시점에 개인 판정이었음을 의미하고, 정수면 그 조직 입장이었음을
+    # 의미한다. 조직 삭제 시 CASCADE 로 그 조직 입장의 history row 도 함께 사라진다.
+    organization_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "organizations.id",
+            name="fk_relevance_judgment_history_organization_id",
+            ondelete="CASCADE",
+        ),
+        nullable=True,
+        index=True,
+        doc=(
+            "이관 시점의 판정 주체 조직 PK. NULL 이면 개인 판정 이력."
+        ),
     )
 
     verdict: Mapped[str] = mapped_column(

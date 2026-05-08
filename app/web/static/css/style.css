@@ -1668,6 +1668,238 @@ body.is-anonymous .announcement-title-link--read {
     background: #f3f4f6;
 }
 
+/* ---------- task 00085 — 조직 단위 관련성 판정 추가 스타일 ---------- */
+
+/* 비로그인 큰 배지 (button 대신 span). 클릭 불가 시각 + 커서. */
+.rj-badge--readonly {
+    cursor: not-allowed;
+    opacity: 0.85;
+}
+
+/* 카운터 (✅ N ❌ M ❓ K) — 큰 배지 옆 인라인. 폭 부족하면 wrap. */
+.rj-counter {
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
+    margin-left: 6px;
+    font-size: 11px;
+    color: #4b5563;
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
+.rj-counter__cell {
+    background: #f3f4f6;
+    padding: 1px 5px;
+    border-radius: 8px;
+    line-height: 1.4;
+}
+
+.rj-counter__cell--related { color: #047857; }
+.rj-counter__cell--unrelated { color: #6b7280; }
+.rj-counter__cell--unreviewed { color: #9ca3af; }
+
+/* 툴팁 안의 조직명 (mine_organization 행). */
+.rj-tooltip__org {
+    font-weight: 600;
+    color: #fcd34d;
+}
+
+/* 모달 — 판정 주체 라디오 그룹 (개인/조직). */
+.rj-modal__subject-group,
+.rj-modal__verdict-group {
+    border: none;
+    padding: 0;
+    margin: 0 0 14px;
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.rj-modal__subject-legend,
+.rj-modal__verdict-legend {
+    font-size: 13px;
+    color: #374151;
+    font-weight: 600;
+    margin-right: 6px;
+    padding: 0;
+}
+
+.rj-modal__subject-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    color: #1f2937;
+}
+
+.rj-modal__subject-label--disabled {
+    color: #9ca3af;
+    cursor: not-allowed;
+}
+
+.rj-modal__organization-row {
+    margin: 0 0 14px;
+    padding: 8px 12px;
+    background: #f9fafb;
+    border-radius: 4px;
+}
+
+.rj-modal__organization-label {
+    display: block;
+    font-size: 12px;
+    color: #4b5563;
+    margin-bottom: 4px;
+}
+
+.rj-modal__organization-select {
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    font-size: 14px;
+    color: #111827;
+    background: #ffffff;
+    box-sizing: border-box;
+}
+
+/* 상세 페이지 — 관련성 풀어 표시 섹션. */
+.rj-detail-section {
+    margin: 28px 0 24px;
+    padding: 16px 18px;
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+}
+
+.rj-detail-section__title {
+    margin: 0 0 14px;
+    font-size: 16px;
+    color: #111827;
+}
+
+.rj-detail-group {
+    margin-bottom: 18px;
+}
+
+.rj-detail-group:last-child {
+    margin-bottom: 0;
+}
+
+.rj-detail-group__title {
+    margin: 0 0 8px;
+    font-size: 13px;
+    color: #4b5563;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.rj-self-group {
+    border-left: 3px solid #2563eb;
+    padding-left: 10px;
+}
+
+.rj-self-group--anonymous {
+    border-left-color: #d1d5db;
+}
+
+.rj-others-group {
+    border-left: 3px solid #d1d5db;
+    padding-left: 10px;
+}
+
+.rj-history-group {
+    border-left: 3px solid #f59e0b;
+    padding-left: 10px;
+}
+
+/* 풀어 표시되는 각 행 — flex-row 로 컬럼들을 자연스럽게 정렬. */
+.rj-detail-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    align-items: baseline;
+    padding: 6px 0;
+    border-bottom: 1px dashed #e5e7eb;
+    font-size: 13px;
+}
+
+.rj-detail-row:last-child {
+    border-bottom: none;
+}
+
+.rj-detail-row__author {
+    font-weight: 600;
+    color: #111827;
+    flex: 0 0 auto;
+}
+
+.rj-detail-row__verdict {
+    flex: 0 0 auto;
+}
+
+.rj-detail-row__decided-at {
+    color: #6b7280;
+    font-size: 12px;
+    flex: 0 0 auto;
+}
+
+.rj-detail-row__reason {
+    color: #4b5563;
+    flex: 1 1 200px;
+}
+
+.rj-detail-row__icon {
+    flex: 0 0 auto;
+}
+
+.rj-detail-row__actions {
+    margin-left: auto;
+    display: inline-flex;
+    gap: 6px;
+}
+
+.rj-detail-empty {
+    margin: 0 0 8px;
+    color: #6b7280;
+    font-size: 13px;
+}
+
+/* 상세 페이지 본인 영역 버튼 (수정/삭제/새 추가). */
+.rj-detail-edit-btn,
+.rj-detail-delete-btn,
+.rj-detail-create-btn {
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+    background: #ffffff;
+    border: 1px solid #d1d5db;
+    color: #1f2937;
+}
+
+.rj-detail-edit-btn:hover,
+.rj-detail-create-btn:hover {
+    background: #f3f4f6;
+}
+
+.rj-detail-delete-btn {
+    color: #b91c1c;
+    border-color: #fecaca;
+}
+
+.rj-detail-delete-btn:hover {
+    background: #fee2e2;
+}
+
+.rj-detail-create-btn {
+    margin-top: 8px;
+    color: #1d4ed8;
+    border-color: #bfdbfe;
+}
+
 /* 상세 페이지: 제목 + 배지를 나란히 배치 */
 .detail-title-wrap {
     display: flex;

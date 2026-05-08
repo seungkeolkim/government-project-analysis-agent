@@ -10,10 +10,10 @@
     - page:                int
     - page_size:           int
     - total_pages:         int
-    - relevance_map:       dict[int, list[RelevanceJudgment]]
-    - history_map:         dict[int, list[HistoryWithUser]]
-    - my_relevance_map:    dict[int, RelevanceJudgment|None]
-    - read_id_set:         set[int]  (task 00037 — read/unread bold 분기용)
+    - relevance_summary_map:    dict[int, RelevanceSummary]   (task 00085 — canonical_id → 요약)
+    - relevance_summary_empty:  RelevanceSummary              (task 00085 — 미존재 default)
+    - user_organization_options: list[dict]                   (task 00085 — 모달 드롭다운)
+    - read_id_set:              set[int]  (task 00037 — read/unread bold 분기용)
 
   레이아웃:
     - 좌 사이드바: 폴더 트리 (SSR) + 추가/이름변경/삭제 CRUD (JS)
@@ -207,12 +207,13 @@
                         </td>
                         <td class="col-relevance">
                             {% set cid = item.canonical_project_id %}
+                            {% if cid %}
                             {{ relevance_badge(
                                 cid,
-                                relevance_map.get(cid, []),
-                                my_relevance_map.get(cid),
-                                history_map.get(cid, [])
+                                relevance_summary_map.get(cid, relevance_summary_empty),
+                                current_user
                             ) }}
+                            {% else %}-{% endif %}
                         </td>
                         <td class="col-fav-actions">
                             {# task 00037 #3 — 각 row 에 \"폴더 이동\" 버튼 추가.

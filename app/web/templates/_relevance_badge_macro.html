@@ -1,51 +1,105 @@
 {#
-  관련성 배지 + 툴팁 매크로 (Phase 3a / 00035-3).
+  관련성 배지 + 카운터 + hover 툴팁 매크로 (task 00085 — 조직 단위 확장).
 
   사용법:
     {% from "_relevance_badge_macro.html" import relevance_badge %}
-    {{ relevance_badge(cid, rj_list, my_rj, hist_list) }}
+    {{ relevance_badge(canonical_id, summary, current_user) }}
 
   인자:
-    cid       int              canonical_project_id
-    rj_list   list[RelevanceJudgment]   전체 사용자 현재 판정 목록 (user 관계 selectinload 됨)
-    my_rj     RelevanceJudgment|None    현재 로그인 사용자의 판정
-    hist_list list[HistoryWithUser]     판정 이력 (최신순, 최대 3건 표시)
+    canonical_id  int                          canonical_project_id (>0)
+    summary       RelevanceSummary             repository.get_relevance_summary_by_canonical_id_map 의 단일 항목.
+                                               빈 summary 면 RELEVANCE_SUMMARY_EMPTY 를 그대로 넘긴다.
+    current_user  User | None                  로그인 사용자 또는 None (비로그인).
+
+  표시 규칙 (사용자 modify 턴 결정 1·2·4 + 결정 3 비로그인 = 동일 노출):
+    - 큰 배지 verdict 우선순위:
+        1) 본인 개인 row (organization_id IS NULL & user_id == 본인)
+        2) 본인 조직 row 중 decided_at DESC 의 첫 항목 (mine_organization 첫 번째)
+        3) 미검토 (빈 배지)
+    - 카운터: ✅(관련) ❌(무관) ❓(미검토) — OTHERS row 만 카운트.
+      OTHERS = 본인 user_id 가 아닌 모든 row (다른 사용자의 개인 + 조직 모두).
+      카운터 자체가 0/0/0 이면 카운터 div 자체를 렌더하지 않는다 (시각적 노이즈 감소).
+    - hover 툴팁: 본인이 만든 조직 row (mine_organization) 를 모두 나열.
+      비어 있으면 툴팁을 렌더하지 않는다.
+    - 비로그인 (current_user is None): 큰 배지는 항상 미검토. mine_personal /
+      mine_organization 가 비어 있어 자동으로 그렇게 된다. 카운터는 동일하게
+      OTHERS 기준 (= 결정 3 — 비로그인 = 로그인 동일 노출).
+
+  클릭 동작:
+    - 로그인: 큰 배지가 <button> 으로 렌더되어 클릭 시 openRelevanceModal 호출.
+    - 비로그인: 큰 배지가 <span> 으로 렌더되어 클릭 무반응. relevance.js 가
+      data-* 만 읽으므로 button/span 차이는 JS 흐름에 영향 없음.
 
   주의:
     - <script> 블록 안에서 Jinja2 태그를 쓰지 않는다 (00031 선례).
     - 데이터는 모두 data-* 속성으로 JS 에 전달한다.
-    - onclick 에서 event.stopPropagation() 을 호출해 row 링크와 충돌을 방지한다.
+    - onclick 에서 event.stopPropagation() 으로 row 링크 충돌을 방지한다.
+    - mine_organization / others 는 frozen dataclass 의 tuple 이지만 Jinja2 의
+      |length / for 반복은 tuple 에서도 정상 동작한다.
 #}
-{% macro relevance_badge(cid, rj_list, my_rj, hist_list) %}
+{% macro relevance_badge(canonical_id, summary, current_user) %}
+{# 큰 배지에 표시할 verdict 와 어떤 row 가 채택됐는지 (개인/조직/미검토) 결정 #}
+{% set my_personal = summary.mine_personal %}
+{% set my_org_judgments = summary.mine_organization %}
+{% if my_personal %}
+    {% set primary_verdict = my_personal.judgment.verdict %}
+    {% set primary_origin = 'personal' %}
+    {% set primary_organization_id = '' %}
+{% elif my_org_judgments %}
+    {% set primary_verdict = my_org_judgments[0].judgment.verdict %}
+    {% set primary_origin = 'organization' %}
+    {% set primary_organization_id = my_org_judgments[0].judgment.organization_id %}
+{% else %}
+    {% set primary_verdict = '' %}
+    {% set primary_origin = 'none' %}
+    {% set primary_organization_id = '' %}
+{% endif %}
+
+{% set badge_class = 'rj-badge--' + ('related' if primary_verdict == '관련' else 'unrelated' if primary_verdict == '무관' else 'unreviewed') %}
+{% set badge_label = primary_verdict if primary_verdict else '미검토' %}
+
 <span class="rj-wrap"
-      data-canonical-id="{{ cid }}"
-      data-my-verdict="{{ my_rj.verdict if my_rj else '' }}"
-      data-my-reason="{{ my_rj.reason if my_rj and my_rj.reason else '' }}">
-    <button class="rj-badge rj-badge--{{ 'related' if my_rj and my_rj.verdict == '관련' else ('unrelated' if my_rj and my_rj.verdict == '무관' else 'unreviewed') }}"
+      data-canonical-id="{{ canonical_id }}"
+      data-my-verdict="{{ primary_verdict }}"
+      data-my-reason="{{ (my_personal.judgment.reason if my_personal else (my_org_judgments[0].judgment.reason if my_org_judgments else '')) or '' }}"
+      data-my-origin="{{ primary_origin }}"
+      data-my-organization-id="{{ primary_organization_id }}">
+    {% if current_user %}
+    <button class="rj-badge {{ badge_class }}"
             type="button"
             title="클릭하여 관련성 판정"
             onclick="openRelevanceModal(this.closest('.rj-wrap')); event.stopPropagation();">
-        {{ my_rj.verdict if my_rj else '미검토' }}
+        {{ badge_label }}
     </button>
-    {% if rj_list or hist_list %}
+    {% else %}
+    {# 비로그인은 클릭 불가능. 시각만 동일하게 보여주는 span. #}
+    <span class="rj-badge {{ badge_class }} rj-badge--readonly"
+          title="로그인 후 판정할 수 있습니다.">
+        {{ badge_label }}
+    </span>
+    {% endif %}
+
+    {# OTHERS 카운터 — 0/0/0 이면 렌더하지 않음. #}
+    {% set others_total = summary.others_count_related + summary.others_count_unrelated + summary.others_count_unreviewed %}
+    {% if others_total > 0 %}
+    <span class="rj-counter" aria-label="다른 사용자·조직의 평가 카운트">
+        <span class="rj-counter__cell rj-counter__cell--related">✅ {{ summary.others_count_related }}</span>
+        <span class="rj-counter__cell rj-counter__cell--unrelated">❌ {{ summary.others_count_unrelated }}</span>
+        <span class="rj-counter__cell rj-counter__cell--unreviewed">❓ {{ summary.others_count_unreviewed }}</span>
+    </span>
+    {% endif %}
+
+    {# hover 툴팁 — 본인이 만든 조직 row 가 있을 때만 노출 (조직명 + 판정). #}
+    {% if my_org_judgments %}
     <div class="rj-tooltip" role="tooltip">
-        {% if rj_list %}
-        <p class="rj-tooltip__heading">현재 판정</p>
-        {% for rj in rj_list %}
+        <p class="rj-tooltip__heading">본인 조직 입장 ({{ my_org_judgments | length }}건)</p>
+        {% for meta in my_org_judgments %}
         <div class="rj-tooltip__item">
-            <span class="rj-tooltip__user">{{ rj.user.username }}</span>:
-            <span class="{{ 'rj-verdict--related' if rj.verdict == '관련' else 'rj-verdict--unrelated' }}">{{ rj.verdict }}</span>{% if rj.reason %} <span class="rj-tooltip__reason">— {{ rj.reason }}</span>{% endif %}
+            <span class="rj-tooltip__org">{{ meta.organization_name or '(조직명 없음)' }}</span>:
+            <span class="rj-verdict--{{ 'related' if meta.judgment.verdict == '관련' else 'unrelated' }}">{{ meta.judgment.verdict }}</span>
+            {% if meta.judgment.reason %} <span class="rj-tooltip__reason">— {{ meta.judgment.reason }}</span>{% endif %}
         </div>
         {% endfor %}
-        {% endif %}
-        {% if hist_list %}
-        <p class="rj-tooltip__heading">이력</p>
-        {% for hw in hist_list[:3] %}
-        <div class="rj-tooltip__item">
-            <span class="rj-tooltip__icon">{% if hw.history.archive_reason == 'content_changed' %}📝{% elif hw.history.archive_reason == 'user_overwrite' %}✏️{% elif hw.history.archive_reason == 'admin_override' %}🔧{% else %}📋{% endif %}</span><span class="rj-tooltip__user">{{ hw.username }}</span>: {{ hw.history.verdict }}{% if hw.history.reason %} <span class="rj-tooltip__reason">— {{ hw.history.reason }}</span>{% endif %}
-        </div>
-        {% endfor %}
-        {% endif %}
     </div>
     {% endif %}
 </span>
