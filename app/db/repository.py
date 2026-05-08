@@ -529,20 +529,20 @@ class HistoryWithUser:
 
 @dataclass(frozen=True)
 class RelevanceJudgmentWithMeta:
-    """RelevanceJudgment + 작성자 username + 조직명 (개인 판정이면 None) 묶음.
+    """RelevanceJudgment + 작성자 username + 조직명 묶음.
 
     UI / API 노출 시 RelevanceJudgment row 자체와 사람이 읽을 수 있는 이름
     (작성자 / 조직명) 을 한 묶음으로 제공한다. RelevanceJudgment 에
     ``organization`` relationship 을 두지 않고 JOIN 결과를 dataclass 로 묶는
     HistoryWithUser 와 동일 패턴.
 
-    task 00085 — 목록/상세 페이지에서 본인 / 본인 조직 / OTHERS 판정을 풀어
-    표시하기 위해 도입한 보조 자료 구조.
+    task 00085 — 목록/상세 페이지에서 본인 조직 / OTHERS 판정을 풀어 표시하기 위해
+    도입한 보조 자료 구조.
     """
 
     judgment: RelevanceJudgment
     username: str
-    organization_name: str | None  # None = organization_id IS NULL = 개인 판정
+    organization_name: str | None  # JOIN 실패 시 None 가능; 정상 시 조직명
 
 
 @dataclass(frozen=True)
@@ -552,26 +552,21 @@ class RelevanceSummary:
     task 00085 — 목록 셀의 본인 큰 배지 / hover 툴팁 / 전체 카운터 / 상세
     페이지 행 풀어 표시 렌더링에 필요한 데이터를 한 묶음으로 제공한다.
 
-    user_id=None 인 비로그인 호출에서는 mine_personal / mine_organization 가
-    항상 비어 있고, OTHERS 영역에 모든 row 가 들어가며 카운터도 모든 row 기준이다
+    task 00093 — 개인 판정 슬롯(mine_personal) 을 제거했다. 이제 조직 판정만 존재한다.
+
+    user_id=None 인 비로그인 호출에서는 mine_organization 가 항상 비어 있고,
+    OTHERS 영역에 모든 row 가 들어가며 카운터도 모든 row 기준이다
     (사용자 modify 턴 결정 3 — 비로그인 = 로그인 동일 노출).
 
     Attributes:
-        mine_personal: 본인 개인 판정 row (organization_id IS NULL,
-            user_id == 호출자). NULL UNIQUE semantics 상 이론상 여러 개일 수 있으나
-            set_relevance_judgment 흐름이 1 개를 보장하며, 본 헬퍼는
-            decided_at DESC 의 첫 row 만 채택한다. 없으면 None.
-        mine_organization: 본인이 작성한 조직 판정 row 들 (organization_id IS NOT NULL,
-            user_id == 호출자), decided_at DESC 정렬. 비어 있을 수 있다.
-        others: 본인이 작성하지 않은 모든 row (다른 사용자의 개인 + 조직),
+        mine_organization: 본인이 작성한 조직 판정 row 들 (user_id == 호출자),
+            decided_at DESC 정렬. 비어 있을 수 있다.
+        others: 본인이 작성하지 않은 모든 row (다른 사용자의 조직 판정),
             decided_at DESC 정렬.
-        count_related: 본인 + 타인 + 모든 조직 row 중 verdict='관련' 인 총 수.
-            user_id=None(비로그인) 시 mine_* 가 비어 있으므로 others 카운트와 동일해진다.
-        count_unrelated: 본인 + 타인 + 모든 조직 row 중 verdict='무관' 인 총 수.
-            user_id=None(비로그인) 시 mine_* 가 비어 있으므로 others 카운트와 동일해진다.
+        count_related: 본인 + 타인 모든 row 중 verdict='관련' 인 총 수.
+        count_unrelated: 본인 + 타인 모든 row 중 verdict='무관' 인 총 수.
     """
 
-    mine_personal: RelevanceJudgmentWithMeta | None
     mine_organization: tuple[RelevanceJudgmentWithMeta, ...]
     others: tuple[RelevanceJudgmentWithMeta, ...]
     count_related: int
@@ -581,7 +576,6 @@ class RelevanceSummary:
 # 기본값(빈 요약) — 호출자가 ``summary_map.get(canonical_id, RELEVANCE_SUMMARY_EMPTY)``
 # 패턴으로 미존재 canonical 을 안전하게 처리할 수 있도록 모듈 상수로 노출한다.
 RELEVANCE_SUMMARY_EMPTY: RelevanceSummary = RelevanceSummary(
-    mine_personal=None,
     mine_organization=(),
     others=(),
     count_related=0,
@@ -1939,39 +1933,27 @@ def get_relevance_judgment(
     *,
     canonical_project_id: int,
     user_id: int,
-    organization_id: int | None = None,
+    organization_id: int,
 ) -> RelevanceJudgment | None:
     """특정 (canonical, user, organization) 트리플에 대한 현재 판정을 반환한다.
 
-    organization_id 의 의미 (task 00085 결정 1 — 단일 UNIQUE):
-        - None (기본값): organization_id IS NULL 인 본인 개인 판정 row.
-        - 정수: 그 조직 입장으로 만든 row (해당 사용자가 작성자).
-
-    NULL 비교 함정 (SQL 의 ``= NULL`` 은 항상 NULL/false) 을 회피하기 위해
-    organization_id IS NULL 분기를 ORM ``is_(None)`` 으로 명시 분기한다.
+    task 00093 — organization_id 가 NOT NULL 로 변경되어 개인 판정 슬롯이 제거됐다.
+    organization_id 는 항상 정수(조직 PK)여야 한다.
 
     Args:
         session: 호출자 세션.
         canonical_project_id: 대상 CanonicalProject PK.
         user_id: 판정 작성자 User PK.
-        organization_id: 조직 PK. None 이면 개인 판정.
+        organization_id: 조직 PK (필수).
 
     Returns:
-        매칭되는 RelevanceJudgment 또는 None. NULL UNIQUE semantics 상 동일 트리플
-        row 가 이론상 여러 개일 수 있으나 set_relevance_judgment 흐름이 1 개를
-        보장하므로 ``scalar_one_or_none()`` 사용. 그래도 다중 row 가 발견되면
-        SQLAlchemy 가 ``MultipleResultsFound`` 를 던져 데이터 이상을 즉시 노출한다.
+        매칭되는 RelevanceJudgment 또는 None.
     """
-    organization_id_clause = (
-        RelevanceJudgment.organization_id.is_(None)
-        if organization_id is None
-        else RelevanceJudgment.organization_id == organization_id
-    )
     return session.execute(
         select(RelevanceJudgment).where(
             RelevanceJudgment.canonical_project_id == canonical_project_id,
             RelevanceJudgment.user_id == user_id,
-            organization_id_clause,
+            RelevanceJudgment.organization_id == organization_id,
         )
     ).scalar_one_or_none()
 
@@ -2052,25 +2034,21 @@ def get_relevance_summary_by_canonical_id_map(
     조직 row hover 툴팁 / OTHERS 카운터 / 상세 페이지 행 풀어 표시에 필요한
     모든 데이터를 받을 수 있도록 도입했다.
 
-    포함 정보 (canonical 별 ``RelevanceSummary``):
-        - mine_personal: 본인 개인 row (organization_id IS NULL, user_id == 호출자).
-            NULL UNIQUE semantics 상 이론상 여러 개일 수 있으나 1 개여야 정상이며,
-            본 헬퍼는 decided_at DESC 의 첫 row 만 채택한다.
-        - mine_organization: 본인이 만든 조직 row, decided_at DESC.
-        - others: 본인이 작성하지 않은 모든 row (다른 사용자의 개인 + 조직),
-            decided_at DESC.
-        - count_*: 본인 + 타인 + 모든 조직 row 의 verdict 별 총 카운트 (관련 / 무관).
+    task 00093 — 개인 판정 슬롯(mine_personal) 제거. 모든 판정은 조직 판정이다.
 
-    user_id=None (비로그인) 일 때는 mine_personal=None, mine_organization=(),
-    others 에 해당 canonical 의 모든 row 가 들어가고 카운터도 전체 row 기준이다.
+    포함 정보 (canonical 별 ``RelevanceSummary``):
+        - mine_organization: 본인이 만든 조직 row, decided_at DESC.
+        - others: 본인이 작성하지 않은 모든 row, decided_at DESC.
+        - count_*: 본인 + 타인 모든 row 의 verdict 별 총 카운트 (관련 / 무관).
+
+    user_id=None (비로그인) 일 때는 mine_organization=(), others 에 해당 canonical
+    의 모든 row 가 들어가고 카운터도 전체 row 기준이다.
     사용자 modify 턴 결정 3 (비로그인 = 로그인 동일 노출) 이 적용된다.
 
     N+1 방지:
         canonical_ids 가 비어 있지 않으면 단일 SELECT 로 모든 row + 작성자명 +
-        조직명을 LEFT JOIN 한다. organization 이 없는 (개인) row 는 LEFT JOIN
-        결과로 organization_name 이 None 으로 들어온다. canonical 별 버킷팅 +
-        mine/others 분류 + verdict 카운트는 Python 레벨에서 수행한다 — 추가 쿼리
-        없음.
+        조직명을 JOIN 한다. canonical 별 버킷팅 + mine/others 분류 + verdict 카운트는
+        Python 레벨에서 수행한다 — 추가 쿼리 없음.
 
     Args:
         session: 호출자 세션.
@@ -2088,8 +2066,8 @@ def get_relevance_summary_by_canonical_id_map(
         return {}
 
     # decided_at DESC 정렬을 SQL 단에서 수행해 Python 버킷도 같은 순서를 유지하게 한다.
-    # Organization 은 LEFT JOIN — 개인 판정 row (organization_id IS NULL) 는
-    # Organization.name 이 NULL 로 들어온다.
+    # organization_id 는 NOT NULL 이므로 INNER JOIN 으로 조직명을 가져온다.
+    # (organization_id IS NULL 인 개인 판정 row 는 task 00093 에서 삭제됨)
     rows = session.execute(
         select(
             RelevanceJudgment,
@@ -2102,10 +2080,7 @@ def get_relevance_summary_by_canonical_id_map(
         .order_by(RelevanceJudgment.decided_at.desc())
     ).all()
 
-    # canonical 별 (mine_personal_candidates, mine_organization_list, others_list)
-    # 누적 버킷. mine_personal 은 1 개여야 정상이지만 NULL distinct 로 다중일 수
-    # 있어 list 에 누적한 뒤 마지막에 첫 항목(=가장 최근)만 채택한다.
-    mine_personal_candidates: dict[int, list[RelevanceJudgmentWithMeta]] = {}
+    # canonical 별 (mine_organization_list, others_list) 누적 버킷.
     mine_organization_buckets: dict[int, list[RelevanceJudgmentWithMeta]] = {}
     others_buckets: dict[int, list[RelevanceJudgmentWithMeta]] = {}
 
@@ -2116,45 +2091,25 @@ def get_relevance_summary_by_canonical_id_map(
             organization_name=organization_name,
         )
         canonical_id = judgment.canonical_project_id
-
         is_mine = user_id is not None and judgment.user_id == user_id
 
         if is_mine:
-            if judgment.organization_id is None:
-                mine_personal_candidates.setdefault(canonical_id, []).append(meta)
-            else:
-                mine_organization_buckets.setdefault(canonical_id, []).append(meta)
+            mine_organization_buckets.setdefault(canonical_id, []).append(meta)
         else:
             others_buckets.setdefault(canonical_id, []).append(meta)
 
     # canonical 별 RelevanceSummary 조립. row 가 있는 canonical 만 결과 dict 에 넣는다.
-    canonical_ids_with_rows = (
-        set(mine_personal_candidates)
-        | set(mine_organization_buckets)
-        | set(others_buckets)
-    )
+    canonical_ids_with_rows = set(mine_organization_buckets) | set(others_buckets)
     summary_map: dict[int, RelevanceSummary] = {}
     for canonical_id in canonical_ids_with_rows:
-        personal_candidates = mine_personal_candidates.get(canonical_id, [])
-        # decided_at DESC 정렬을 따랐으므로 첫 항목이 가장 최근. 다중 row 는
-        # 데이터 이상이지만 application 흐름이 1 개를 보장하므로 일반적으로 0 또는 1.
-        mine_personal_meta = personal_candidates[0] if personal_candidates else None
-
         mine_organization_metas = tuple(mine_organization_buckets.get(canonical_id, []))
         others_metas = tuple(others_buckets.get(canonical_id, []))
 
-        # 전체 카운터 — 본인(개인 + 조직) + others 모두 포함해 verdict 별 집계.
-        # mine_personal 은 None 일 수 있으므로 빈 tuple 로 치환해 안전하게 합산한다.
-        all_metas = (
-            ((mine_personal_meta,) if mine_personal_meta is not None else ())
-            + mine_organization_metas
-            + others_metas
-        )
+        all_metas = mine_organization_metas + others_metas
         count_related = sum(1 for m in all_metas if m.judgment.verdict == RELEVANCE_VERDICT_RELATED)
         count_unrelated = sum(1 for m in all_metas if m.judgment.verdict == RELEVANCE_VERDICT_UNRELATED)
 
         summary_map[canonical_id] = RelevanceSummary(
-            mine_personal=mine_personal_meta,
             mine_organization=mine_organization_metas,
             others=others_metas,
             count_related=count_related,
@@ -2170,35 +2125,30 @@ def set_relevance_judgment(
     canonical_project_id: int,
     user_id: int,
     verdict: str,
+    organization_id: int,
     reason: str | None = None,
-    organization_id: int | None = None,
     now: datetime | None = None,
 ) -> RelevanceJudgment:
     """판정을 저장한다. 기존 판정이 있으면 History 이관 후 새 판정으로 교체한다.
 
+    task 00093 — organization_id 가 NOT NULL 로 변경되어 필수 인자로 바뀌었다.
+    개인 판정 슬롯(organization_id=None) 은 더 이상 허용하지 않는다.
+
     매칭 대상 키 (task 00085 결정 1 — 단일 UNIQUE):
         (canonical_project_id, user_id, organization_id) 트리플.
-        organization_id 가 None 이면 본인 개인 판정 슬롯, 정수면 그 조직 입장의
-        판정 슬롯이다. 같은 사용자가 같은 canonical 에 대해 organization_id 가
-        서로 다른 row 를 동시에 가질 수 있다 (개인 + 조직 A + 조직 B …). 본
-        함수는 지정된 트리플의 슬롯만 다룬다 — 다른 트리플 row 는 건드리지 않는다.
+        본 함수는 지정된 트리플의 슬롯만 다룬다 — 다른 트리플 row 는 건드리지 않는다.
 
     트랜잭션 순서:
         ``기존 트리플 row 조회 → 있으면 History INSERT → flush → 기존 DELETE
-        → flush → 신규 INSERT`` 순서를 유지한다. 순서를 바꾸면
-        uq_relevance_judgments_canonical_user_org UNIQUE 제약 위반이 발생한다.
-        (NULL distinct semantics 가 같은 NULL row 를 막지는 않지만, 1-슬롯
-        보장은 application 레벨에서 이 흐름이 담당한다.)
+        → flush → 신규 INSERT`` 순서를 유지한다.
 
     Args:
         session: 호출자 세션.
         canonical_project_id: 판정 대상 CanonicalProject PK.
         user_id: 판정 주체 User PK.
         verdict: RELEVANCE_ALLOWED_VERDICTS 중 하나.
+        organization_id: 조직 PK (필수). 본인 소속 조직 검증은 호출자(라우터) 책임.
         reason: 판정 사유 (선택).
-        organization_id: 조직 PK. None 이면 개인 판정 슬롯, 정수면 그 조직 입장의
-            슬롯. 본인 소속 조직 검증은 호출자(라우터) 책임 — repository 는
-            트리플의 슬롯만 처리한다.
         now: 타임스탬프 오버라이드 (테스트용). None 이면 datetime.now(UTC).
 
     Returns:
@@ -2257,21 +2207,22 @@ def delete_relevance_judgment(
     *,
     canonical_project_id: int,
     user_id: int,
-    organization_id: int | None = None,
+    organization_id: int,
     now: datetime | None = None,
 ) -> bool:
     """판정을 삭제한다. 삭제 전 History 이관(user_overwrite).
 
+    task 00093 — organization_id 가 NOT NULL 로 변경되어 필수 인자로 바뀌었다.
+
     매칭 대상 키 (task 00085 결정 1 — 단일 UNIQUE):
         (canonical_project_id, user_id, organization_id) 트리플.
-        organization_id 가 None 이면 본인 개인 판정, 정수면 그 조직 입장 row 만
-        삭제 대상이며, 같은 (canonical, user) 의 다른 트리플 row 는 보존된다.
+        같은 (canonical, user) 의 다른 트리플 row 는 보존된다.
 
     Args:
         session: 호출자 세션.
         canonical_project_id: 판정 대상 CanonicalProject PK.
         user_id: 판정 주체 User PK.
-        organization_id: 조직 PK. None 이면 개인 판정 row 가 삭제 대상.
+        organization_id: 조직 PK (필수).
         now: 타임스탬프 오버라이드 (테스트용).
 
     Returns:

@@ -555,8 +555,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     # Phase 1b — base.html 상단 네비 + 목록 bold/normal 분기에 필요.
                     "current_user": current_user,
                     "read_id_set": read_id_set,
-                    # task 00085 — 관련성 요약 batch (mine_personal / mine_organization /
-                    # others / 카운터). 비로그인 / 로그인 모두 동일 키로 주입.
+                    # task 00085 — 관련성 요약 batch (mine_organization / others / 카운터).
+                    # 비로그인 / 로그인 모두 동일 키로 주입.
                     "relevance_summary_map": relevance_summary_map,
                     "relevance_summary_empty": RELEVANCE_SUMMARY_EMPTY,
                     "user_organization_options": user_organization_options,
@@ -624,8 +624,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 favorite_entry_map = {}
 
             # task 00085 — 관련성 summary batch 조회 (비로그인도 동일 노출).
-            # 페이지당 추가 쿼리 1 개로 mine_personal / mine_organization / others /
-            # 카운터를 모두 받는다.
+            # 페이지당 추가 쿼리 1 개로 mine_organization / others / 카운터를 모두 받는다.
             canonical_ids = list({
                 ann.canonical_group_id
                 for ann, _ in ann_with_sizes

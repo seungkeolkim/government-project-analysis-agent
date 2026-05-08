@@ -1714,8 +1714,7 @@ body.is-anonymous .announcement-title-link--read {
     color: #fcd34d;
 }
 
-/* 모달 — 판정 주체 라디오 그룹 (개인/조직). */
-.rj-modal__subject-group,
+/* 모달 — verdict 라디오 그룹. */
 .rj-modal__verdict-group {
     border: none;
     padding: 0;
@@ -1726,7 +1725,6 @@ body.is-anonymous .announcement-title-link--read {
     flex-wrap: wrap;
 }
 
-.rj-modal__subject-legend,
 .rj-modal__verdict-legend {
     font-size: 13px;
     color: #374151;
@@ -1735,18 +1733,14 @@ body.is-anonymous .announcement-title-link--read {
     padding: 0;
 }
 
-.rj-modal__subject-label {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    cursor: pointer;
-    font-size: 14px;
-    color: #1f2937;
-}
-
-.rj-modal__subject-label--disabled {
-    color: #9ca3af;
-    cursor: not-allowed;
+/* 무소속 사용자 안내 문구 (판정 작성 불가 상태). */
+.rj-modal__no-org-notice {
+    font-size: 13px;
+    color: #6b7280;
+    margin: 0 0 14px;
+    padding: 8px 12px;
+    background: #f9fafb;
+    border-radius: 4px;
 }
 
 .rj-modal__organization-row {

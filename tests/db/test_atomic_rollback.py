@@ -18,6 +18,7 @@ from app.db.models import (
     Announcement,
     AnnouncementStatus,
     AnnouncementUserState,
+    Organization,
     RelevanceJudgment,
     RelevanceJudgmentHistory,
     User,
@@ -72,6 +73,10 @@ def test_reset_exception_rolls_back_upsert(
         original_id = first.announcement.id
         canonical_id = first.announcement.canonical_group_id
 
+        org = Organization(name="atomic-org")
+        setup_session.add(org)
+        setup_session.flush()
+
         setup_session.add(
             AnnouncementUserState(
                 announcement_id=original_id,
@@ -84,6 +89,7 @@ def test_reset_exception_rolls_back_upsert(
             RelevanceJudgment(
                 canonical_project_id=canonical_id,
                 user_id=user_id,
+                organization_id=org.id,
                 verdict="관련",
                 reason="atomic test",
                 decided_at=datetime.now(tz=UTC),

@@ -11,13 +11,15 @@
     - 검증 #9: hover 툴팁에 본인 소속 조직 평가 (조직명 + 판정) 가 노출되는지.
     - 검증 #10: 비로그인 시 카운터·OTHERS 정보는 그대로, 본인 영역만 비활성 (readonly
       span / 본인 영역 안내 문구).
-    - 검증 #11: 상세 페이지에 mine_personal / mine_organization / others / history 가
+    - 검증 #11: 상세 페이지에 mine_organization / others / history 가
       모두 풀어 표시되고 본인 row 에만 [수정][삭제] 버튼이 노출되는지.
     - 검증 #12: 입력 모달의 '판정 주체' 라디오 — 무소속/단일/복수 조직 케이스 마크업.
     - 검증 #14 후속: 목록 페이지 GET 의 추가 쿼리가 1~2 개로 고정되는지 (N+1 ceiling
-      회귀 차단). repository 단위 테스트 (test_summary_n_plus_1_avoidance_single_query)
-      는 헬퍼 1 회 SELECT 만 검증하지만, 본 테스트는 라우트·템플릿·읽음·즐겨찾기 헬퍼까지
-      포함한 페이지 GET 전체 흐름의 N+1 회귀를 더 넓은 ceiling 으로 차단한다.
+      회귀 차단).
+
+task 00093 — 개인 판정 슬롯 제거:
+    - 개인 판정(organization_id IS NULL) 관련 시나리오는 모두 제거.
+    - 모든 판정은 조직 판정으로 대체.
 """
 
 from __future__ import annotations
@@ -117,9 +119,6 @@ def test_other_member_organization_row_is_independent_on_update(
     안 1 단일 UNIQUE (canonical, user, organization_id) 가 user_id 를 키에 포함하므로
     같은 (canonical, organization_id) 라도 user_id 가 다르면 별개 row. 본인이 POST 하면
     본인 트리플의 신규 row 만 INSERT 되고 동료 row 는 그대로 유지된다.
-
-    사용자 원문 검증 #6 의 의도 — '다른 사용자 row 를 본인이 못 지움' — 가 확장되어,
-    수정 (POST) 도 같은 의미로 동료 row 를 건드리지 않음을 보장한다.
     """
     me_id = _register_and_login(client, "integ_me")
     seeded = _seed_canonical_with_announcement(
@@ -166,8 +165,6 @@ def test_other_member_organization_row_is_independent_on_update(
             ).order_by(RelevanceJudgment.user_id.asc())
         ).scalars().all()
         assert len(rows) == 2
-        verdicts = sorted((row.user_id, row.verdict) for row in rows)
-        # 작은 user_id (me) 가 먼저, 동료 row 는 verdict='관련' 그대로.
         peer_row = next(r for r in rows if r.user_id != me_id)
         my_row = next(r for r in rows if r.user_id == me_id)
         assert peer_row.verdict == "관련"
@@ -186,7 +183,7 @@ def test_list_cell_renders_my_badge_counter_and_organization_tooltip(
 ) -> None:
     """로그인 사용자의 목록 페이지에서 큰 배지·카운터·hover 툴팁 마크업이 모두 노출된다.
 
-    검증 #8: 본인 큰 배지 (개인 우선) + 카운터.
+    검증 #8: 본인 큰 배지 (조직 판정) + 카운터.
     검증 #9: hover 툴팁에 본인 소속 조직 평가 (조직명 + 판정).
     """
     me_id = _register_and_login(client, "integ_render_me")
@@ -196,31 +193,18 @@ def test_list_cell_renders_my_badge_counter_and_organization_tooltip(
     canonical_id = seeded["canonical_id"]
     org_id = _create_organization_with_member("렌더링-조직", me_id)
 
-    # 본인: 개인 + 본인이 만든 조직 row 모두 보유 — 큰 배지는 개인 우선 (관련).
+    # 본인: 조직 row 1 개 (관련).
     client.post(
         f"/canonical/{canonical_id}/relevance",
-        json={"verdict": "관련", "reason": "내 개인", "organization_id": None},
-    )
-    client.post(
-        f"/canonical/{canonical_id}/relevance",
-        json={"verdict": "무관", "reason": "내 조직", "organization_id": org_id},
+        json={"verdict": "관련", "reason": "내 조직", "organization_id": org_id},
     )
 
-    # OTHERS 시드 — 다른 사용자가 개인/조직 row 작성 (카운터에 들어감).
+    # OTHERS 시드 — 다른 사용자가 조직 row 작성 (카운터에 들어감).
     with session_scope() as session:
         peer = User(username="integ_render_peer", password_hash="dummy")
         session.add(peer)
         session.flush()
         session.add(UserOrganization(user_id=peer.id, organization_id=org_id))
-        session.add(
-            RelevanceJudgment(
-                canonical_project_id=canonical_id,
-                user_id=peer.id,
-                organization_id=None,
-                verdict="관련",
-                reason="동료 개인",
-            )
-        )
         session.add(
             RelevanceJudgment(
                 canonical_project_id=canonical_id,
@@ -235,14 +219,13 @@ def test_list_cell_renders_my_badge_counter_and_organization_tooltip(
     assert response.status_code == 200
     html = response.text
 
-    # 본인 큰 배지 — 개인 우선이므로 'related' (관련).
-    assert "rj-badge--related" in html, "본인 개인 row 의 verdict 가 큰 배지로 노출돼야 한다."
-    # 카운터 (OTHERS = 동료 2 건 — 관련 1, 무관 1).
+    # 본인 큰 배지 — 조직 판정(관련).
+    assert "rj-badge--related" in html, "본인 조직 판정의 verdict 가 큰 배지로 노출돼야 한다."
+    # 카운터 (관련 1 + 무관 1).
     assert "rj-counter" in html
-    # ✅ 1 ❌ 1 표기를 단언 — 공백 차이를 허용하기 위해 핵심 토큰만 검증.
     assert "✅ 1" in html
     assert "❌ 1" in html
-    # hover 툴팁에 본인 조직명 + verdict — \"렌더링-조직\" 이 mine_organization 영역으로.
+    # hover 툴팁에 본인 조직명 — mine_organization 영역으로.
     assert "렌더링-조직" in html, "hover 툴팁에 본인 조직명이 노출돼야 한다."
     assert "rj-tooltip" in html
 
@@ -263,11 +246,14 @@ def test_list_cell_anonymous_shows_counter_and_disables_owner_area(
         author = User(username="integ_anon_author", password_hash="dummy")
         session.add(author)
         session.flush()
+        org = Organization(name="anon-조직")
+        session.add(org)
+        session.flush()
         session.add(
             RelevanceJudgment(
                 canonical_project_id=canonical_id,
                 user_id=author.id,
-                organization_id=None,
+                organization_id=org.id,
                 verdict="관련",
                 reason="OTHERS",
             )
@@ -300,16 +286,19 @@ def test_tooltip_shows_others_when_no_personal_judgment(
     )
     canonical_id = seeded["canonical_id"]
 
-    # OTHERS 시드 — 다른 사용자가 개인 row 작성 (본인은 판정 없음).
+    # OTHERS 시드 — 다른 사용자가 조직 row 작성 (본인은 판정 없음).
     with session_scope() as session:
         other_user = User(username="integ_tooltip_other_user", password_hash="dummy")
         session.add(other_user)
+        session.flush()
+        org = Organization(name="tooltip-조직")
+        session.add(org)
         session.flush()
         session.add(
             RelevanceJudgment(
                 canonical_project_id=canonical_id,
                 user_id=other_user.id,
-                organization_id=None,
+                organization_id=org.id,
                 verdict="관련",
                 reason="다른 사용자 사유",
             )
@@ -337,8 +326,6 @@ def test_detail_page_unfolds_rows_and_owner_actions(
 ) -> None:
     """상세 페이지에서 mine / others / history 가 모두 풀어 표시되고 본인 row 에만
     [수정][삭제] 버튼이 노출된다.
-
-    검증 #11 + 결정 3 (비로그인 = 동일 노출) 의 본인 영역만 비활성 의미를 함께 확인.
     """
     me_id = _register_and_login(client, "integ_detail_me")
     seeded = _seed_canonical_with_announcement(
@@ -346,23 +333,25 @@ def test_detail_page_unfolds_rows_and_owner_actions(
     )
     canonical_id = seeded["canonical_id"]
     announcement_id = seeded["announcement_id"]
+    org_id = _create_organization_with_member("상세-조직", me_id)
 
-    # 본인 — 개인 row 1 개. OTHERS — 다른 사용자 1 명이 개인 row 1 개.
+    # 본인 — 조직 row 1 개. OTHERS — 다른 사용자 1 명이 조직 row 1 개.
     client.post(
         f"/canonical/{canonical_id}/relevance",
-        json={"verdict": "관련", "reason": "내 개인 row"},
+        json={"verdict": "관련", "reason": "내 조직 row", "organization_id": org_id},
     )
     with session_scope() as session:
         peer = User(username="integ_detail_peer", password_hash="dummy")
         session.add(peer)
         session.flush()
+        session.add(UserOrganization(user_id=peer.id, organization_id=org_id))
         session.add(
             RelevanceJudgment(
                 canonical_project_id=canonical_id,
                 user_id=peer.id,
-                organization_id=None,
+                organization_id=org_id,
                 verdict="무관",
-                reason="동료 개인 row",
+                reason="동료 조직 row",
             )
         )
 
@@ -375,18 +364,17 @@ def test_detail_page_unfolds_rows_and_owner_actions(
     assert "rj-others-group" in html
     assert "rj-detail-edit-btn" in html, "본인 row 에 [수정] 버튼 마크업이 있어야 한다."
     assert "rj-detail-delete-btn" in html, "본인 row 에 [삭제] 버튼 마크업이 있어야 한다."
-    assert "내 개인 row" in html
+    assert "내 조직 row" in html
     assert "integ_detail_peer" in html, "OTHERS 행에 동료 username 이 노출돼야 한다."
-    assert "동료 개인 row" in html
+    assert "동료 조직 row" in html
 
     # 비로그인 클라이언트 (logout) — 본인 영역 안내문 + OTHERS 동일 노출 + 본인 액션 버튼 없음.
-    # /auth/logout 은 POST 라우트 (GET 으로 호출하면 405 이라 세션이 그대로 남는다).
     client.post("/auth/logout", follow_redirects=False)
     anon_response = client.get(f"/announcements/{announcement_id}")
     assert anon_response.status_code == 200
     anon_html = anon_response.text
     assert "rj-others-group" in anon_html
-    assert "동료 개인 row" in anon_html
+    assert "동료 조직 row" in anon_html
     assert "로그인 후" in anon_html, "비로그인 본인 영역 안내문이 표시돼야 한다."
     assert "rj-detail-edit-btn" not in anon_html, "비로그인은 본인 액션 버튼이 없어야 한다."
     assert "rj-detail-delete-btn" not in anon_html
@@ -400,34 +388,35 @@ def test_detail_page_unfolds_rows_and_owner_actions(
 def test_modal_radio_unaffiliated_user_disables_organization_option(
     client: TestClient, test_engine: Engine
 ) -> None:
-    """무소속 사용자: '조직' 라디오 자체가 disabled 처리되고 드롭다운 행은 렌더되지 않는다."""
+    """무소속 사용자: 드롭다운 행 미렌더, 안내 문구(rj-modal__no-org-notice) 표시."""
     _register_and_login(client, "integ_modal_unaffiliated")
     response = client.get("/")
     assert response.status_code == 200
     html = response.text
-    # 무소속이면 user_organization_options 가 빈 리스트 → 라디오 disabled + 드롭다운 행 미렌더.
-    assert "rj-modal__subject-group" in html
-    assert "rj-modal__subject-label--disabled" in html
-    # 무소속 사용자에게 드롭다운 행 자체가 존재하지 않아야 한다 (modal 의 {% if has_any_organization %}).
+    # 무소속이면 조직 선택 행 자체가 없고 안내 문구만 표시 (task 00093).
     assert "rj-modal-organization-row" not in html
+    assert "rj-modal__no-org-notice" in html
+    # 판정 주체 라디오 UI 는 task 00093 에서 제거됨.
+    assert "rj-modal__subject-group" not in html
 
 
 def test_modal_radio_single_organization_uses_inline_label(
     client: TestClient, test_engine: Engine
 ) -> None:
-    """단일 조직 소속: 라디오 라벨에 조직명이 직접 노출되고 드롭다운 select 는 없다."""
+    """단일 조직 소속: 조직명이 레이블로 직접 노출되고 드롭다운 select 는 없다."""
     me_id = _register_and_login(client, "integ_modal_single")
     _create_organization_with_member("단일조직-라벨", me_id)
     response = client.get("/")
     assert response.status_code == 200
     html = response.text
-    assert "rj-modal__subject-group" in html
-    # 단일 조직 라벨은 \"조직 판정 (단일조직-라벨)\" 형태로 직접 노출.
+    # 단일 조직 라벨에 조직명이 직접 노출.
     assert "단일조직-라벨" in html
     assert "rj-modal-organization-row" in html
     assert 'data-modal-org-mode="single"' in html
     # 단일 모드에서는 select 요소가 없다 (자동 채움).
     assert 'id="rj-modal-organization"' not in html
+    # 판정 주체 라디오 UI 는 task 00093 에서 제거됨.
+    assert "rj-modal__subject-group" not in html
 
 
 def test_modal_radio_multiple_organizations_renders_dropdown(
@@ -440,12 +429,13 @@ def test_modal_radio_multiple_organizations_renders_dropdown(
     response = client.get("/")
     assert response.status_code == 200
     html = response.text
-    assert "rj-modal__subject-group" in html
     assert "rj-modal-organization-row" in html
     assert 'data-modal-org-mode="multiple"' in html
     assert 'id="rj-modal-organization"' in html, "복수 모드에서는 select 요소가 렌더돼야 한다."
     assert "멀티-조직-A" in html
     assert "멀티-조직-B" in html
+    # 판정 주체 라디오 UI 는 task 00093 에서 제거됨.
+    assert "rj-modal__subject-group" not in html
 
 
 # ---------------------------------------------------------------------------
@@ -491,19 +481,14 @@ def test_list_page_get_query_count_within_ceiling(
 ) -> None:
     """목록 페이지 GET 에서 발행되는 SELECT 수가 합리적인 ceiling 안에 머무른다.
 
-    repository 단위 테스트는 summary 헬퍼 자체가 1 회 SELECT 임을 검증하지만, 본 테스트는
-    라우트·템플릿·사용자 라벨링·즐겨찾기 헬퍼까지 포함한 페이지 GET 전체 흐름의 N+1 회귀를
-    더 넓은 ceiling 으로 차단한다.
-
     공고 5 건 vs 10 건의 SELECT 수 차이를 측정해, 공고 수에 비례해 SELECT 가 늘지 않는지
-    (= 페이지 row 수에 비례한 N+1 회귀가 없는지) 를 검증한다 — 절대 수치는 라우트의
-    구조 변화에 따라 변할 수 있어 차이 기반이 더 안전.
+    (= 페이지 row 수에 비례한 N+1 회귀가 없는지) 를 검증한다.
     """
     me_id = _register_and_login(client, "integ_n1_me")
     org_id = _create_organization_with_member("N1-조직", me_id)
 
     def seed_announcements(n: int, prefix: str) -> list[int]:
-        """n 개의 canonical+announcement 묶음 + 각각 OTHERS row 1 개를 시드. canonical id 들 반환."""
+        """n 개의 canonical+announcement 묶음 + 각각 본인 조직 row 1 개를 시드."""
         canonical_ids: list[int] = []
         with session_scope() as session:
             for i in range(n):
@@ -529,11 +514,11 @@ def test_list_page_get_query_count_within_ceiling(
                         raw_metadata={},
                     )
                 )
-                # OTHERS row 시드 — 다른 사용자가 row 를 가지면 summary 헬퍼가 카운트한다.
+                # 본인 조직 row 시드 — 본인 큰 배지가 채워진다.
                 session.add(
                     RelevanceJudgment(
                         canonical_project_id=canonical.id,
-                        user_id=me_id,  # 나의 row 도 1 개씩 — 본인 큰 배지가 채워진다.
+                        user_id=me_id,
                         organization_id=org_id,
                         verdict="관련",
                     )
@@ -550,7 +535,6 @@ def test_list_page_get_query_count_within_ceiling(
     select_count_15 = _measure_select_count(test_engine, lambda: client.get("/?group=off"))
 
     # row 수가 3 배가 되어도 SELECT 수 증가는 작은 상수 (≤ 3) 이내여야 한다.
-    # N+1 이라면 row 당 1 개씩 늘어나 select_count_15 - select_count_5 ≥ 10 이 된다.
     assert select_count_15 - select_count_5 <= 3, (
         f"N+1 회귀 의심 — 공고 5 건일 때 SELECT={select_count_5}, "
         f"15 건일 때 SELECT={select_count_15}. row 수에 비례해 늘면 N+1 회귀."

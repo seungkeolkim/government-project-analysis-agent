@@ -54,6 +54,15 @@ def _make_canonical(session_scope_ctx, key: str) -> int:
         return cp.id
 
 
+def _make_organization(session_scope_ctx, name: str) -> int:
+    """테스트용 조직을 생성하고 PK 를 반환한다."""
+    with session_scope_ctx() as s:
+        org = Organization(name=name)
+        s.add(org)
+        s.flush()
+        return org.id
+
+
 # ---------------------------------------------------------------------------
 # fixtures
 # ---------------------------------------------------------------------------
@@ -61,10 +70,11 @@ def _make_canonical(session_scope_ctx, key: str) -> int:
 
 @pytest.fixture
 def setup(test_engine: Engine):
-    """user_id, canonical_id 쌍 반환."""
+    """user_id, canonical_id, org_id 쌍 반환."""
     user_id = _make_user(session_scope, "rj_user")
     canonical_id = _make_canonical(session_scope, "official:test-rj-001")
-    return {"user_id": user_id, "canonical_id": canonical_id}
+    org_id = _make_organization(session_scope, "테스트-조직")
+    return {"user_id": user_id, "canonical_id": canonical_id, "org_id": org_id}
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +103,7 @@ def test_get_canonical_project_by_id_not_found(test_engine: Engine):
 def test_set_relevance_judgment_new(test_engine: Engine, setup):
     uid = setup["user_id"]
     cid = setup["canonical_id"]
+    org_id = setup["org_id"]
 
     with session_scope() as s:
         rj = set_relevance_judgment(
@@ -100,17 +111,20 @@ def test_set_relevance_judgment_new(test_engine: Engine, setup):
             canonical_project_id=cid,
             user_id=uid,
             verdict=RELEVANCE_VERDICT_RELATED,
+            organization_id=org_id,
             reason="테스트 이유",
         )
         assert rj.verdict == RELEVANCE_VERDICT_RELATED
         assert rj.reason == "테스트 이유"
         assert rj.canonical_project_id == cid
         assert rj.user_id == uid
+        assert rj.organization_id == org_id
 
 
 def test_set_relevance_judgment_invalid_verdict(test_engine: Engine, setup):
     uid = setup["user_id"]
     cid = setup["canonical_id"]
+    org_id = setup["org_id"]
 
     with session_scope() as s:
         with pytest.raises(ValueError, match="verdict"):
@@ -119,6 +133,7 @@ def test_set_relevance_judgment_invalid_verdict(test_engine: Engine, setup):
                 canonical_project_id=cid,
                 user_id=uid,
                 verdict="잘못된값",
+                organization_id=org_id,
             )
 
 
@@ -130,6 +145,7 @@ def test_set_relevance_judgment_invalid_verdict(test_engine: Engine, setup):
 def test_set_relevance_judgment_overwrite_creates_history(test_engine: Engine, setup):
     uid = setup["user_id"]
     cid = setup["canonical_id"]
+    org_id = setup["org_id"]
     t1 = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     t2 = datetime(2026, 1, 2, 0, 0, 0, tzinfo=UTC)
 
@@ -139,6 +155,7 @@ def test_set_relevance_judgment_overwrite_creates_history(test_engine: Engine, s
             canonical_project_id=cid,
             user_id=uid,
             verdict=RELEVANCE_VERDICT_RELATED,
+            organization_id=org_id,
             reason="초기 판정",
             now=t1,
         )
@@ -149,12 +166,15 @@ def test_set_relevance_judgment_overwrite_creates_history(test_engine: Engine, s
             canonical_project_id=cid,
             user_id=uid,
             verdict=RELEVANCE_VERDICT_UNRELATED,
+            organization_id=org_id,
             reason="변경 판정",
             now=t2,
         )
 
     with session_scope() as s:
-        rj = get_relevance_judgment(s, canonical_project_id=cid, user_id=uid)
+        rj = get_relevance_judgment(
+            s, canonical_project_id=cid, user_id=uid, organization_id=org_id
+        )
         assert rj is not None
         assert rj.verdict == RELEVANCE_VERDICT_UNRELATED
 
@@ -174,18 +194,30 @@ def test_set_relevance_judgment_overwrite_creates_history(test_engine: Engine, s
 def test_delete_relevance_judgment(test_engine: Engine, setup):
     uid = setup["user_id"]
     cid = setup["canonical_id"]
+    org_id = setup["org_id"]
 
     with session_scope() as s:
         set_relevance_judgment(
-            s, canonical_project_id=cid, user_id=uid, verdict=RELEVANCE_VERDICT_RELATED
+            s,
+            canonical_project_id=cid,
+            user_id=uid,
+            verdict=RELEVANCE_VERDICT_RELATED,
+            organization_id=org_id,
         )
 
     with session_scope() as s:
-        result = delete_relevance_judgment(s, canonical_project_id=cid, user_id=uid)
+        result = delete_relevance_judgment(
+            s, canonical_project_id=cid, user_id=uid, organization_id=org_id
+        )
         assert result is True
 
     with session_scope() as s:
-        assert get_relevance_judgment(s, canonical_project_id=cid, user_id=uid) is None
+        assert (
+            get_relevance_judgment(
+                s, canonical_project_id=cid, user_id=uid, organization_id=org_id
+            )
+            is None
+        )
         hist_list = get_relevance_history(s, canonical_project_id=cid)
         assert len(hist_list) == 1
         assert hist_list[0].history.archive_reason == "user_overwrite"
@@ -194,9 +226,12 @@ def test_delete_relevance_judgment(test_engine: Engine, setup):
 def test_delete_relevance_judgment_not_found(test_engine: Engine, setup):
     uid = setup["user_id"]
     cid = setup["canonical_id"]
+    org_id = setup["org_id"]
 
     with session_scope() as s:
-        result = delete_relevance_judgment(s, canonical_project_id=cid, user_id=uid)
+        result = delete_relevance_judgment(
+            s, canonical_project_id=cid, user_id=uid, organization_id=org_id
+        )
         assert result is False
 
 
@@ -210,16 +245,29 @@ def test_get_relevance_by_canonical_id_map(test_engine: Engine):
     uid2 = _make_user(session_scope, "bulk_user2")
     cid1 = _make_canonical(session_scope, "official:bulk-test-001")
     cid2 = _make_canonical(session_scope, "official:bulk-test-002")
+    org_id = _make_organization(session_scope, "bulk-조직")
 
     with session_scope() as s:
         set_relevance_judgment(
-            s, canonical_project_id=cid1, user_id=uid1, verdict=RELEVANCE_VERDICT_RELATED
+            s,
+            canonical_project_id=cid1,
+            user_id=uid1,
+            verdict=RELEVANCE_VERDICT_RELATED,
+            organization_id=org_id,
         )
         set_relevance_judgment(
-            s, canonical_project_id=cid1, user_id=uid2, verdict=RELEVANCE_VERDICT_UNRELATED
+            s,
+            canonical_project_id=cid1,
+            user_id=uid2,
+            verdict=RELEVANCE_VERDICT_UNRELATED,
+            organization_id=org_id,
         )
         set_relevance_judgment(
-            s, canonical_project_id=cid2, user_id=uid1, verdict=RELEVANCE_VERDICT_RELATED
+            s,
+            canonical_project_id=cid2,
+            user_id=uid1,
+            verdict=RELEVANCE_VERDICT_RELATED,
+            organization_id=org_id,
         )
 
     with session_scope() as s:
@@ -241,21 +289,36 @@ def test_get_relevance_history_by_canonical_id_map(test_engine: Engine):
     uid = _make_user(session_scope, "hist_bulk_user")
     cid1 = _make_canonical(session_scope, "official:histbulk-001")
     cid2 = _make_canonical(session_scope, "official:histbulk-002")
+    org_id = _make_organization(session_scope, "histbulk-조직")
 
     with session_scope() as s:
         set_relevance_judgment(
-            s, canonical_project_id=cid1, user_id=uid, verdict=RELEVANCE_VERDICT_RELATED
+            s,
+            canonical_project_id=cid1,
+            user_id=uid,
+            verdict=RELEVANCE_VERDICT_RELATED,
+            organization_id=org_id,
         )
     with session_scope() as s:
         set_relevance_judgment(
-            s, canonical_project_id=cid1, user_id=uid, verdict=RELEVANCE_VERDICT_UNRELATED
+            s,
+            canonical_project_id=cid1,
+            user_id=uid,
+            verdict=RELEVANCE_VERDICT_UNRELATED,
+            organization_id=org_id,
         )
     with session_scope() as s:
         set_relevance_judgment(
-            s, canonical_project_id=cid2, user_id=uid, verdict=RELEVANCE_VERDICT_RELATED
+            s,
+            canonical_project_id=cid2,
+            user_id=uid,
+            verdict=RELEVANCE_VERDICT_RELATED,
+            organization_id=org_id,
         )
     with session_scope() as s:
-        delete_relevance_judgment(s, canonical_project_id=cid2, user_id=uid)
+        delete_relevance_judgment(
+            s, canonical_project_id=cid2, user_id=uid, organization_id=org_id
+        )
 
     with session_scope() as s:
         result = get_relevance_history_by_canonical_id_map(s, [cid1, cid2])
@@ -267,63 +330,8 @@ def test_get_relevance_history_by_canonical_id_map(test_engine: Engine):
 
 
 # ---------------------------------------------------------------------------
-# task 00085 — organization_id 추가에 대응한 헬퍼 동작 검증
+# task 00085 — organization_id 관련 헬퍼 동작 검증
 # ---------------------------------------------------------------------------
-
-
-def _make_organization(session_scope_ctx, name: str) -> int:
-    """테스트용 조직을 생성하고 PK 를 반환한다."""
-    with session_scope_ctx() as s:
-        org = Organization(name=name)
-        s.add(org)
-        s.flush()
-        return org.id
-
-
-def test_get_relevance_judgment_personal_vs_organization_isolated(
-    test_engine: Engine, setup
-):
-    """개인 row 와 조직 row 는 (canonical, user, org) 트리플로 독립 슬롯이어야 한다."""
-    uid = setup["user_id"]
-    cid = setup["canonical_id"]
-    org_id = _make_organization(session_scope, "관련성-org-A")
-
-    # 같은 사용자가 개인 + 조직 row 동시에 보유
-    with session_scope() as s:
-        set_relevance_judgment(
-            s,
-            canonical_project_id=cid,
-            user_id=uid,
-            verdict=RELEVANCE_VERDICT_RELATED,
-            reason="개인 사유",
-            organization_id=None,
-        )
-        set_relevance_judgment(
-            s,
-            canonical_project_id=cid,
-            user_id=uid,
-            verdict=RELEVANCE_VERDICT_UNRELATED,
-            reason="조직 사유",
-            organization_id=org_id,
-        )
-
-    # organization_id 인자별로 조회 결과가 분리되어야 한다.
-    with session_scope() as s:
-        personal = get_relevance_judgment(
-            s, canonical_project_id=cid, user_id=uid, organization_id=None
-        )
-        org_row = get_relevance_judgment(
-            s, canonical_project_id=cid, user_id=uid, organization_id=org_id
-        )
-        assert personal is not None
-        assert personal.organization_id is None
-        assert personal.verdict == RELEVANCE_VERDICT_RELATED
-        assert personal.reason == "개인 사유"
-
-        assert org_row is not None
-        assert org_row.organization_id == org_id
-        assert org_row.verdict == RELEVANCE_VERDICT_UNRELATED
-        assert org_row.reason == "조직 사유"
 
 
 def test_set_relevance_judgment_overwrite_preserves_organization_id_in_history(
@@ -342,8 +350,8 @@ def test_set_relevance_judgment_overwrite_preserves_organization_id_in_history(
             canonical_project_id=cid,
             user_id=uid,
             verdict=RELEVANCE_VERDICT_RELATED,
-            reason="조직 초기",
             organization_id=org_id,
+            reason="조직 초기",
             now=t1,
         )
 
@@ -353,8 +361,8 @@ def test_set_relevance_judgment_overwrite_preserves_organization_id_in_history(
             canonical_project_id=cid,
             user_id=uid,
             verdict=RELEVANCE_VERDICT_UNRELATED,
-            reason="조직 변경",
             organization_id=org_id,
+            reason="조직 변경",
             now=t2,
         )
 
@@ -382,64 +390,55 @@ def test_set_relevance_judgment_overwrite_preserves_organization_id_in_history(
         assert rows[0].archive_reason == "user_overwrite"
 
 
-def test_delete_relevance_judgment_only_deletes_target_triple(
+def test_delete_relevance_judgment_multiple_org_rows_isolated(
     test_engine: Engine, setup
 ):
-    """delete 는 (canonical, user, org) 트리플만 지우고 다른 트리플 row 는 보존해야 한다."""
+    """delete 는 지정된 (canonical, user, org) 트리플만 지우고 다른 트리플 row 는 보존해야 한다."""
     uid = setup["user_id"]
     cid = setup["canonical_id"]
-    org_id = _make_organization(session_scope, "관련성-org-delete")
+    org_a_id = _make_organization(session_scope, "관련성-org-A-delete")
+    org_b_id = _make_organization(session_scope, "관련성-org-B-delete")
 
-    # 개인 + 조직 row 동시 생성
+    # 조직 A + 조직 B row 동시 생성
     with session_scope() as s:
         set_relevance_judgment(
             s,
             canonical_project_id=cid,
             user_id=uid,
             verdict=RELEVANCE_VERDICT_RELATED,
-            organization_id=None,
+            organization_id=org_a_id,
         )
         set_relevance_judgment(
             s,
             canonical_project_id=cid,
             user_id=uid,
             verdict=RELEVANCE_VERDICT_RELATED,
-            organization_id=org_id,
+            organization_id=org_b_id,
         )
 
-    # 조직 row 만 삭제
+    # 조직 A row 만 삭제
     with session_scope() as s:
         deleted = delete_relevance_judgment(
-            s, canonical_project_id=cid, user_id=uid, organization_id=org_id
+            s, canonical_project_id=cid, user_id=uid, organization_id=org_a_id
         )
         assert deleted is True
 
-    # 조직 row 는 사라지고 개인 row 는 살아 있어야 한다. History 에는 조직 row 이관본 1 건.
+    # 조직 A row 는 사라지고 조직 B row 는 살아 있어야 한다.
     with session_scope() as s:
         assert (
             get_relevance_judgment(
                 s,
                 canonical_project_id=cid,
                 user_id=uid,
-                organization_id=org_id,
+                organization_id=org_a_id,
             )
             is None
         )
-        personal = get_relevance_judgment(
-            s, canonical_project_id=cid, user_id=uid, organization_id=None
+        org_b_row = get_relevance_judgment(
+            s, canonical_project_id=cid, user_id=uid, organization_id=org_b_id
         )
-        assert personal is not None
-        assert personal.organization_id is None
-
-        history_rows = list(
-            s.execute(
-                select(RelevanceJudgmentHistory).where(
-                    RelevanceJudgmentHistory.canonical_project_id == cid,
-                )
-            ).scalars()
-        )
-        assert len(history_rows) == 1
-        assert history_rows[0].organization_id == org_id
+        assert org_b_row is not None
+        assert org_b_row.organization_id == org_b_id
 
 
 # ---------------------------------------------------------------------------
@@ -447,43 +446,28 @@ def test_delete_relevance_judgment_only_deletes_target_triple(
 # ---------------------------------------------------------------------------
 
 
-def test_summary_logged_in_personal_priority_and_other_counter(
+def test_summary_logged_in_mine_organization_and_others(
     test_engine: Engine
 ):
-    """본인 + OTHERS 가 섞인 케이스에서 mine_personal / mine_organization / others / 카운터를 검증."""
+    """본인 조직 row + OTHERS 가 섞인 케이스에서 mine_organization / others / 카운터를 검증."""
     me_id = _make_user(session_scope, "summary_me")
     peer1_id = _make_user(session_scope, "summary_peer1")
     peer2_id = _make_user(session_scope, "summary_peer2")
     cid = _make_canonical(session_scope, "official:summary-001")
     org_a_id = _make_organization(session_scope, "조직 A")
+    org_b_id = _make_organization(session_scope, "조직 B")
 
-    # 본인 — 개인 row + 조직 A row, 다른 사용자들 — 개인/조직 row 섞어서
+    # 본인 — 조직 A row, 다른 사용자들 — 조직 row 섞어서
     with session_scope() as s:
         set_relevance_judgment(
             s,
             canonical_project_id=cid,
             user_id=me_id,
             verdict=RELEVANCE_VERDICT_RELATED,
-            reason="내 개인",
-            organization_id=None,
-        )
-        set_relevance_judgment(
-            s,
-            canonical_project_id=cid,
-            user_id=me_id,
-            verdict=RELEVANCE_VERDICT_UNRELATED,
+            organization_id=org_a_id,
             reason="내 조직 A",
-            organization_id=org_a_id,
         )
-        # peer1 개인: 관련
-        set_relevance_judgment(
-            s,
-            canonical_project_id=cid,
-            user_id=peer1_id,
-            verdict=RELEVANCE_VERDICT_RELATED,
-            organization_id=None,
-        )
-        # peer1 조직 A: 무관 (안 1 — 같은 조직 안 다른 의견 row 가능)
+        # peer1 조직 A: 무관
         set_relevance_judgment(
             s,
             canonical_project_id=cid,
@@ -491,13 +475,13 @@ def test_summary_logged_in_personal_priority_and_other_counter(
             verdict=RELEVANCE_VERDICT_UNRELATED,
             organization_id=org_a_id,
         )
-        # peer2 개인: 관련
+        # peer2 조직 B: 관련
         set_relevance_judgment(
             s,
             canonical_project_id=cid,
             user_id=peer2_id,
             verdict=RELEVANCE_VERDICT_RELATED,
-            organization_id=None,
+            organization_id=org_b_id,
         )
 
     with session_scope() as s:
@@ -506,31 +490,26 @@ def test_summary_logged_in_personal_priority_and_other_counter(
         )
 
     summary = summary_map[cid]
-    # 본인 개인 row 가 큰 배지(우선)
-    assert summary.mine_personal is not None
-    assert summary.mine_personal.judgment.verdict == RELEVANCE_VERDICT_RELATED
-    assert summary.mine_personal.organization_name is None
-    assert summary.mine_personal.username == "summary_me"
 
     # 본인 조직 row 1 개
     assert len(summary.mine_organization) == 1
     assert summary.mine_organization[0].judgment.organization_id == org_a_id
     assert summary.mine_organization[0].organization_name == "조직 A"
-    assert summary.mine_organization[0].judgment.verdict == RELEVANCE_VERDICT_UNRELATED
+    assert summary.mine_organization[0].judgment.verdict == RELEVANCE_VERDICT_RELATED
 
-    # OTHERS — peer1 개인(관련) + peer1 조직(무관) + peer2 개인(관련) = 총 3
+    # OTHERS — peer1 조직(무관) + peer2 조직(관련) = 총 2
     others_usernames = sorted(meta.username for meta in summary.others)
-    assert others_usernames == ["summary_peer1", "summary_peer1", "summary_peer2"]
+    assert others_usernames == ["summary_peer1", "summary_peer2"]
 
-    # 카운터: 관련 3 (본인 개인 + peer1 개인 + peer2 개인), 무관 2 (본인 조직 A + peer1 조직 A)
-    assert summary.count_related == 3
-    assert summary.count_unrelated == 2
+    # 카운터: 관련 2 (본인 조직 A + peer2 조직 B), 무관 1 (peer1 조직 A)
+    assert summary.count_related == 2
+    assert summary.count_unrelated == 1
 
 
-def test_summary_logged_in_only_organization_rows_uses_latest_as_badge(
+def test_summary_logged_in_multiple_organization_rows_sorted_desc(
     test_engine: Engine
 ):
-    """본인 개인 row 가 없고 본인 조직 row 가 여러 개일 때 mine_organization 이 decided_at DESC 정렬."""
+    """본인이 여러 조직 row 를 가질 때 mine_organization 이 decided_at DESC 정렬이어야 한다."""
     me_id = _make_user(session_scope, "summary_me_org_only")
     cid = _make_canonical(session_scope, "official:summary-002")
     org_a_id = _make_organization(session_scope, "조직 A2")
@@ -564,8 +543,6 @@ def test_summary_logged_in_only_organization_rows_uses_latest_as_badge(
         )
 
     summary = summary_map[cid]
-    # 본인 개인 row 없음
-    assert summary.mine_personal is None
     # mine_organization 은 decided_at DESC 정렬 — 첫 항목이 최근(B)
     assert len(summary.mine_organization) == 2
     assert summary.mine_organization[0].judgment.organization_id == org_b_id
@@ -582,7 +559,8 @@ def test_summary_anonymous_user_treats_all_as_others(test_engine: Engine):
     """비로그인 (user_id=None) 호출은 mine 영역이 비어 있고 모든 row 가 OTHERS 카운터에 들어가야 한다."""
     user_id = _make_user(session_scope, "summary_anon_data_owner")
     cid = _make_canonical(session_scope, "official:summary-003")
-    org_id = _make_organization(session_scope, "조직 anon-test")
+    org_a_id = _make_organization(session_scope, "조직 anon-test-A")
+    org_b_id = _make_organization(session_scope, "조직 anon-test-B")
 
     with session_scope() as s:
         set_relevance_judgment(
@@ -590,14 +568,14 @@ def test_summary_anonymous_user_treats_all_as_others(test_engine: Engine):
             canonical_project_id=cid,
             user_id=user_id,
             verdict=RELEVANCE_VERDICT_RELATED,
-            organization_id=None,
+            organization_id=org_a_id,
         )
         set_relevance_judgment(
             s,
             canonical_project_id=cid,
             user_id=user_id,
             verdict=RELEVANCE_VERDICT_UNRELATED,
-            organization_id=org_id,
+            organization_id=org_b_id,
         )
 
     with session_scope() as s:
@@ -607,7 +585,6 @@ def test_summary_anonymous_user_treats_all_as_others(test_engine: Engine):
 
     summary = summary_map[cid]
     # 비로그인이면 mine 영역은 비어 있어야 한다.
-    assert summary.mine_personal is None
     assert summary.mine_organization == ()
     # OTHERS 에 두 row 모두 들어감
     assert len(summary.others) == 2
@@ -625,7 +602,6 @@ def test_summary_empty_inputs(test_engine: Engine):
     assert result == {}
     # RELEVANCE_SUMMARY_EMPTY 는 호출자가 default 로 사용 가능한 상수.
     fallback = result.get(123, RELEVANCE_SUMMARY_EMPTY)
-    assert fallback.mine_personal is None
     assert fallback.mine_organization == ()
     assert fallback.others == ()
 
@@ -637,7 +613,8 @@ def test_summary_n_plus_1_avoidance_single_query(test_engine: Engine):
     canonical_ids = [
         _make_canonical(session_scope, f"official:summary-n1-{i:03d}") for i in range(5)
     ]
-    org_id = _make_organization(session_scope, "조직 n1-test")
+    org_a_id = _make_organization(session_scope, "조직 n1-test-A")
+    org_b_id = _make_organization(session_scope, "조직 n1-test-B")
 
     with session_scope() as s:
         for cid in canonical_ids:
@@ -646,21 +623,21 @@ def test_summary_n_plus_1_avoidance_single_query(test_engine: Engine):
                 canonical_project_id=cid,
                 user_id=me_id,
                 verdict=RELEVANCE_VERDICT_RELATED,
-                organization_id=None,
+                organization_id=org_a_id,
             )
             set_relevance_judgment(
                 s,
                 canonical_project_id=cid,
                 user_id=me_id,
                 verdict=RELEVANCE_VERDICT_UNRELATED,
-                organization_id=org_id,
+                organization_id=org_b_id,
             )
             set_relevance_judgment(
                 s,
                 canonical_project_id=cid,
                 user_id=peer_id,
                 verdict=RELEVANCE_VERDICT_RELATED,
-                organization_id=None,
+                organization_id=org_a_id,
             )
 
     # 쿼리 카운터 — engine 에 before_cursor_execute 리스너로 SELECT 수만 집계.
@@ -689,10 +666,9 @@ def test_summary_n_plus_1_avoidance_single_query(test_engine: Engine):
     )
     # 임의 한 개의 summary 를 검증해 데이터 형태도 확인.
     sample = summary_map[canonical_ids[0]]
-    assert sample.mine_personal is not None
-    assert len(sample.mine_organization) == 1
+    assert len(sample.mine_organization) == 2
     assert len(sample.others) == 1
-    # 카운터: 관련 2 (본인 개인 + peer 개인), 무관 1 (본인 조직)
+    # 카운터: 관련 2 (본인 조직 A + peer 조직 A), 무관 1 (본인 조직 B)
     assert sample.count_related == 2
     assert sample.count_unrelated == 1
 
@@ -702,6 +678,7 @@ def test_summary_returns_only_canonicals_with_rows(test_engine: Engine):
     me_id = _make_user(session_scope, "summary_partial_me")
     cid_with_data = _make_canonical(session_scope, "official:summary-with-data")
     cid_empty = _make_canonical(session_scope, "official:summary-empty")
+    org_id = _make_organization(session_scope, "partial-조직")
 
     with session_scope() as s:
         set_relevance_judgment(
@@ -709,7 +686,7 @@ def test_summary_returns_only_canonicals_with_rows(test_engine: Engine):
             canonical_project_id=cid_with_data,
             user_id=me_id,
             verdict=RELEVANCE_VERDICT_RELATED,
-            organization_id=None,
+            organization_id=org_id,
         )
 
     with session_scope() as s:
@@ -733,6 +710,7 @@ def test_summary_only_self_judgment_shows_counter(test_engine: Engine):
     me_id = _make_user(session_scope, "summary_self_only_me")
     cid_related = _make_canonical(session_scope, "official:summary-self-related")
     cid_unrelated = _make_canonical(session_scope, "official:summary-self-unrelated")
+    org_id = _make_organization(session_scope, "self-only-조직")
 
     with session_scope() as s:
         # 본인만 '관련' 1건 판정
@@ -741,15 +719,18 @@ def test_summary_only_self_judgment_shows_counter(test_engine: Engine):
             canonical_project_id=cid_related,
             user_id=me_id,
             verdict=RELEVANCE_VERDICT_RELATED,
-            organization_id=None,
+            organization_id=org_id,
         )
-        # 본인만 '무관' 1건 판정
+        # 본인만 '무관' 1건 판정 (다른 조직 사용)
+        org_id2 = Organization(name="self-only-조직-2")
+        s.add(org_id2)
+        s.flush()
         set_relevance_judgment(
             s,
             canonical_project_id=cid_unrelated,
             user_id=me_id,
             verdict=RELEVANCE_VERDICT_UNRELATED,
-            organization_id=None,
+            organization_id=org_id2.id,
         )
 
     with session_scope() as s:
@@ -759,14 +740,14 @@ def test_summary_only_self_judgment_shows_counter(test_engine: Engine):
 
     # 본인만 '관련' 판정 → count_related == 1, count_unrelated == 0
     s_related = summary_map[cid_related]
-    assert s_related.mine_personal is not None
+    assert len(s_related.mine_organization) == 1
     assert s_related.others == ()
     assert s_related.count_related == 1
     assert s_related.count_unrelated == 0
 
     # 본인만 '무관' 판정 → count_related == 0, count_unrelated == 1
     s_unrelated = summary_map[cid_unrelated]
-    assert s_unrelated.mine_personal is not None
+    assert len(s_unrelated.mine_organization) == 1
     assert s_unrelated.others == ()
     assert s_unrelated.count_related == 0
     assert s_unrelated.count_unrelated == 1

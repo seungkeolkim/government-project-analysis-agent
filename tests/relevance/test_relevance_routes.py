@@ -6,11 +6,15 @@ TestClient 로 세 엔드포인트를 커버한다:
     GET    /canonical/{id}/relevance/history
 
 task 00085 — 조직 단위 판정 확장 시나리오:
-    - POST/DELETE body 의 ``organization_id`` (선택) 동작.
+    - POST/DELETE body 의 ``organization_id`` (필수) 동작.
     - 본인 소속 외 organization_id → 422.
     - 무소속 사용자 organization_id 지정 → 422.
     - 다른 멤버가 만든 조직 row 삭제 시도 → 404 (자동 user_id 필터로 미매칭).
     - 비로그인 GET /history 허용 (로그인과 동일 노출).
+
+task 00093 — 개인 판정 슬롯 제거:
+    - organization_id 는 항상 필수.
+    - GET /mine 는 조직 판정만 반환.
 """
 
 from __future__ import annotations
@@ -71,13 +75,17 @@ def canonical_id(test_engine: Engine) -> int:
 def test_set_relevance_requires_login(client: TestClient, canonical_id: int) -> None:
     resp = client.post(
         f"/canonical/{canonical_id}/relevance",
-        json={"verdict": "관련"},
+        json={"verdict": "관련", "organization_id": 1},
     )
     assert resp.status_code == 401
 
 
 def test_delete_relevance_requires_login(client: TestClient, canonical_id: int) -> None:
-    resp = client.delete(f"/canonical/{canonical_id}/relevance")
+    resp = client.request(
+        "DELETE",
+        f"/canonical/{canonical_id}/relevance",
+        json={"organization_id": 1},
+    )
     assert resp.status_code == 401
 
 
@@ -98,13 +106,17 @@ def test_get_history_allows_anonymous(client: TestClient, canonical_id: int) -> 
 def test_set_relevance_canonical_not_found(logged_in_client: TestClient) -> None:
     resp = logged_in_client.post(
         "/canonical/999999/relevance",
-        json={"verdict": "관련"},
+        json={"verdict": "관련", "organization_id": 1},
     )
     assert resp.status_code == 404
 
 
 def test_delete_relevance_canonical_not_found(logged_in_client: TestClient) -> None:
-    resp = logged_in_client.delete("/canonical/999999/relevance")
+    resp = logged_in_client.request(
+        "DELETE",
+        "/canonical/999999/relevance",
+        json={"organization_id": 1},
+    )
     assert resp.status_code == 404
 
 
@@ -118,26 +130,53 @@ def test_get_history_canonical_not_found(logged_in_client: TestClient) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _create_organization(name: str) -> int:
+    """테스트용 조직을 만들고 PK 를 반환한다."""
+    with session_scope() as s:
+        org = Organization(name=name)
+        s.add(org)
+        s.flush()
+        return org.id
+
+
+def _add_user_to_organization(username: str, organization_id: int) -> int:
+    """username 사용자에게 organization_id 의 매핑을 추가하고 user_id 반환."""
+    with session_scope() as s:
+        user = s.execute(
+            __import__("sqlalchemy").select(User).where(User.username == username)
+        ).scalar_one()
+        s.add(UserOrganization(user_id=user.id, organization_id=organization_id))
+        s.flush()
+        return user.id
+
+
 def test_set_relevance_success(
     logged_in_client: TestClient, canonical_id: int
 ) -> None:
+    org_id = _create_organization("route-org-success")
+    _add_user_to_organization("rj_route_user", org_id)
+
     resp = logged_in_client.post(
         f"/canonical/{canonical_id}/relevance",
-        json={"verdict": "관련", "reason": "테스트 이유"},
+        json={"verdict": "관련", "reason": "테스트 이유", "organization_id": org_id},
     )
     assert resp.status_code == 200
     data = resp.json()
     assert data["verdict"] == "관련"
     assert data["reason"] == "테스트 이유"
     assert data["canonical_project_id"] == canonical_id
+    assert data["organization_id"] == org_id
 
 
 def test_set_relevance_invalid_verdict(
     logged_in_client: TestClient, canonical_id: int
 ) -> None:
+    org_id = _create_organization("route-org-invalid-verdict")
+    _add_user_to_organization("rj_route_user", org_id)
+
     resp = logged_in_client.post(
         f"/canonical/{canonical_id}/relevance",
-        json={"verdict": "잘못된값"},
+        json={"verdict": "잘못된값", "organization_id": org_id},
     )
     assert resp.status_code == 422
 
@@ -145,13 +184,16 @@ def test_set_relevance_invalid_verdict(
 def test_set_relevance_overwrite(
     logged_in_client: TestClient, canonical_id: int
 ) -> None:
+    org_id = _create_organization("route-org-overwrite")
+    _add_user_to_organization("rj_route_user", org_id)
+
     logged_in_client.post(
         f"/canonical/{canonical_id}/relevance",
-        json={"verdict": "관련"},
+        json={"verdict": "관련", "organization_id": org_id},
     )
     resp = logged_in_client.post(
         f"/canonical/{canonical_id}/relevance",
-        json={"verdict": "무관"},
+        json={"verdict": "무관", "organization_id": org_id},
     )
     assert resp.status_code == 200
     assert resp.json()["verdict"] == "무관"
@@ -175,11 +217,18 @@ def test_set_relevance_overwrite(
 def test_delete_relevance_success(
     logged_in_client: TestClient, canonical_id: int
 ) -> None:
+    org_id = _create_organization("route-org-delete-success")
+    _add_user_to_organization("rj_route_user", org_id)
+
     logged_in_client.post(
         f"/canonical/{canonical_id}/relevance",
-        json={"verdict": "관련"},
+        json={"verdict": "관련", "organization_id": org_id},
     )
-    resp = logged_in_client.delete(f"/canonical/{canonical_id}/relevance")
+    resp = logged_in_client.request(
+        "DELETE",
+        f"/canonical/{canonical_id}/relevance",
+        json={"organization_id": org_id},
+    )
     assert resp.status_code == 200
     assert resp.json()["detail"] == "삭제되었습니다."
 
@@ -187,7 +236,12 @@ def test_delete_relevance_success(
 def test_delete_relevance_not_found(
     logged_in_client: TestClient, canonical_id: int
 ) -> None:
-    resp = logged_in_client.delete(f"/canonical/{canonical_id}/relevance")
+    org_id = _create_organization("route-org-delete-notfound")
+    resp = logged_in_client.request(
+        "DELETE",
+        f"/canonical/{canonical_id}/relevance",
+        json={"organization_id": org_id},
+    )
     assert resp.status_code == 404
 
 
@@ -207,11 +261,18 @@ def test_get_history_empty(logged_in_client: TestClient, canonical_id: int) -> N
 def test_get_history_after_delete(
     logged_in_client: TestClient, canonical_id: int
 ) -> None:
+    org_id = _create_organization("route-org-history-delete")
+    _add_user_to_organization("rj_route_user", org_id)
+
     logged_in_client.post(
         f"/canonical/{canonical_id}/relevance",
-        json={"verdict": "관련"},
+        json={"verdict": "관련", "organization_id": org_id},
     )
-    logged_in_client.delete(f"/canonical/{canonical_id}/relevance")
+    logged_in_client.request(
+        "DELETE",
+        f"/canonical/{canonical_id}/relevance",
+        json={"organization_id": org_id},
+    )
 
     resp = logged_in_client.get(f"/canonical/{canonical_id}/relevance/history")
     assert resp.status_code == 200
@@ -221,33 +282,13 @@ def test_get_history_after_delete(
     assert item["verdict"] == "관련"
     assert item["username"] == "rj_route_user"
     assert item["archive_reason"] == "user_overwrite"
-    # task 00085 — history 응답에 organization_id 가 포함되어야 한다 (개인 row 라 None).
-    assert item["organization_id"] is None
+    # task 00085 — history 응답에 organization_id 가 포함되어야 한다.
+    assert item["organization_id"] == org_id
 
 
 # ---------------------------------------------------------------------------
 # task 00085 — organization_id 동작 검증
 # ---------------------------------------------------------------------------
-
-
-def _create_organization(name: str) -> int:
-    """테스트용 조직을 만들고 PK 를 반환한다."""
-    with session_scope() as s:
-        org = Organization(name=name)
-        s.add(org)
-        s.flush()
-        return org.id
-
-
-def _add_user_to_organization(username: str, organization_id: int) -> int:
-    """username 사용자에게 organization_id 의 매핑을 추가하고 user_id 반환."""
-    with session_scope() as s:
-        user = s.execute(
-            __import__("sqlalchemy").select(User).where(User.username == username)
-        ).scalar_one()
-        s.add(UserOrganization(user_id=user.id, organization_id=organization_id))
-        s.flush()
-        return user.id
 
 
 def test_set_relevance_organization_member_succeeds(
@@ -307,74 +348,49 @@ def test_set_relevance_unaffiliated_user_organization_returns_422(
     assert "본인 소속 조직" in resp.json()["detail"]
 
 
-def test_set_relevance_personal_and_organization_coexist(
-    logged_in_client: TestClient, canonical_id: int
-) -> None:
-    """동일 canonical 에 개인 + 조직 row 가 동시 보유 가능 (안 1 트리플 슬롯)."""
-    org_id = _create_organization("route-org-coexist")
-    _add_user_to_organization("rj_route_user", org_id)
-
-    # 개인 row
-    resp_personal = logged_in_client.post(
-        f"/canonical/{canonical_id}/relevance",
-        json={"verdict": "관련", "organization_id": None},
-    )
-    assert resp_personal.status_code == 200
-    assert resp_personal.json()["organization_id"] is None
-
-    # 조직 row — 다른 verdict 로 동시 보유
-    resp_org = logged_in_client.post(
-        f"/canonical/{canonical_id}/relevance",
-        json={"verdict": "무관", "organization_id": org_id},
-    )
-    assert resp_org.status_code == 200
-    assert resp_org.json()["organization_id"] == org_id
-
-    # history 는 트리플 단위 INSERT 만 일어나 비어 있어야 한다 (덮어쓰기 발생 X).
-    hist_resp = logged_in_client.get(
-        f"/canonical/{canonical_id}/relevance/history"
-    )
-    assert hist_resp.status_code == 200
-    assert hist_resp.json()["history"] == []
-
-
 def test_delete_relevance_with_organization_id_targets_org_row(
     logged_in_client: TestClient, canonical_id: int
 ) -> None:
-    """body 에 organization_id 를 보내면 그 트리플 row 만 삭제, 개인 row 는 보존."""
-    org_id = _create_organization("route-org-delete-target")
-    _add_user_to_organization("rj_route_user", org_id)
+    """body 에 organization_id 를 보내면 그 트리플 row 만 삭제."""
+    org_a_id = _create_organization("route-org-delete-target-A")
+    org_b_id = _create_organization("route-org-delete-target-B")
+    _add_user_to_organization("rj_route_user", org_a_id)
+    _add_user_to_organization("rj_route_user", org_b_id)
 
-    # 개인 + 조직 row 모두 생성
+    # 두 조직 row 모두 생성
     logged_in_client.post(
         f"/canonical/{canonical_id}/relevance",
-        json={"verdict": "관련"},
+        json={"verdict": "관련", "organization_id": org_a_id},
     )
     logged_in_client.post(
         f"/canonical/{canonical_id}/relevance",
-        json={"verdict": "무관", "organization_id": org_id},
+        json={"verdict": "무관", "organization_id": org_b_id},
     )
 
-    # 조직 row 만 삭제
+    # 조직 A row 만 삭제
     resp = logged_in_client.request(
         "DELETE",
         f"/canonical/{canonical_id}/relevance",
-        json={"organization_id": org_id},
+        json={"organization_id": org_a_id},
     )
     assert resp.status_code == 200
 
-    # 다시 같은 트리플 삭제 시도 → 404 (이미 사라졌고 개인 row 만 남음).
+    # 다시 같은 트리플 삭제 시도 → 404 (이미 사라짐).
     resp_again = logged_in_client.request(
         "DELETE",
         f"/canonical/{canonical_id}/relevance",
-        json={"organization_id": org_id},
+        json={"organization_id": org_a_id},
     )
     assert resp_again.status_code == 404
     assert resp_again.json()["detail"] == "삭제할 판정이 없습니다."
 
-    # 개인 row 는 살아 있어야 하므로 body 없이 DELETE 하면 200 으로 잘 지워져야 한다.
-    resp_personal = logged_in_client.delete(f"/canonical/{canonical_id}/relevance")
-    assert resp_personal.status_code == 200
+    # 조직 B row 는 살아 있어야 하므로 삭제하면 200.
+    resp_b = logged_in_client.request(
+        "DELETE",
+        f"/canonical/{canonical_id}/relevance",
+        json={"organization_id": org_b_id},
+    )
+    assert resp_b.status_code == 200
 
 
 def test_delete_relevance_other_member_org_row_returns_404(
@@ -478,6 +494,7 @@ def test_anonymous_history_sees_organization_rows(
 
 # ---------------------------------------------------------------------------
 # task 00089 — GET /canonical/{id}/relevance/mine 본인 판정 목록 조회
+# (task 00093: 개인 판정 제거, 조직 판정만 반환)
 # ---------------------------------------------------------------------------
 
 
@@ -502,26 +519,6 @@ def test_get_mine_empty_when_no_judgments(
     data = resp.json()
     assert data["canonical_project_id"] == canonical_id
     assert data["items"] == []
-
-
-def test_get_mine_returns_personal_judgment(
-    logged_in_client: TestClient, canonical_id: int
-) -> None:
-    """개인 판정 작성 후 mine 에서 조회되고 키 구조가 맞아야 한다."""
-    logged_in_client.post(
-        f"/canonical/{canonical_id}/relevance",
-        json={"verdict": "관련", "reason": "개인 사유"},
-    )
-    resp = logged_in_client.get(f"/canonical/{canonical_id}/relevance/mine")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert len(data["items"]) == 1
-    item = data["items"][0]
-    assert item["verdict"] == "관련"
-    assert item["reason"] == "개인 사유"
-    assert item["organization_id"] is None
-    assert item["organization_name"] is None
-    assert item["decided_at"] is not None
 
 
 def test_get_mine_returns_organization_judgment_with_name(
@@ -555,6 +552,8 @@ def test_get_mine_excludes_other_users_rows(
     from fastapi.testclient import TestClient as _TestClient
     from app.web.main import create_app
 
+    org_id = _create_organization("mine-peer-org")
+
     peer_app = create_app()
     with _TestClient(peer_app) as peer_client:
         peer_client.post(
@@ -562,10 +561,11 @@ def test_get_mine_excludes_other_users_rows(
             data={"username": "rj_mine_peer", "password": "pass_mine_456"},
             follow_redirects=False,
         )
-        # 다른 사용자(peer) 가 개인 판정 작성
+        _add_user_to_organization("rj_mine_peer", org_id)
+        # 다른 사용자(peer) 가 조직 판정 작성
         peer_resp = peer_client.post(
             f"/canonical/{canonical_id}/relevance",
-            json={"verdict": "관련"},
+            json={"verdict": "관련", "organization_id": org_id},
         )
         assert peer_resp.status_code == 200
 
