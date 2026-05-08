@@ -4,15 +4,17 @@
   구성:
     1. flash 배지
     2. 백업 설정 폼 (cron 표현식, 최대 보관 개수)
-    3. 수동 즉시 실행 버튼
-    4. 백업 이력 테이블
-    5. 현재 백업 파일 목록 테이블
+    3. 예약된 백업 (APScheduler 등록 현황, 읽기 전용)
+    4. 수동 즉시 실행 버튼
+    5. 백업 이력 테이블
+    6. 현재 백업 파일 목록 테이블
 
   컨텍스트 규약:
-    - top_tab:          'scrape_group'
+    - top_tab:          'system_group'
     - sub_tab:          'backup'
     - backup_cron:      현재 저장된 cron 표현식 (str)
     - backup_max_count: 현재 저장된 최대 보관 개수 (str)
+    - backup_schedule:  ScheduleSummary | None — APScheduler 에 등록된 백업 잡
     - history:          BackupHistory 리스트 (최신 먼저)
     - backup_files:     list[dict] — filename, size_bytes, modified_at
     - scheduler_running: bool
@@ -63,6 +65,40 @@
             설정 저장
         </button>
     </form>
+</section>
+
+{# ── 예약된 백업 (APScheduler 등록 현황, 읽기 전용) ──────── #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">예약된 백업</h3>
+    <p class="admin-state__muted">
+        APScheduler 에 현재 등록된 백업 잡 상태입니다. 스케줄 변경은 위의 설정 폼을 사용하세요.
+    </p>
+    {% if backup_schedule %}
+    <table class="admin-table">
+        <thead>
+            <tr>
+                <th>cron 표현식</th>
+                <th>상태</th>
+                <th>다음 실행 (KST)</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>{{ backup_schedule.trigger_spec }}</td>
+                <td>
+                    {% if backup_schedule.enabled %}
+                        <span class="admin-badge admin-badge--running">활성</span>
+                    {% else %}
+                        <span class="admin-badge admin-badge--idle">비활성</span>
+                    {% endif %}
+                </td>
+                <td>{{ (backup_schedule.next_run_time | kst_format) or '—' }}</td>
+            </tr>
+        </tbody>
+    </table>
+    {% else %}
+    <p class="admin-state__muted">등록된 백업 잡이 없습니다.</p>
+    {% endif %}
 </section>
 
 {# ── 수동 즉시 실행 ──────────────────────────────────────── #}
