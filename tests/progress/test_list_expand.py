@@ -278,8 +278,15 @@ def test_get_progress_rows_by_canonical_id_map_uses_single_select(
 def test_get_progress_rows_by_canonical_id_map_sorts_by_priority(
     test_engine: Engine,
 ) -> None:
-    """동일 canonical 안에서 단계 활동성 우선순위 (진행 → 검토 → 관심 → 종료) 정렬."""
+    """동일 canonical 안에서 단계 활동성 우선순위 (진행 → 검토 → 관심 → 종료) 정렬.
+
+    정렬 로직만 검증하므로 mutex 제약을 우회해 AnnouncementProgress 를 직접 삽입한다.
+    (DONE + IN_PROGRESS 를 동일 canonical 에 심는 것은 정상 운영에서는 불가하지만,
+    정렬 회귀 가드를 위해 repository 레이어를 우회하는 것이 의도적 설계다.)
+    """
     with session_scope() as session:
+        from datetime import UTC, datetime
+
         seeder = User(username="sort-seeder", password_hash="x")
         session.add(seeder)
         session.flush()
@@ -301,15 +308,21 @@ def test_get_progress_rows_by_canonical_id_map_sorts_by_priority(
             AnnouncementProgressStatus.IN_PROGRESS,
             AnnouncementProgressStatus.REVIEW,
         ]
+        now = datetime.now(UTC)
+        # mutex 제약 없이 직접 삽입 — 정렬 회귀 테스트 전용.
         for organization, status_enum in zip(organizations, statuses, strict=True):
-            create_progress(
-                session,
-                canonical_project_id=canonical_project.id,
-                organization_id=organization.id,
-                status=status_enum,
-                note="",
-                created_by_user_id=seeder.id,
+            session.add(
+                AnnouncementProgress(
+                    canonical_project_id=canonical_project.id,
+                    organization_id=organization.id,
+                    status=status_enum,
+                    note="",
+                    created_by_user_id=seeder.id,
+                    created_at=now,
+                    updated_at=now,
+                )
             )
+        session.flush()
         canonical_id_value = canonical_project.id
 
     with session_scope() as session:

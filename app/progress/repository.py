@@ -53,12 +53,13 @@ from app.db.models import (
 #
 # 진행 단계 우선순위 — 본인이 여러 조직에 소속되어 있고 그 중 여러 조직이 같은
 # canonical 에 활동 row 를 가질 때 ``my_org_active`` 에 어떤 단계를 보고할지
-# 결정하는 데 사용한다. "활동성이 강한 단계" 를 우선한다 — 진행 > 검토 > 관심.
-# '종료' 는 활동성으로 보지 않으며 ``my_org_active`` 에 노출하지 않는다.
+# 결정하는 데 사용한다. "활동성이 강한 단계" 를 우선한다 — 진행 > 검토 > 관심 > 종료.
+# task 00098: '종료' 도 본인 조직 강조가 가능해야 하므로 가장 낮은 우선순위로 포함.
 _MY_ORG_ACTIVE_PRIORITY: tuple[AnnouncementProgressStatus, ...] = (
     AnnouncementProgressStatus.IN_PROGRESS,
     AnnouncementProgressStatus.REVIEW,
     AnnouncementProgressStatus.INTEREST,
+    AnnouncementProgressStatus.DONE,
 )
 
 
@@ -87,12 +88,12 @@ class PreemptionConflict(Exception):
         self.conflicting_organization_name = conflicting_organization_name
         if conflicting_organization_name:
             super().__init__(
-                f"조직 {conflicting_organization_name!r} 가 이미 진행 중입니다 "
+                f"조직 {conflicting_organization_name!r} 가 이미 진행 또는 종료 중입니다 "
                 f"(organization_id={conflicting_organization_id})."
             )
         else:
             super().__init__(
-                f"organization_id={conflicting_organization_id} 가 이미 진행 중입니다."
+                f"organization_id={conflicting_organization_id} 가 이미 진행 또는 종료 중입니다."
             )
 
 
@@ -124,16 +125,19 @@ class ProgressSummary:
         counter_review: ``status='검토'`` row 수 (단계별 분리, 종료 제외).
         counter_interest: ``status='관심'`` row 수.
         my_org_active: 본인 소속 조직 중 하나가 이 canonical 에 활동 row 를
-            가지고 있을 때 그 단계 (``'관심'``/``'검토'``/``'진행'`` 한글 문자열).
-            여러 본인 조직이 동시에 활동 중이면 우선순위 진행>검토>관심 으로
-            가장 강한 단계 1 개. ``'종료'`` 단계는 활동성으로 보지 않는다.
+            가지고 있을 때 그 단계 (``'관심'``/``'검토'``/``'진행'``/``'종료'`` 한글 문자열).
+            여러 본인 조직이 동시에 활동 중이면 우선순위 진행>검토>관심>종료 으로
+            가장 강한 단계 1 개.
             비로그인 (``user_id=None``) 또는 본인 활동 없으면 None.
+        done_org: ``status='종료'`` 인 조직 (있으면 1 개, mutex 단일 보장).
+            없으면 None. task 00098: UI 셀에서 '종료:팀명' 표시에 사용.
     """
 
     in_progress_org: ProgressOrganizationRef | None
     counter_review: int
     counter_interest: int
     my_org_active: str | None
+    done_org: ProgressOrganizationRef | None = None
 
 
 PROGRESS_SUMMARY_EMPTY: ProgressSummary = ProgressSummary(
@@ -141,6 +145,7 @@ PROGRESS_SUMMARY_EMPTY: ProgressSummary = ProgressSummary(
     counter_review=0,
     counter_interest=0,
     my_org_active=None,
+    done_org=None,
 )
 
 
@@ -234,11 +239,13 @@ def ensure_in_progress_unique(
     canonical_project_id: int,
     organization_id: int,
 ) -> None:
-    """선점 제약 (한 canonical 당 ``status='진행'`` 단일 조직) 을 검증한다.
+    """선점 제약 (한 canonical 당 ``status='진행'`` 또는 ``'종료'`` 단일 조직) 을 검증한다.
 
-    ``status`` 를 ``'진행'`` 으로 올리려는 시점에만 호출한다. 본인 조직 (``organization_id``)
-    을 제외한 같은 canonical 의 다른 조직 row 중 ``status='진행'`` 인 row 가
-    존재하면 ``PreemptionConflict`` 를 raise 한다.
+    ``status`` 를 ``'진행'`` 또는 ``'종료'`` 로 바꾸려는 시점에 호출한다. 본인 조직
+    (``organization_id``) 을 제외한 같은 canonical 의 다른 조직 row 중
+    ``status IN ('진행', '종료')`` 인 row 가 존재하면 ``PreemptionConflict`` 를 raise 한다.
+
+    '관심' / '검토' 는 선점 대상이 아니므로 이 함수를 호출하지 않는다.
 
     SQLite 단일 writer 가정하에 트랜잭션 안 SELECT → INSERT/UPDATE 사이에 다른
     writer 가 끼어들 수 없으므로 race condition 없이 안전하다 (``docs/db_portability.md``
@@ -251,8 +258,12 @@ def ensure_in_progress_unique(
         organization_id: 본인 조직 PK — 이 조직의 row 는 충돌 검증에서 제외.
 
     Raises:
-        PreemptionConflict: 다른 조직이 이미 진행 중일 때.
+        PreemptionConflict: 다른 조직이 이미 진행 또는 종료 중일 때.
     """
+    preempting_statuses = [
+        AnnouncementProgressStatus.IN_PROGRESS,
+        AnnouncementProgressStatus.DONE,
+    ]
     conflicting = session.execute(
         select(AnnouncementProgress, Organization.name)
         .outerjoin(
@@ -261,7 +272,7 @@ def ensure_in_progress_unique(
         .where(
             AnnouncementProgress.canonical_project_id == canonical_project_id,
             AnnouncementProgress.organization_id != organization_id,
-            AnnouncementProgress.status == AnnouncementProgressStatus.IN_PROGRESS,
+            AnnouncementProgress.status.in_(preempting_statuses),
         )
         .limit(1)
     ).first()
@@ -404,8 +415,11 @@ def create_progress(
             now=now_ts,
         )
 
-    # 신규 INSERT — '진행' 으로 올릴 때 선점 제약 안전망.
-    if coerced_status == AnnouncementProgressStatus.IN_PROGRESS:
+    # 신규 INSERT — '진행' 또는 '종료' 로 올릴 때 선점 제약 안전망.
+    if coerced_status in {
+        AnnouncementProgressStatus.IN_PROGRESS,
+        AnnouncementProgressStatus.DONE,
+    }:
         ensure_in_progress_unique(
             session,
             canonical_project_id=canonical_project_id,
@@ -472,7 +486,11 @@ def update_progress(
             f"AnnouncementProgress(id={progress_id}) row 가 존재하지 않습니다."
         )
 
-    if coerced_status == AnnouncementProgressStatus.IN_PROGRESS:
+    # '진행' 또는 '종료' 로 변경할 때 선점 제약 검증.
+    if coerced_status in {
+        AnnouncementProgressStatus.IN_PROGRESS,
+        AnnouncementProgressStatus.DONE,
+    }:
         ensure_in_progress_unique(
             session,
             canonical_project_id=current_row.canonical_project_id,
@@ -679,6 +697,7 @@ def get_progress_summary_by_canonical_id_map(
 
     # canonical 별 버킷팅 + 카운터 + 본인 활동 단계 계산.
     in_progress_per_canonical: dict[int, ProgressOrganizationRef] = {}
+    done_per_canonical: dict[int, ProgressOrganizationRef] = {}
     counter_review_per_canonical: dict[int, int] = {}
     counter_interest_per_canonical: dict[int, int] = {}
     my_org_actives_per_canonical: dict[int, set[AnnouncementProgressStatus]] = {}
@@ -695,6 +714,13 @@ def get_progress_summary_by_canonical_id_map(
                     id=progress_row.organization_id,
                     name=organization_name or "",
                 )
+        elif status == AnnouncementProgressStatus.DONE:
+            # DONE 도 mutex 단일 조직 보장. 첫 번째 row 만 사용 (defensive).
+            if canonical_id not in done_per_canonical:
+                done_per_canonical[canonical_id] = ProgressOrganizationRef(
+                    id=progress_row.organization_id,
+                    name=organization_name or "",
+                )
         elif status == AnnouncementProgressStatus.REVIEW:
             counter_review_per_canonical[canonical_id] = (
                 counter_review_per_canonical.get(canonical_id, 0) + 1
@@ -703,18 +729,15 @@ def get_progress_summary_by_canonical_id_map(
             counter_interest_per_canonical[canonical_id] = (
                 counter_interest_per_canonical.get(canonical_id, 0) + 1
             )
-        # status == DONE: 카운터·my_org_active 어디에도 노출하지 않는다.
 
-        if (
-            user_id is not None
-            and progress_row.organization_id in my_org_ids
-            and status != AnnouncementProgressStatus.DONE
-        ):
+        # task 00098: DONE 단계도 본인 조직 강조(종료:팀명) 를 위해 my_org_active 에 포함.
+        if user_id is not None and progress_row.organization_id in my_org_ids:
             my_org_actives_per_canonical.setdefault(canonical_id, set()).add(status)
 
     # row 가 한 건이라도 있는 canonical 만 결과에 넣는다.
     canonical_ids_seen = (
         set(in_progress_per_canonical)
+        | set(done_per_canonical)
         | set(counter_review_per_canonical)
         | set(counter_interest_per_canonical)
         | set(my_org_actives_per_canonical)
@@ -734,6 +757,7 @@ def get_progress_summary_by_canonical_id_map(
             counter_review=counter_review_per_canonical.get(canonical_id, 0),
             counter_interest=counter_interest_per_canonical.get(canonical_id, 0),
             my_org_active=my_org_active_value,
+            done_org=done_per_canonical.get(canonical_id),
         )
 
     return summary_map
