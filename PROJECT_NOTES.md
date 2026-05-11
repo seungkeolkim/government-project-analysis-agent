@@ -285,6 +285,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
+- [00099] 목록 expand 사유 다중행 표시 CSS 수정 — progress.css expand 영역에 `white-space: pre-wrap; overflow-wrap: anywhere` 추가, 관심/검토/진행/종료 모든 상태에 동일 적용 — 2026-05-11
 - [00098] 진행상태 종료 mutex 확장 + 목록 셀 pill UI 개선 — 진행·종료 통합 선점 제약 적용, ProgressSummary.done_org 추가, 셀 표시를 pill 4종(관심=노란·검토=연두·진행=파랑·종료=회색)으로 교체 + 진행/종료 시 팀명 표시 — 2026-05-11
 - [00097] 공고 진행 상태(Progress) 기능 구현 — 조직 단위 관심/검토/진행/종료 4단계, 진행 선점 제약(canonical당 1조직, app-level transactional check), 조직 멤버 누구나 수정 권한, 다중 체크박스 필터 + 목록 셀/상세 인라인 섹션 UI — 2026-05-08
 - [00096] 관리자 페이지 「시스템 관리」 탭 신설 — 시스템 백업을 공고 수집 제어 하위에서 분리, 백업 스케줄 표시도 시스템 백업 탭으로 통합 — 2026-05-08
