@@ -1,9 +1,9 @@
 /* ============================================================
-   Phase C — 공고 진행 상태 / 선점 UI (task 00097-5)
+   Phase C — 공고 진행 상태 / 선점 UI (task 00097-5, task 00098 pill 개선)
    docs/progress_org_design.md §4 기반.
 
    포함:
-     - 목록 셀 (.pg-wrap / .pg-occupy / .pg-counter)
+     - 목록 셀 (.pg-wrap / .pg-pill 4종)
      - hover 툴팁 (.pg-tooltip — Phase B 의 viewport fixed 레이어 패턴 재사용 — task 00088)
      - 상세 페이지 인라인 섹션 (.pg-detail-section / .pg-detail-row)
      - 4 단계 status 배지 (.pg-status-badge--in_progress 등)
@@ -11,7 +11,9 @@
 
 /* ── 목록 셀 컨테이너 ─────────────────────────────────────── */
 .col-progress {
-    width: 130px;
+    /* task 00098: 한글 팀명 표시를 위해 130px → 240px 확대.
+       진행:기술전략팀 등 긴 팀명이 잘리지 않도록 충분한 너비 확보. */
+    width: 240px;
     text-align: left;
     padding-left: 8px;
     padding-right: 8px;
@@ -21,14 +23,15 @@
 .pg-wrap {
     position: relative;
     display: inline-flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 2px;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 3px;
     max-width: 100%;
     line-height: 1.3;
     cursor: default;
     border-radius: 4px;
-    padding: 1px 3px;
+    padding: 2px 3px;
     transition: background-color 0.12s ease;
 }
 
@@ -59,76 +62,54 @@
     font-size: 14px;
 }
 
-/* ── 선점 라인 (큰 글씨) ──────────────────────────────────── */
-.pg-occupy {
+/* ── pill 배지 4종 (task 00098) ────────────────────────────
+   .rj-badge 와 동일한 좌우 둥근 스타일 + 4 단계 색상 변형.
+   진행/종료: 팀명 동반 표시.  관심/검토: 카운트 표시. */
+.pg-pill {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    font-size: 13px;
-    font-weight: 600;
-    color: #111827;
-    white-space: nowrap;
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.pg-occupy__flag {
+    border-radius: 999px;
+    border: 1px solid transparent;
+    padding: 2px 8px;
     font-size: 12px;
-}
-
-.pg-occupy__org {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 96px;
-}
-
-.pg-occupy__sep {
-    color: #6b7280;
-}
-
-.pg-occupy__status {
-    color: #b91c1c;
-    font-weight: 700;
-}
-
-/* 본인 조직이 진행 중일 때 — 조직명 강조. */
-.pg-occupy--mine .pg-occupy__org {
-    color: #1d4ed8;
-    text-decoration: underline;
-    text-underline-offset: 2px;
-}
-
-/* ── 카운터 라인 (small text) ─────────────────────────────── */
-.pg-counter {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 11px;
-    color: #6b7280;
+    font-weight: 600;
     line-height: 1.4;
-}
-
-.pg-counter__cell {
     white-space: nowrap;
+    vertical-align: middle;
 }
 
-.pg-counter__cell--review {
+/* 관심 — 노란색 계열 */
+.pg-pill--interest {
+    background: #fef9c3;
+    border-color: #fde047;
+    color: #854d0e;
+}
+
+/* 검토 — 연두색 계열 */
+.pg-pill--review {
+    background: #dcfce7;
+    border-color: #86efac;
+    color: #14532d;
+}
+
+/* 진행 — 파란색 계열 */
+.pg-pill--in-progress {
+    background: #dbeafe;
+    border-color: #93c5fd;
+    color: #1e3a8a;
+}
+
+/* 종료 — 회색 계열 */
+.pg-pill--done {
+    background: #e5e7eb;
+    border-color: #d1d5db;
     color: #4b5563;
 }
 
-.pg-counter__cell--interest {
-    color: #6b7280;
-}
-
-/* 본인 조직이 활동 중인 단계의 카운터 강조. */
-.pg-counter__cell--mine {
-    color: #1d4ed8;
+/* 본인 조직 강조 — 굵게 + 현재 글자색으로 1.5px 링 (단계별 색상 그대로 활용). */
+.pg-pill--mine {
     font-weight: 700;
-}
-
-.pg-counter__sep {
-    color: #d1d5db;
+    box-shadow: 0 0 0 1.5px currentColor;
 }
 
 /* ── hover 툴팁 — viewport 기준 fixed (Phase B 00088 패턴) ── */

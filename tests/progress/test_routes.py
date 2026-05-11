@@ -520,20 +520,23 @@ def test_patch_progress_in_progress_preemption_conflict_returns_409(
 # ── 시나리오 5: 선점 조직이 종료/하향 후 다른 조직 진행 가능 ────────────
 
 
-def test_other_organization_can_take_over_after_release(
+def test_done_status_still_holds_preemption_mutex_in_routes(
     logged_in_client: TestClient, canonical_id: int
 ) -> None:
-    """A 가 진행→종료로 내려가면 B (alice 소속) 가 진행으로 올라갈 수 있다."""
-    occupier_org_id = _create_organization("팀-A-release")
-    me_org_id = _create_organization("팀-B-takeover")
+    """A 가 진행→종료 전환 후에도 B 의 진행 시도 → 409. task 00098: 종료도 mutex.
+
+    '종료' 도 mutex 대상이 되었으므로 A 가 DONE 이 된 후에도 B 는 IN_PROGRESS 를 잡을 수 없다.
+    """
+    occupier_org_id = _create_organization("팀-A-release-mutex")
+    me_org_id = _create_organization("팀-B-takeover-blocked")
     _add_user_to_organization("progress_alice", me_org_id)
 
     with session_scope() as s:
-        seeder = User(username="progress_seeder_release", password_hash="dummy")
+        seeder = User(username="progress_seeder_release_mutex", password_hash="dummy")
         s.add(seeder)
         s.flush()
         seeder_id = seeder.id
-    _add_user_to_organization("progress_seeder_release", occupier_org_id)
+    _add_user_to_organization("progress_seeder_release_mutex", occupier_org_id)
     occupier_progress_id = _create_progress_via_repo(
         canonical_id,
         occupier_org_id,
@@ -542,14 +545,14 @@ def test_other_organization_can_take_over_after_release(
         seeder_id,
     )
 
-    # 1) alice 가 B 조직 진행 시도 → 409.
-    blocked = logged_in_client.post(
+    # 1) alice 가 B 조직 진행 시도 → 409 (A 가 IN_PROGRESS 보유).
+    blocked_inprogress = logged_in_client.post(
         f"/canonical/{canonical_id}/progress",
         json={"organization_id": me_org_id, "status": "진행", "note": ""},
     )
-    assert blocked.status_code == 409
+    assert blocked_inprogress.status_code == 409
 
-    # 2) A 조직 row 를 '종료' 로 내린다 (repository 직접 호출 — A 조직 멤버 시뮬레이션).
+    # 2) A 조직 row 를 '종료' 로 내린다.
     with session_scope() as s:
         from app.progress.repository import update_progress as _update
 
@@ -561,13 +564,13 @@ def test_other_organization_can_take_over_after_release(
             modifier_user_id=seeder_id,
         )
 
-    # 3) 이제 alice 가 B 조직 진행 시도 → 200 (선점 가능).
-    success = logged_in_client.post(
+    # 3) A 가 DONE 이 된 후에도 B 의 진행 시도 → 409 (종료도 mutex 보유).
+    blocked_after_done = logged_in_client.post(
         f"/canonical/{canonical_id}/progress",
-        json={"organization_id": me_org_id, "status": "진행", "note": "B 인수"},
+        json={"organization_id": me_org_id, "status": "진행", "note": "B 인수 시도"},
     )
-    assert success.status_code == 200
-    assert success.json()["status"] == "진행"
+    assert blocked_after_done.status_code == 409
+    assert "팀-A-release-mutex" in blocked_after_done.json()["detail"]
 
 
 # ── 시나리오 6: 양방향 롤백 — 모든 4 단계 자유 전이 ─────────────────────
@@ -753,6 +756,126 @@ def test_summary_helper_single_query_for_many_canonicals(
         f"N+1 회귀 의심 — canonical 5 개 처리에 SELECT {select_count} 회 발행됨. "
         "단일 쿼리 묶음 패턴이 깨졌는지 확인하세요."
     )
+
+
+# ── task 00098: 종료 mutex 확장 라우터 시나리오 ──────────────────────────────
+
+
+def test_done_org_preemption_blocks_other_in_progress_via_post(
+    logged_in_client: TestClient, canonical_id: int
+) -> None:
+    """다른 조직이 종료 상태일 때 본인이 진행 시도 → 409.
+
+    task 00098 시나리오: DONE 도 mutex 단계이므로 타 조직 DONE 이 있으면 IN_PROGRESS 불가.
+    """
+    done_org_id = _create_organization("팀-종료-선점-route")
+    me_org_id = _create_organization("팀-진행-도전-route")
+    _add_user_to_organization("progress_alice", me_org_id)
+
+    with session_scope() as s:
+        seeder = User(username="progress_done_preempt_seeder", password_hash="dummy")
+        s.add(seeder)
+        s.flush()
+        seeder_id = seeder.id
+    _add_user_to_organization("progress_done_preempt_seeder", done_org_id)
+
+    # 다른 조직이 DONE 상태로 row 를 보유한다.
+    _create_progress_via_repo(
+        canonical_id,
+        done_org_id,
+        AnnouncementProgressStatus.DONE,
+        "타 조직 종료",
+        seeder_id,
+    )
+
+    # alice (me_org) 가 IN_PROGRESS 시도 → 409.
+    resp = logged_in_client.post(
+        f"/canonical/{canonical_id}/progress",
+        json={"organization_id": me_org_id, "status": "진행", "note": ""},
+    )
+    assert resp.status_code == 409
+    assert "팀-종료-선점-route" in resp.json()["detail"]
+
+
+def test_in_progress_org_preemption_blocks_other_done_via_post(
+    logged_in_client: TestClient, canonical_id: int
+) -> None:
+    """다른 조직이 진행 상태일 때 본인이 종료 시도 → 409.
+
+    task 00098 시나리오: IN_PROGRESS 보유 조직이 있으면 타 조직의 DONE 진입도 불가.
+    """
+    in_progress_org_id = _create_organization("팀-진행-선점-done-route")
+    me_org_id = _create_organization("팀-종료-도전-route")
+    _add_user_to_organization("progress_alice", me_org_id)
+
+    with session_scope() as s:
+        seeder = User(username="progress_inprog_preempt_seeder", password_hash="dummy")
+        s.add(seeder)
+        s.flush()
+        seeder_id = seeder.id
+    _add_user_to_organization("progress_inprog_preempt_seeder", in_progress_org_id)
+
+    # 다른 조직이 IN_PROGRESS 상태.
+    _create_progress_via_repo(
+        canonical_id,
+        in_progress_org_id,
+        AnnouncementProgressStatus.IN_PROGRESS,
+        "타 조직 진행",
+        seeder_id,
+    )
+
+    # alice (me_org) 가 DONE 시도 → 409.
+    resp = logged_in_client.post(
+        f"/canonical/{canonical_id}/progress",
+        json={"organization_id": me_org_id, "status": "종료", "note": ""},
+    )
+    assert resp.status_code == 409
+    assert "팀-진행-선점-done-route" in resp.json()["detail"]
+
+
+def test_done_org_does_not_block_interest_or_review_via_post(
+    logged_in_client: TestClient, canonical_id: int
+) -> None:
+    """다른 조직이 종료 상태일 때 본인이 관심/검토 → 허용.
+
+    task 00098 시나리오: '관심', '검토' 는 mutex 비대상 — DONE 이 있어도 진입 가능.
+    """
+    done_org_id = _create_organization("팀-종료-보유-route")
+    me_org_id = _create_organization("팀-관심검토-진입-route")
+    _add_user_to_organization("progress_alice", me_org_id)
+
+    with session_scope() as s:
+        seeder = User(username="progress_done_holder_seeder", password_hash="dummy")
+        s.add(seeder)
+        s.flush()
+        seeder_id = seeder.id
+    _add_user_to_organization("progress_done_holder_seeder", done_org_id)
+
+    # 다른 조직이 DONE 상태 선점.
+    _create_progress_via_repo(
+        canonical_id,
+        done_org_id,
+        AnnouncementProgressStatus.DONE,
+        "타 조직 종료",
+        seeder_id,
+    )
+
+    # alice 가 INTEREST 로 진입 → 200 허용.
+    resp_interest = logged_in_client.post(
+        f"/canonical/{canonical_id}/progress",
+        json={"organization_id": me_org_id, "status": "관심", "note": "관심 표명"},
+    )
+    assert resp_interest.status_code == 200
+    assert resp_interest.json()["status"] == "관심"
+
+    # alice 가 REVIEW 로 갱신 → 200 허용.
+    progress_id = resp_interest.json()["id"]
+    resp_review = logged_in_client.patch(
+        f"/canonical/{canonical_id}/progress/{progress_id}",
+        json={"status": "검토", "note": "검토 진입"},
+    )
+    assert resp_review.status_code == 200
+    assert resp_review.json()["status"] == "검토"
 
 
 def test_get_history_returns_serialized_rows(

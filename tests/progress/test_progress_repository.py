@@ -237,10 +237,14 @@ def test_in_progress_does_not_block_same_organization(
 # ── (3) 시나리오 5: 선점 조직이 다른 단계로 내려가면 다른 조직이 '진행' 가능 ──
 
 
-def test_other_organization_can_take_over_after_release(
+def test_done_status_still_holds_preemption_mutex(
     test_engine: Engine, db_session: Session
 ) -> None:
-    """A 가 '종료' 로 내려가면 B 가 '진행' 으로 올라갈 수 있다."""
+    """A 가 '종료' 가 된 후에도 선점 mutex 를 유지한다 — B 가 '진행' 시도 → PreemptionConflict.
+
+    task 00098: '종료' 도 mutex 대상이므로 A 가 IN_PROGRESS → DONE 으로 전환해도
+    다른 조직이 진행/종료를 잡을 수 없다.
+    """
     canonical = _make_canonical(db_session, "official:release-1")
     organization_first = _make_organization(db_session, "팀-A-종료")
     organization_second = _make_organization(db_session, "팀-B-새진행")
@@ -263,23 +267,17 @@ def test_other_organization_can_take_over_after_release(
         modifier_user_id=user_first.id,
     )
 
-    # 이제 B 조직이 '진행' 으로 올라갈 수 있어야 한다 — 선점 충돌 없음.
-    progress_second = create_progress(
-        db_session,
-        canonical_project_id=canonical.id,
-        organization_id=organization_second.id,
-        status=AnnouncementProgressStatus.IN_PROGRESS,
-        note="B 진행",
-        created_by_user_id=user_second.id,
-    )
-    assert progress_second.status == AnnouncementProgressStatus.IN_PROGRESS
-
-    # ensure_in_progress_unique 를 별도로 호출해도 통과.
-    ensure_in_progress_unique(
-        db_session,
-        canonical_project_id=canonical.id,
-        organization_id=organization_second.id,
-    )
+    # A 가 DONE 이 되었어도 B 의 진행 시도 → 선점 충돌 (종료도 mutex 보유).
+    with pytest.raises(PreemptionConflict) as excinfo:
+        create_progress(
+            db_session,
+            canonical_project_id=canonical.id,
+            organization_id=organization_second.id,
+            status=AnnouncementProgressStatus.IN_PROGRESS,
+            note="B 진행 시도",
+            created_by_user_id=user_second.id,
+        )
+    assert excinfo.value.conflicting_organization_id == organization_first.id
 
 
 # ── (4) 시나리오 6: 양방향 롤백 — 모든 4 단계 사이 자유 전이 ─────────────
@@ -661,8 +659,14 @@ def test_summary_anonymous_omits_my_org_active(
     assert summary.my_org_active is None
 
 
-def test_summary_skips_done_status(test_engine: Engine, db_session: Session) -> None:
-    """status='종료' 는 카운터 / my_org_active 어디에도 노출하지 않는다."""
+def test_summary_done_status_exposed_in_done_org_and_my_org_active(
+    test_engine: Engine, db_session: Session
+) -> None:
+    """status='종료' 는 카운터에는 노출하지 않으나 done_org 와 my_org_active 에는 노출된다.
+
+    task 00098: UI 셀에서 '종료:팀명' 을 표시하기 위해 done_org 필드를 채우고,
+    본인 조직이 종료 상태일 때 my_org_active 도 '종료' 로 강조한다.
+    """
     canonical = _make_canonical(db_session, "official:summary-done-1")
     organization = _make_organization(db_session, "팀-done")
     user = _make_user_with_org(db_session, "summary-done-user", organization)
@@ -681,12 +685,17 @@ def test_summary_skips_done_status(test_engine: Engine, db_session: Session) -> 
         user_id=user.id,
         canonical_project_ids=[canonical.id],
     )
-    # row 가 1 개라도 있으니 키는 들어가지만 모든 카운터·my_org_active 가 비어 있어야 함.
-    summary = summary_map.get(canonical.id, PROGRESS_SUMMARY_EMPTY)
+    # DONE row 가 있으니 done_org 로 노출되어 canonical 이 맵에 포함된다.
+    summary = summary_map[canonical.id]
     assert summary.in_progress_org is None
+    assert summary.done_org is not None
+    assert summary.done_org.id == organization.id
+    assert summary.done_org.name == "팀-done"
+    # 카운터는 여전히 DONE 을 포함하지 않는다.
     assert summary.counter_review == 0
     assert summary.counter_interest == 0
-    assert summary.my_org_active is None
+    # 본인 조직이 종료 상태이므로 my_org_active 는 '종료'.
+    assert summary.my_org_active == "종료"
 
 
 def test_summary_empty_input_returns_empty_dict(
@@ -719,6 +728,131 @@ def test_list_user_organization_ids(test_engine: Engine, db_session: Session) ->
     assert list_user_organization_ids(db_session, None) == []
     isolated_user = _make_user(db_session, "isolated-user")
     assert list_user_organization_ids(db_session, isolated_user.id) == []
+
+
+# ── (10) task 00098: 종료 mutex 확장 시나리오 ────────────────────────────────
+
+
+def test_done_org_preemption_blocks_other_in_progress(
+    test_engine: Engine, db_session: Session
+) -> None:
+    """다른 조직이 종료 상태일 때 본인이 진행 시도 → PreemptionConflict.
+
+    task 00098 시나리오: A 가 DONE 을 보유 중이면 B 는 IN_PROGRESS 진입 불가.
+    """
+    canonical = _make_canonical(db_session, "official:done-blocks-inprogress-1")
+    organization_done = _make_organization(db_session, "팀-종료-선점")
+    organization_challenger = _make_organization(db_session, "팀-진행-도전")
+    user_done = _make_user(db_session, "done-org-user")
+    user_challenger = _make_user(db_session, "challenger-user")
+
+    # A 조직이 DONE 상태로 row 를 생성한다.
+    create_progress(
+        db_session,
+        canonical_project_id=canonical.id,
+        organization_id=organization_done.id,
+        status=AnnouncementProgressStatus.DONE,
+        note="A 종료",
+        created_by_user_id=user_done.id,
+    )
+
+    # B 조직이 IN_PROGRESS 시도 → PreemptionConflict.
+    with pytest.raises(PreemptionConflict) as excinfo:
+        create_progress(
+            db_session,
+            canonical_project_id=canonical.id,
+            organization_id=organization_challenger.id,
+            status=AnnouncementProgressStatus.IN_PROGRESS,
+            note="B 진행 시도",
+            created_by_user_id=user_challenger.id,
+        )
+    assert excinfo.value.conflicting_organization_id == organization_done.id
+    assert excinfo.value.conflicting_organization_name == "팀-종료-선점"
+
+
+def test_in_progress_org_preemption_blocks_other_done(
+    test_engine: Engine, db_session: Session
+) -> None:
+    """다른 조직이 진행 상태일 때 본인이 종료 시도 → PreemptionConflict.
+
+    task 00098 시나리오: A 가 IN_PROGRESS 를 보유 중이면 B 는 DONE 진입 불가.
+    """
+    canonical = _make_canonical(db_session, "official:inprogress-blocks-done-1")
+    organization_in_progress = _make_organization(db_session, "팀-진행-선점")
+    organization_challenger = _make_organization(db_session, "팀-종료-도전")
+    user_in_progress = _make_user(db_session, "inprogress-org-user")
+    user_challenger = _make_user(db_session, "done-challenger-user")
+
+    # A 조직이 IN_PROGRESS 상태.
+    create_progress(
+        db_session,
+        canonical_project_id=canonical.id,
+        organization_id=organization_in_progress.id,
+        status=AnnouncementProgressStatus.IN_PROGRESS,
+        note="A 진행",
+        created_by_user_id=user_in_progress.id,
+    )
+
+    # B 조직이 DONE 시도 → PreemptionConflict.
+    with pytest.raises(PreemptionConflict) as excinfo:
+        create_progress(
+            db_session,
+            canonical_project_id=canonical.id,
+            organization_id=organization_challenger.id,
+            status=AnnouncementProgressStatus.DONE,
+            note="B 종료 시도",
+            created_by_user_id=user_challenger.id,
+        )
+    assert excinfo.value.conflicting_organization_id == organization_in_progress.id
+    assert excinfo.value.conflicting_organization_name == "팀-진행-선점"
+
+
+def test_done_org_does_not_block_interest_or_review(
+    test_engine: Engine, db_session: Session
+) -> None:
+    """다른 조직이 종료 상태일 때 본인이 관심/검토 → 허용 (mutex 미적용 단계).
+
+    task 00098 시나리오: IN_PROGRESS/DONE mutex 는 '관심', '검토' 에는 적용되지 않는다.
+    """
+    canonical = _make_canonical(db_session, "official:done-allows-interest-review-1")
+    organization_done = _make_organization(db_session, "팀-종료-보유")
+    organization_interest = _make_organization(db_session, "팀-관심-진입")
+    organization_review = _make_organization(db_session, "팀-검토-진입")
+    user_done = _make_user(db_session, "done-holder")
+    user_interest = _make_user(db_session, "interest-entrant")
+    user_review = _make_user(db_session, "review-entrant")
+
+    # A 조직이 DONE 상태 선점.
+    create_progress(
+        db_session,
+        canonical_project_id=canonical.id,
+        organization_id=organization_done.id,
+        status=AnnouncementProgressStatus.DONE,
+        note="A 종료",
+        created_by_user_id=user_done.id,
+    )
+
+    # B 조직이 INTEREST 로 진입 → 허용.
+    progress_interest = create_progress(
+        db_session,
+        canonical_project_id=canonical.id,
+        organization_id=organization_interest.id,
+        status=AnnouncementProgressStatus.INTEREST,
+        note="B 관심",
+        created_by_user_id=user_interest.id,
+    )
+    assert progress_interest.status == AnnouncementProgressStatus.INTEREST
+
+    # C 조직이 REVIEW 로 진입 → 허용.
+    progress_review = create_progress(
+        db_session,
+        canonical_project_id=canonical.id,
+        organization_id=organization_review.id,
+        status=AnnouncementProgressStatus.REVIEW,
+        note="C 검토",
+        created_by_user_id=user_review.id,
+    )
+    assert progress_review.status == AnnouncementProgressStatus.REVIEW
 
 
 # NOTE: FK CASCADE (조직 삭제 → progress / history 자동 정리) 는 DDL 레벨 회귀로
