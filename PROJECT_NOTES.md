@@ -62,7 +62,7 @@ FastAPI + Jinja2 (`templates/`) + 로컬 정적 리소스 (`static/`, 외부 CDN
 
 - `app/suggestions/` — 건의사항 게시판. `models.py` (`Suggestion`·`SuggestionComment`·`SuggestionAcceptance` — 별도 SQLAlchemy Base. `Suggestion.updated_at`·`SuggestionComment.updated_at` 은 INSERT 시 NULL, 수정 시만 ORM `onupdate` 콜러블이 채움. `Suggestion.deleted_at`·`SuggestionComment.deleted_at` nullable + INDEX, NULL=활성/값 있음=소프트 삭제). `session.py` (`boards.sqlite` 연결 SessionLocal — 메인 `app.sqlite` 와 분리). `repository.py` (CRUD, 비밀글 권한 필터, 수용여부 UPSERT, `count_comments_by_suggestion_ids` GROUP BY 단일 쿼리로 N+1 방지, 모든 조회·카운트에 `deleted_at IS NULL` 필터, `delete_suggestion` 은 게시글 + 소속 댓글 일괄 소프트 삭제(SQLAlchemy soft-delete cascade 미지원으로 명시적 bulk UPDATE)). `service.py` (`SuggestionView` DTO 의 `comment_count: int` + `SuggestionCommentView.is_owner` 등 비즈니스 로직). `author_validity.py` (cross-DB 작성자 유효성 헬퍼 — 메인 DB reset 으로 FK 깨진 행은 작성자 표기를 None 으로 처리). `migration.py` (`migrate_suggestions_to_boards()` 기존 suggestions.sqlite → boards.sqlite 일회성 rename 마이그레이션 + `ensure_suggestion_comment_updated_at_column()`·`ensure_deleted_at_columns()`·`ensure_updated_at_initial_null_backfill()` 멱등 ALTER 부트스트랩. 신규 환경은 `create_all` 이 처리하므로 NOOP).
 - `app/notices/` — 공지사항 게시판. `models.py` (`Notice` ORM — `app/suggestions/` Base 와 별도 또는 boards DB 공유 Base. `deleted_at` nullable + INDEX, `updated_at` nullable). `repository.py` CRUD + `deleted_at IS NULL` 필터 + 소프트 삭제. `boards.sqlite` 를 `app/suggestions/session.py` 와 공유.
-- `app/progress/` — 공고 진행 상태 패키지. `repository.py` 가 `AnnouncementProgress` CRUD·선점 제약(app-level transactional check)·history 이관·목록 summary 헬퍼 담당. 권한 검증은 repository 에서 하지 않고 라우터(`routes/progress.py`) 가 본인 소속 조직 검증·외 조직 row 차단을 결정한다.
+- `app/progress/` — 공고 진행 상태 패키지. `repository.py` 가 `AnnouncementProgress` CRUD·선점 제약(app-level transactional check)·history 이관·목록 summary 헬퍼 담당. `ProgressSummary` 는 `in_progress_org`·`counter_review`·`counter_interest`·`my_org_active`·`done_org` 5개 필드 — `done_org` 는 `종료` 조직 참조로 목록 셀 '종료:팀명' 표시에 사용 (mutex 단일 보장). 권한 검증은 repository 에서 하지 않고 라우터(`routes/progress.py`) 가 본인 소속 조직 검증·외 조직 row 차단을 결정한다.
 - `app/services/` — 예약만 되어 있고 빈 패키지.
 
 ### IRIS 목록 API 구조
@@ -229,10 +229,10 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ### 공고 진행 상태 (Progress)
 
-- **선점 제약은 DB UNIQUE 대신 app-level transactional check**: `진행` 상태는 한 canonical 당 1 조직만 허용. SQLite partial unique index 문법 복잡성 + Postgres 이식성을 동시에 회피하기 위해 DB UNIQUE/CHECK 대신 SELECT(진행 row 존재 검사) → INSERT 단일 트랜잭션 패턴으로 보장 (SQLite 단일 writer 가정). 409 Conflict 은 라우터가 `PreemptionConflict` 예외를 캐치해 반환. `관심/검토/종료` 는 조직별 동시 복수 허용.
+- **선점 제약은 DB UNIQUE 대신 app-level transactional check**: `진행` 또는 `종료` 상태는 한 canonical 당 1 조직만 허용 — 어느 한 조직이 `진행`/`종료` 를 선택하면 다른 조직은 해당 두 상태 선택 불가. SQLite partial unique index 문법 복잡성 + Postgres 이식성을 동시에 회피하기 위해 DB UNIQUE/CHECK 대신 SELECT(진행·종료 row 존재 검사) → INSERT 단일 트랜잭션 패턴으로 보장 (SQLite 단일 writer 가정). 409 Conflict 은 라우터가 `PreemptionConflict` 예외를 캐치해 반환. `관심/검토` 는 조직별 동시 복수 허용.
 - **progress 권한 = 조직 멤버 누구나 (relevance 와 의도적 차이)**: 관련성 판정은 row 작성자 본인만 수정·삭제 허용. progress 는 같은 조직 소속이면 작성자와 상관없이 수정·삭제 가능 — 작성자 휴가·퇴사 시 협업 의사결정을 위한 결정. repository 는 권한 검증 미포함, 라우터가 전담.
 - **progress UNIQUE 키는 (canonical_project_id, organization_id)**: 동일 조직이 같은 canonical 에 row 를 중복 생성할 수 없다. `created_by_user_id` 는 "마지막 수정자" 메타로만 보존. relevance 의 `(canonical_project_id, user_id, organization_id)` 3-tuple 과 다르다.
-- **진행 단계 4종**: `관심 / 검토 / 진행 / 종료`. `진행` 만 선점 제약, 나머지 3종은 복수 조직 동시 가능. 목록 필터는 없음·진행중·검토중·내조직진행중·내조직검토중 다중 체크박스 OR. 비로그인 시 "내 조직 ..." 옵션은 silent drop. 설계 상세는 `docs/progress_org_design.md`.
+- **진행 단계 4종**: `관심 / 검토 / 진행 / 종료`. `진행`·`종료` 가 mutex 선점 제약 (한 canonical 당 두 상태 통합 1 조직), `관심`·`검토` 는 복수 조직 동시 가능. 목록 필터는 없음·진행중·검토중·내조직진행중·내조직검토중 다중 체크박스 OR. 비로그인 시 "내 조직 ..." 옵션은 silent drop. 설계 상세는 `docs/progress_org_design.md`.
 
 ### 게시판 (boards.sqlite3)
 
@@ -285,6 +285,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
+- [00098] 진행상태 종료 mutex 확장 + 목록 셀 pill UI 개선 — 진행·종료 통합 선점 제약 적용, ProgressSummary.done_org 추가, 셀 표시를 pill 4종(관심=노란·검토=연두·진행=파랑·종료=회색)으로 교체 + 진행/종료 시 팀명 표시 — 2026-05-11
 - [00097] 공고 진행 상태(Progress) 기능 구현 — 조직 단위 관심/검토/진행/종료 4단계, 진행 선점 제약(canonical당 1조직, app-level transactional check), 조직 멤버 누구나 수정 권한, 다중 체크박스 필터 + 목록 셀/상세 인라인 섹션 UI — 2026-05-08
 - [00096] 관리자 페이지 「시스템 관리」 탭 신설 — 시스템 백업을 공고 수집 제어 하위에서 분리, 백업 스케줄 표시도 시스템 백업 탭으로 통합 — 2026-05-08
 - [00095] Docker 실행 스크립트 개선 — compose.sh → run_compose.sh/run_admin.sh 분화, dev/prod 분기 제거, alembic 바인드 마운트로 migration 재빌드 불필요화 — 2026-05-08
@@ -294,4 +295,3 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - [00090] 관련성 카운터 집계에 본인 판정 포함 — RelevanceSummary 필드 others_count_* → count_* 로 리네임, 집계 범위를 others only 에서 mine_personal + mine_organization + others 전체로 확장 — 2026-05-08
 - [00089] 관련성 모달 UX 개선 — '판정 취소' 버튼 제거, 모달 하단 본인 판정 목록(X 삭제) UI 추가, GET /canonical/{id}/relevance/mine 엔드포인트 신설 — 2026-05-08
 - [00088] 관련성 hover 툴팁을 viewport 기준 fixed 레이어로 전환 — row/셀 overflow:hidden 클리핑 해소, 위/아래 자동 반전 + 좌우 viewport 클램핑 — 2026-05-08
-- [00087] 관련성 카운터 UI 재수정 — ❓(미검토) 로직 백엔드·프론트 완전 제거, 카운터 셀 오버플로우 수정(rj-wrap flex-column + col-relevance overflow:hidden), 본인 판정 없을 때도 others 있으면 hover 툴팁 표시 — 2026-05-08
