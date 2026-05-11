@@ -333,3 +333,155 @@ def test_get_progress_rows_by_canonical_id_map_sorts_by_priority(
     sorted_rows = rows_map[canonical_id_value]
     # 활동성 우선순위 — 진행 → 검토 → 관심 → 종료.
     assert [row.status_value for row in sorted_rows] == ["진행", "검토", "관심", "종료"]
+
+
+# ── task 00098: pill 4종 렌더 회귀 테스트 ────────────────────────────────────
+
+
+def test_list_page_renders_pill_for_in_progress_and_review(
+    client: TestClient,
+) -> None:
+    """IN_PROGRESS + REVIEW 케이스: 진행 pill (파랑) + 검토 pill (연두) 가 렌더된다.
+
+    task 00098: 기존 .pg-occupy / .pg-counter 구조를 .pg-pill 4종으로 교체한 뒤
+    DOM 에 신규 클래스가 존재하는지 확인.
+    """
+    _seed_canonical_with_progress("official:expand-pill-inprogress")
+    response = client.get("/")
+    assert response.status_code == 200
+    body = response.text
+
+    # 진행 pill 클래스와 '진행:팀명' 텍스트가 셀에 렌더되어야 한다.
+    assert "pg-pill--in-progress" in body
+    assert "진행:팀-expand-A" in body
+
+    # 검토 pill 클래스와 카운트 텍스트가 렌더되어야 한다.
+    assert "pg-pill--review" in body
+    assert "검토1" in body
+
+
+def test_list_page_renders_done_pill_and_team_name_visible(
+    client: TestClient,
+) -> None:
+    """DONE 단독 케이스: 종료 pill (회색) 이 팀명과 함께 렌더되고 셀이 클릭 가능해진다.
+
+    task 00098: 67번 현상 해소 — 종료만 있는 canonical 이 목록에 노출되어야 한다.
+    """
+    with session_scope() as session:
+        canonical_project = CanonicalProject(
+            canonical_key="official:expand-done-pill",
+            key_scheme="official",
+        )
+        session.add(canonical_project)
+        session.flush()
+
+        organization_done = Organization(name="팀-종료-A")
+        session.add(organization_done)
+        session.flush()
+
+        seeder = User(username="seeder-done-pill", password_hash="x")
+        session.add(seeder)
+        session.flush()
+
+        announcement = Announcement(
+            source_announcement_id="official:expand-done-pill",
+            source_type="IRIS",
+            title="종료 상태 공고 (67번 유사)",
+            agency="기관-종료",
+            status=AnnouncementStatus.RECEIVING,
+            deadline_at=datetime.now(UTC) + timedelta(days=10),
+            raw_metadata={},
+            canonical_group_id=canonical_project.id,
+            canonical_key=canonical_project.canonical_key,
+            canonical_key_scheme="official",
+            is_current=True,
+        )
+        session.add(announcement)
+        session.flush()
+
+        # DONE 상태로 바로 생성 (첫 row 이므로 mutex 충돌 없음).
+        create_progress(
+            session,
+            canonical_project_id=canonical_project.id,
+            organization_id=organization_done.id,
+            status=AnnouncementProgressStatus.DONE,
+            note="종료 처리",
+            created_by_user_id=seeder.id,
+        )
+
+    response = client.get("/")
+    assert response.status_code == 200
+    body = response.text
+
+    # 종료 pill 클래스와 '종료:팀명' 텍스트가 셀에 렌더되어야 한다.
+    assert "pg-pill--done" in body
+    assert "종료:팀-종료-A" in body
+    # 종료 row 가 있으면 셀은 clickable 이어야 한다 (67번 현상 해소).
+    assert "pg-wrap--clickable" in body
+
+
+def test_list_page_renders_interest_pill(
+    client: TestClient,
+) -> None:
+    """INTEREST 케이스: 관심 pill (노랑) 이 카운트와 함께 렌더된다.
+
+    task 00098: 관심 단계는 여러 조직이 가능하므로 카운트 표시.
+    """
+    with session_scope() as session:
+        canonical_project = CanonicalProject(
+            canonical_key="official:expand-interest-pill",
+            key_scheme="official",
+        )
+        session.add(canonical_project)
+        session.flush()
+
+        organization_a = Organization(name="팀-관심-A")
+        organization_b = Organization(name="팀-관심-B")
+        session.add_all([organization_a, organization_b])
+        session.flush()
+
+        seeder = User(username="seeder-interest-pill", password_hash="x")
+        session.add(seeder)
+        session.flush()
+
+        announcement = Announcement(
+            source_announcement_id="official:expand-interest-pill",
+            source_type="IRIS",
+            title="관심 상태 공고",
+            agency="기관-관심",
+            status=AnnouncementStatus.RECEIVING,
+            deadline_at=datetime.now(UTC) + timedelta(days=10),
+            raw_metadata={},
+            canonical_group_id=canonical_project.id,
+            canonical_key=canonical_project.canonical_key,
+            canonical_key_scheme="official",
+            is_current=True,
+        )
+        session.add(announcement)
+        session.flush()
+
+        # 두 조직 모두 INTEREST (관심은 mutex 없음).
+        create_progress(
+            session,
+            canonical_project_id=canonical_project.id,
+            organization_id=organization_a.id,
+            status=AnnouncementProgressStatus.INTEREST,
+            note="A 관심",
+            created_by_user_id=seeder.id,
+        )
+        create_progress(
+            session,
+            canonical_project_id=canonical_project.id,
+            organization_id=organization_b.id,
+            status=AnnouncementProgressStatus.INTEREST,
+            note="B 관심",
+            created_by_user_id=seeder.id,
+        )
+
+    response = client.get("/")
+    assert response.status_code == 200
+    body = response.text
+
+    # 관심 pill 클래스와 '관심2' 카운트 텍스트가 렌더되어야 한다.
+    assert "pg-pill--interest" in body
+    assert "관심2" in body
