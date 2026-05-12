@@ -3840,16 +3840,21 @@ details[open] .user-card__org-summary::before {
     padding: 6px 4px;
 }
 
-/* ---------- 공지사항 + 건의사항 게시판 (task 00056) ---------- */
+/* ---------- 공지사항 + 건의사항 게시판 (task 00056 → 00101) ---------- */
 
-/* footer 진입 링크 두 개를 가로로 나란히 배치한다.
+/* task 00101 — 헤더 위 최상단 컨테이너. 링크를 가로로 나란히 배치한다.
    DOM 순서: 공지사항(왼쪽) → 건의사항(오른쪽). */
-.site-footer__board-links {
+.site-top-board-links {
+    background: #f9fafb;
+    border-bottom: 1px solid #e5e7eb;
+    padding: 6px 0;
+}
+
+.site-top-board-links .container {
     display: flex;
     flex-wrap: wrap;
     gap: 12px;
     align-items: center;
-    margin: 0 0 6px;
 }
 
 /* 공지사항 링크 — 틸(teal) 계열. 건의사항 인디고(#4f46e5)와 명확히 다른 색조. */

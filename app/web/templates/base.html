@@ -27,6 +27,15 @@
     <link rel="stylesheet" href="/static/css/progress.css">
 </head>
 <body class="{% if not current_user %}is-anonymous{% endif %}">
+    {# task 00101 — 사이트 최상단으로 이동. 헤더(site-header)보다 위에 공지사항/건의사항 링크 배치.
+       DOM 순서: 공지사항이 먼저(왼쪽), 건의사항이 나중(오른쪽).
+       비로그인/로그인 모두 동일하게 표시. #}
+    <div class="site-top-board-links">
+        <div class="container">
+            <a class="footer-notices-link" href="/notices">공지사항 게시판</a>
+            <a class="footer-suggestions-link" href="/suggestions">건의사항 게시판</a>
+        </div>
+    </div>
     <header class="site-header">
         <div class="container site-header__inner">
             <div class="site-header__brand">
@@ -71,13 +80,6 @@
 
     <footer class="site-footer">
         <div class="container">
-            {# task 00056 — 공지사항(왼쪽) + 건의사항(오른쪽) 두 게시판 진입점.
-               DOM 순서: 공지사항이 먼저(왼쪽), 건의사항이 나중(오른쪽).
-               색상으로 두 게시판을 구분한다: 공지=틸, 건의=인디고. #}
-            <p class="site-footer__board-links">
-                <a class="footer-notices-link" href="/notices">공지사항 게시판</a>
-                <a class="footer-suggestions-link" href="/suggestions">건의사항 게시판</a>
-            </p>
             <small>로컬 전용 · 외부 공개 금지</small>
         </div>
     </footer>
