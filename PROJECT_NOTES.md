@@ -285,6 +285,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
+- [00101] 공지사항/건의사항 게시판 링크를 사이트 헤더 최상단으로 이동 — `base.html` 네비게이션 순서 조정, `style.css` 보더·여백 CSS 수정으로 정부과제 수집 섹션보다 위에 배치 — 2026-05-12
 - [00100] 공고 목록 진행상태 pill 컨테이너 세로 배치 — `.pg-wrap` flex-direction을 row→column으로 변경, 관심/검토/진행/종료 배지가 각 1줄씩 표시 — 2026-05-11
 - [00099] 목록 expand 사유 다중행 표시 CSS 수정 — progress.css expand 영역에 `white-space: pre-wrap; overflow-wrap: anywhere` 추가, 관심/검토/진행/종료 모든 상태에 동일 적용 — 2026-05-11
 - [00098] 진행상태 종료 mutex 확장 + 목록 셀 pill UI 개선 — 진행·종료 통합 선점 제약 적용, ProgressSummary.done_org 추가, 셀 표시를 pill 4종(관심=노란·검토=연두·진행=파랑·종료=회색)으로 교체 + 진행/종료 시 팀명 표시 — 2026-05-11
@@ -295,4 +296,3 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - [00093] 개인 판정(organization_id=NULL) 기능 완전 제거 — CRUD·API·UI·DB 데이터 일괄 삭제, 조직 판정만 유지, Alembic migration 적용 — 2026-05-08
 - [00091] 관련성 모달 내 판정 목록 UX 개선 — 사유 있는 항목에 사유 텍스트 표시, X 버튼 클릭 시 window.confirm() 확인 다이얼로그 추가 — 2026-05-08
 - [00090] 관련성 카운터 집계에 본인 판정 포함 — RelevanceSummary 필드 others_count_* → count_* 로 리네임, 집계 범위를 others only 에서 mine_personal + mine_organization + others 전체로 확장 — 2026-05-08
-- [00089] 관련성 모달 UX 개선 — '판정 취소' 버튼 제거, 모달 하단 본인 판정 목록(X 삭제) UI 추가, GET /canonical/{id}/relevance/mine 엔드포인트 신설 — 2026-05-08
