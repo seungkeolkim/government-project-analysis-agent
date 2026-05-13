@@ -1468,6 +1468,43 @@ body.is-anonymous .announcement-title-link--read {
     to { transform: rotate(360deg); }
 }
 
+/*
+ * Phase A-1 / 00104-13 — 발송 이력 섹션 컨트롤 행.
+ * 좌측: status 필터 (select), 우측: 새로고침 버튼. 좁은 화면에서는 wrap.
+ */
+.admin-email-runs-controls {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 12px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+
+/* 필터 라벨은 label > span(설명) + select 의 세로 정렬 — admin-schedule__text 와
+ * 동일한 시각 패턴이지만 max-width 가 있는 그쪽과 달리 너비를 강제하지 않는다. */
+.admin-email-runs-filter-label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 13px;
+    color: #374151;
+}
+
+/*
+ * 긴 셀 값을 ellipsis (...) 로 자르는 inline-block. td 의 title 속성 (tooltip) 과
+ * 결합해 사용한다 — JS 가 truncate span 내부에 textContent 로 첫 줄만 넣고,
+ * 상위 td 의 title 에 full text 를 넣어 hover 로 확인 가능.
+ */
+.admin-email-runs-truncate {
+    display: inline-block;
+    max-width: 280px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: middle;
+}
+
 /* ---------- 관련성 판정 배지 (Phase 3a / 00035-3) ---------- */
 
 /* 배지 컨테이너 — 툴팁 위치 계산 기준점 */

@@ -451,6 +451,287 @@
                 .then(function () {
                     // finally 대신 then 한 번 더 — 성공/실패/예외 모두 마무리 단계 보장.
                     setSendingState(false);
+                    // 「발송 이력」 섹션에 새로고침 신호. 성공/실패 모두 row 가
+                    // commit 되어 있으므로 동일하게 통지한다. 섹션 3 (00104-13) 의
+                    // initSendRunsSection 이 이 이벤트를 청취해 자동 재조회한다.
+                    dispatchTestSendCompletedEvent();
+                });
+        }
+
+        /**
+         * 발송 완료 (성공/실패 무관) 직후 window 에 custom event 를 dispatch 한다.
+         * 「발송 이력」 섹션이 이 이벤트를 청취해 테이블을 자동 재로드한다.
+         */
+        function dispatchTestSendCompletedEvent() {
+            // CustomEvent 가 지원되지 않는 환경은 admin 페이지의 다른 기능도
+            // 동작하지 않으므로 안전한 fallback 으로 try/catch 만 둔다.
+            try {
+                var event = new CustomEvent('email-test-send-completed');
+                window.dispatchEvent(event);
+            } catch (dispatchError) {
+                // 옛 브라우저에서 CustomEvent 실패 시 silent — 새로고침 버튼으로
+                // 사용자가 수동 갱신할 수 있다.
+            }
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // 섹션 3: 발송 이력 (task 00104-13)
+    // ──────────────────────────────────────────────────────────
+
+    var SEND_RUNS_URL = '/api/admin/email/send-runs';
+    var SEND_RUNS_LIMIT = 50;
+
+    /**
+     * ISO-8601 UTC datetime 문자열을 KST 표시 문자열로 변환한다.
+     *
+     * `YYYY-MM-DD HH:MM:SS` 형식으로 출력 — 다른 admin 페이지(scrape 등) 의
+     * KST 표시 컨벤션과 일관. Intl API 의 'en-CA' locale 이 'YYYY-MM-DD' 와
+     * 24-hour 'HH:MM:SS' 를 모두 보장하며, Asia/Seoul timeZone 으로 변환한다.
+     *
+     * @param {string|null|undefined} isoString ISO-8601 datetime 또는 falsy.
+     * @returns {string} KST 표시 문자열 또는 빈 문자열 (falsy 입력).
+     */
+    function formatDateTimeKst(isoString) {
+        if (!isoString) {
+            return '';
+        }
+        var dateValue = new Date(isoString);
+        if (isNaN(dateValue.getTime())) {
+            // 파싱 실패 — raw 그대로 노출 (방어적).
+            return String(isoString);
+        }
+        // en-CA 는 'YYYY-MM-DD, HH:MM:SS' 형식 반환 — 콤마 제거해 'YYYY-MM-DD HH:MM:SS'.
+        var formatted = dateValue.toLocaleString('en-CA', {
+            timeZone: 'Asia/Seoul',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+        });
+        return formatted.replace(', ', ' ').replace(',', ' ');
+    }
+
+    /**
+     * error_message 의 첫 줄만 추출한다 (truncate 표시용).
+     *
+     * 여러 줄 예외 메시지 (특히 traceback) 가 들어 있어도 첫 줄만 노출하며,
+     * 전체는 td 의 title 속성에 들어가 tooltip 으로 확인 가능.
+     */
+    function getErrorMessageFirstLine(errorMessage) {
+        if (!errorMessage) {
+            return '';
+        }
+        var newlineIndex = errorMessage.indexOf('\n');
+        return newlineIndex === -1
+            ? errorMessage
+            : errorMessage.substring(0, newlineIndex);
+    }
+
+    /**
+     * 상태에 따라 ✅성공 / ❌실패 배지 span 을 만든다. 다른 status 값은 회색.
+     *
+     * .admin-badge--running (초록) 을 success 에, .admin-badge--idle (회색) 을
+     * failure 에 사용 — backup 페이지가 같은 방식으로 hi 성공/실패 색을 매핑한다.
+     */
+    function buildStatusBadge(status) {
+        var span = document.createElement('span');
+        if (status === 'sent') {
+            span.className = 'admin-badge admin-badge--running';
+            span.textContent = '✅ 성공';
+        } else if (status === 'failed') {
+            span.className = 'admin-badge admin-badge--idle';
+            span.textContent = '❌ 실패';
+        } else {
+            // 미래 status 값 (예: pending) 방어 — 회색 + raw 값.
+            span.className = 'admin-badge';
+            span.textContent = status ? String(status) : '?';
+        }
+        return span;
+    }
+
+    /**
+     * EmailSendRun 1 row 를 <tr> 로 변환한다. 모든 user-provided 필드는
+     * textContent / title 로 set 해 XSS 를 차단한다.
+     */
+    function buildSendRunsTableRow(item) {
+        var tr = document.createElement('tr');
+
+        // 시각 (KST)
+        var timeTd = document.createElement('td');
+        timeTd.textContent = formatDateTimeKst(item.created_at);
+        tr.appendChild(timeTd);
+
+        // 받는 사람
+        var recipientTd = document.createElement('td');
+        recipientTd.textContent = item.recipient || '';
+        tr.appendChild(recipientTd);
+
+        // 제목 — truncate + tooltip
+        var subjectTd = document.createElement('td');
+        var subjectFull = item.subject || '';
+        subjectTd.title = subjectFull;
+        var subjectSpan = document.createElement('span');
+        subjectSpan.className = 'admin-email-runs-truncate';
+        subjectSpan.textContent = subjectFull;
+        subjectTd.appendChild(subjectSpan);
+        tr.appendChild(subjectTd);
+
+        // 상태 — ✅/❌ 배지
+        var statusTd = document.createElement('td');
+        statusTd.appendChild(buildStatusBadge(item.status));
+        tr.appendChild(statusTd);
+
+        // 시도 횟수
+        var attemptCountTd = document.createElement('td');
+        attemptCountTd.textContent =
+            item.attempt_count != null ? String(item.attempt_count) : '';
+        tr.appendChild(attemptCountTd);
+
+        // 에러 — 실패 시 첫 줄 + truncate + tooltip 에 full text.
+        var errorTd = document.createElement('td');
+        if (item.error_message) {
+            errorTd.title = item.error_message;
+            var errorSpan = document.createElement('span');
+            errorSpan.className = 'admin-email-runs-truncate';
+            errorSpan.textContent = getErrorMessageFirstLine(item.error_message);
+            errorTd.appendChild(errorSpan);
+        }
+        tr.appendChild(errorTd);
+
+        // 발송자 — username, 시스템 자동 (requested_by_user_id NULL) 이면 '(자동)'.
+        var requestedByTd = document.createElement('td');
+        requestedByTd.textContent =
+            item.requested_by_username || '(자동)';
+        tr.appendChild(requestedByTd);
+
+        return tr;
+    }
+
+    /**
+     * items 배열을 받아 테이블 영역을 동적으로 렌더한다.
+     * - items.length === 0: 빈 상태 텍스트 ('발송 이력이 없습니다.').
+     * - 그 외: admin-table 풀 테이블.
+     *
+     * 호출 전에 호출자가 errors / loading 상태를 정리해야 한다.
+     */
+    function renderSendRunsTable(tableArea, items) {
+        tableArea.innerHTML = '';
+
+        if (!items || items.length === 0) {
+            var emptyMessage = document.createElement('p');
+            emptyMessage.className = 'admin-state__muted';
+            emptyMessage.textContent = '발송 이력이 없습니다.';
+            tableArea.appendChild(emptyMessage);
+            return;
+        }
+
+        var table = document.createElement('table');
+        table.className = 'admin-table';
+
+        var thead = document.createElement('thead');
+        var headerRow = document.createElement('tr');
+        var headers = [
+            '시각 (KST)', '받는 사람', '제목', '상태',
+            '시도 횟수', '에러', '발송자'
+        ];
+        for (var headerIndex = 0; headerIndex < headers.length; headerIndex += 1) {
+            var th = document.createElement('th');
+            th.textContent = headers[headerIndex];
+            headerRow.appendChild(th);
+        }
+        thead.appendChild(headerRow);
+        table.appendChild(thead);
+
+        var tbody = document.createElement('tbody');
+        for (var itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
+            tbody.appendChild(buildSendRunsTableRow(items[itemIndex]));
+        }
+        table.appendChild(tbody);
+
+        tableArea.appendChild(table);
+    }
+
+    /**
+     * 테이블 영역에 에러 박스를 그린다 (fetch 실패 시).
+     */
+    function renderSendRunsError(tableArea, message) {
+        tableArea.innerHTML = '';
+        var box = document.createElement('div');
+        box.className = 'admin-flash admin-flash--error';
+        box.setAttribute('role', 'alert');
+        box.textContent = '발송 이력 조회 실패: ' + message;
+        tableArea.appendChild(box);
+    }
+
+    /**
+     * 「발송 이력」 섹션을 초기화한다.
+     *
+     * - 페이지 로드 시 GET /api/admin/email/send-runs?status=all&limit=50.
+     * - status 필터 select 변경 시 즉시 재조회.
+     * - 새로고침 버튼 클릭 시 재조회.
+     * - 'email-test-send-completed' window event 청취 시 자동 재조회
+     *   (섹션 2 의 performTestSend 가 완료 직후 dispatch 함).
+     *
+     * 페이지에 요소가 없으면 즉시 반환 (다른 탭에서 admin_email.js 가 잘못
+     * 로드된 경우 안전).
+     */
+    function initSendRunsSection() {
+        var filterSelect = document.getElementById('send-runs-status-filter');
+        if (!filterSelect) {
+            return;
+        }
+        var refreshButton = document.getElementById('send-runs-refresh-button');
+        var tableArea = document.getElementById('send-runs-table-area');
+
+        filterSelect.addEventListener('change', loadSendRuns);
+        refreshButton.addEventListener('click', loadSendRuns);
+        // 섹션 2 가 완료 직후 dispatch 하는 신호 청취 (성공/실패 무관).
+        window.addEventListener('email-test-send-completed', loadSendRuns);
+
+        // 페이지 진입 시 즉시 최초 로드.
+        loadSendRuns();
+
+        /**
+         * 현재 필터 값으로 GET 호출하고 테이블을 갱신한다.
+         */
+        function loadSendRuns() {
+            var statusValue = filterSelect.value || 'all';
+            var url =
+                SEND_RUNS_URL +
+                '?status=' + encodeURIComponent(statusValue) +
+                '&limit=' + SEND_RUNS_LIMIT;
+
+            // 다중 클릭 / 변경 방지용 disable.
+            refreshButton.disabled = true;
+            filterSelect.disabled = true;
+
+            fetch(url, {
+                method: 'GET',
+                credentials: 'same-origin',
+                headers: { 'Accept': 'application/json' }
+            })
+                .then(parseJsonResponse)
+                .then(function (result) {
+                    if (!result.resp.ok) {
+                        throw new Error(
+                            extractErrorMessage(result.resp, result.body)
+                        );
+                    }
+                    var items = (result.body && result.body.items) || [];
+                    renderSendRunsTable(tableArea, items);
+                })
+                .catch(function (error) {
+                    renderSendRunsError(
+                        tableArea, error.message || String(error)
+                    );
+                })
+                .then(function () {
+                    refreshButton.disabled = false;
+                    filterSelect.disabled = false;
                 });
         }
     }
@@ -462,6 +743,6 @@
     document.addEventListener('DOMContentLoaded', function () {
         initSettingsSection();
         initTestSendSection();
-        // 후속 subtask 가 여기에 initSendRunsSection() 호출 추가 (00104-13).
+        initSendRunsSection();
     });
 })();

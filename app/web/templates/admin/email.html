@@ -198,9 +198,39 @@
     <div id="test-send-result-area"></div>
 </section>
 
-{# ── 후속 subtask 가 채울 자리 ───────────────────────────────
-   - 섹션 3: 발송 이력 (00104-13)
-   현재 subtask 에서는 의도적으로 비워 둔다. #}
+{# ── 섹션 3: 발송 이력 (task 00104-13) ─────────────────────
+   spec (phase_a1_prompt.md):
+     - 필터: status 드롭다운 (전체 / 성공만 / 실패만), 변경 시 즉시 재조회.
+     - 새로고침 버튼: 우상단.
+     - 테이블 컬럼: 시각(KST) / 받는 사람 / 제목(truncate+tooltip) /
+       상태(✅성공/❌실패 배지) / 시도 횟수 / 에러(truncate+tooltip) /
+       발송자(username, 시스템이면 '(자동)').
+     - 빈 상태: '발송 이력이 없습니다.' 텍스트.
+     - 페이지네이션 없음, limit=50 고정 (API default).
+     - 「테스트 발송」 완료 후 'email-test-send-completed' custom event 로 자동 새로고침. #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">발송 이력</h3>
+    <p class="admin-state__muted">최근 발송 시도 50건. 새로고침 버튼으로 갱신.</p>
+
+    {# 컨트롤 영역 — 좌측에 status 필터, 우측에 새로고침 버튼. #}
+    <div class="admin-email-runs-controls">
+        <label class="admin-email-runs-filter-label">
+            <span>상태 필터</span>
+            <select id="send-runs-status-filter"
+                    class="admin-schedule__input">
+                <option value="all">전체</option>
+                <option value="sent">성공만</option>
+                <option value="failed">실패만</option>
+            </select>
+        </label>
+        <button id="send-runs-refresh-button"
+                type="button"
+                class="admin-button admin-button--secondary">새로고침</button>
+    </div>
+
+    {# 테이블/빈상태/에러 박스 영역 — admin_email.js 가 fetch 결과로 동적 렌더링. #}
+    <div id="send-runs-table-area"></div>
+</section>
 
 {# 페이지 전용 JS — admin_email.js. 본 subtask 에서는 initSettingsSection() 만
    호출되며 후속 subtask 가 같은 파일에 initTestSendSection /
