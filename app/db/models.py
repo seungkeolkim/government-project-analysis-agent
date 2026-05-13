@@ -2342,6 +2342,186 @@ class AnnouncementProgressHistory(Base):
         )
 
 
+class EmailSendRunStatus(StrEnum):
+    """메일 발송 시도의 최종 결과 (Phase A-1 / task 00104-3).
+
+    한 번의 ``send_with_retry`` 호출이 EmailSendRun row 1 개를 만들며, 모든
+    재시도가 끝난 뒤의 최종 결과만 본 enum 값으로 기록된다 (중간 시도 결과는
+    별도 row 로 분리하지 않는다 — 디자인 노트 §4-1).
+
+    값:
+        SENT    'sent'   — 1차 시도 또는 재시도 중 어느 한 번이라도 성공.
+        FAILED  'failed' — 모든 시도(1차 + max_retry_count 번) 가 실패.
+    """
+
+    SENT = "sent"
+    FAILED = "failed"
+
+
+class EmailSendRun(Base):
+    """메일 발송 시도 이력 한 건 (Phase A-1 / task 00104-3).
+
+    한 ``send_with_retry`` 호출 = 1 row 정책. 재시도 횟수는 ``attempt_count``
+    에 누적되며, 중간 시도의 예외는 본 row 에 영구 저장하지 않고 loguru 로그
+    로만 남긴다. 마지막 시도의 예외 메시지만 ``error_message`` 에 저장한다.
+
+    설계 근거: docs/phase_a1_design_note.md §4-1, §4-2, §4-5, §9.
+
+    Phase A-1 단계에서 ``related_kind`` 에 채워지는 값은 ``'test_send'`` 하나
+    뿐이며, A-2 (공고 포워딩) 부터 ``'forward'`` 가, A-3 (daily report) 부터
+    ``'daily_report'`` 가 추가된다. ``transport_type`` 도 현재는 ``'m365_oauth'``
+    만 사용되며 향후 옵션 C (Basic Auth SMTP) 가 추가 가능하도록 양쪽 모두
+    DB 레벨 CHECK constraint 를 두지 않는다 (디자인 노트 §4-5).
+
+    시간 처리:
+        - ``created_at`` / ``sent_at`` 은 UTC tz-aware 로 저장 (PROJECT_NOTES
+          시각 컨벤션). 사용자 화면 표시 직전에 ``app.timezone.format_kst`` /
+          Jinja2 ``kst_format`` 필터로 KST 변환.
+        - ``sent_at`` 은 발송 성공 시각만 채우고 실패는 NULL — \"성공한 발송이
+          언제 끝났는가\" 를 명확히 한다.
+    """
+
+    __tablename__ = "email_send_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    recipient: Mapped[str] = mapped_column(
+        String(320),
+        nullable=False,
+        doc="받는 사람 이메일 주소. RFC 5321 최대 320 자.",
+    )
+
+    subject: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+        doc="메일 제목. Admin API Pydantic schema 가 1 ≤ len ≤ 200 으로 강제.",
+    )
+
+    body_preview: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+        doc="본문 앞 200 자 preview. 전체 본문 저장은 사이즈 부담 → preview 만 보관.",
+    )
+
+    transport_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        doc=(
+            "발송 transport 종류. A-1 단계에서는 'm365_oauth' 만 사용. CHECK "
+            "constraint 없음 — 옵션 C 추가 시 ALTER 없이 새 값 가능."
+        ),
+    )
+
+    # status: 'sent' / 'failed' enum. native_enum=False — Postgres ENUM 타입
+    # 미생성, CHECK constraint 만 추가 (AnnouncementProgress 와 동일 패턴).
+    status: Mapped[EmailSendRunStatus] = mapped_column(
+        Enum(
+            EmailSendRunStatus,
+            name="email_send_run_status",
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+            native_enum=False,
+        ),
+        nullable=False,
+        doc="발송 결과. 'sent' / 'failed' 중 하나.",
+    )
+
+    error_message: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc=(
+            "실패 시 마지막 시도의 예외 'ClassName: message' 문자열. 성공 row "
+            "는 NULL. 중간 시도 에러는 본 컬럼 대신 loguru 로그에서 확인 "
+            "(디자인 노트 §4-1)."
+        ),
+    )
+
+    attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        doc=(
+            "총 시도 횟수 (1차 + 재시도 누적). 예: max_retry_count=2 일 때 "
+            "최대 3 까지 가능."
+        ),
+    )
+
+    requested_by_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "users.id",
+            name="fk_email_send_runs_requested_by_user_id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        doc=(
+            "발송을 트리거한 사용자 PK. 시스템 자동 발송(향후 daily report) 대비 "
+            "nullable. 사용자 탈퇴 시 SET NULL 로 row 자체는 보존."
+        ),
+    )
+
+    related_kind: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+        doc=(
+            "발송 컨텍스트 식별자. A-1: 'test_send' 만 사용, A-2: 'forward', "
+            "A-3: 'daily_report' 추가 예정. CHECK constraint 없음 (확장 여유)."
+        ),
+    )
+
+    related_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        doc=(
+            "related_kind 와 함께 외부 객체를 가리키는 PK. A-1 에서는 항상 NULL. "
+            "A-2 부터 채워짐 (예: EmailForwardLog.id)."
+        ),
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        doc=(
+            "발송 시도 시작 시각 (UTC tz-aware). 표시 직전에 KST 변환 "
+            "(app.timezone.format_kst / Jinja2 kst_format 필터)."
+        ),
+    )
+
+    sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        doc="발송 성공 시각 (UTC tz-aware). 실패 row 는 NULL.",
+    )
+
+    # 관계 — admin 'send-runs' API 응답에서 username 을 끌어올 때 사용. lazy=
+    # 'select' 로 필요 시 1 회 추가 SELECT — 발송 이력 화면은 페이지당 50 row
+    # 정도라 N+1 우려가 작다. 사용량이 더 늘어나면 selectinload 로 batch 화
+    # 가능.
+    requested_by: Mapped[User | None] = relationship(
+        "User",
+        foreign_keys=[requested_by_user_id],
+        lazy="select",
+    )
+
+    __table_args__ = (
+        # status enum 한글 가독성을 위해 같은 SQL 을 migration 과 ORM 양쪽에
+        # 중복 선언. SQLAlchemy 의 sa.Enum(native_enum=False) 는
+        # create_constraint=False 가 기본이라 CHECK 를 자동 추가하지 않으므로
+        # 명시적으로 둔다 (AnnouncementProgress 와 동일 패턴).
+        CheckConstraint(
+            "status IN ('sent', 'failed')",
+            name="ck_email_send_runs_status",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현을 반환한다."""
+        return (
+            f"<EmailSendRun id={self.id} recipient={self.recipient!r} "
+            f"status={self.status!r} attempt_count={self.attempt_count}>"
+        )
+
+
 __all__ = [
     "Base",
     "Announcement",
@@ -2356,6 +2536,8 @@ __all__ = [
     "CanonicalProject",
     "DeltaAnnouncement",
     "DeltaAttachment",
+    "EmailSendRun",
+    "EmailSendRunStatus",
     "FavoriteEntry",
     "FavoriteFolder",
     "Organization",
