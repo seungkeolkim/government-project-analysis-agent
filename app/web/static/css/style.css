@@ -1408,6 +1408,33 @@ body.is-anonymous .announcement-title-link--read {
     cursor: not-allowed;
 }
 
+/* ---------- 메일 발송 「메일 설정」 (Phase A-1 / 00104-11) ---------- */
+/*
+ * Client secret 입력 + [변경] 토글 버튼을 같은 행에 배치하기 위한 wrapper.
+ * .admin-schedule__text 가 label + input 을 세로 정렬하므로, 그 안에서 입력과
+ * 버튼만 가로로 묶으려고 추가한 최소 클래스.
+ *
+ * 다른 admin 페이지에서 \"input + 보조 버튼\" 패턴이 또 필요해지면 이 클래스를
+ * `.admin-input-with-action` 등으로 일반화 검토.
+ */
+.admin-email-secret-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.admin-email-secret-row .admin-schedule__input {
+    /* 가용 폭을 차지해 우측 버튼만 자기 크기로 자리하게 한다. */
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.admin-email-secret-row .admin-button {
+    flex: 0 0 auto;
+    padding: 6px 12px;
+    font-size: 13px;
+}
+
 /* ---------- 관련성 판정 배지 (Phase 3a / 00035-3) ---------- */
 
 /* 배지 컨테이너 — 툴팁 위치 계산 기준점 */

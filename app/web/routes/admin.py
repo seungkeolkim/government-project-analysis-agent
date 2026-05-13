@@ -2065,6 +2065,44 @@ def backup_run_manual(
     )
 
 
+# ──────────────────────────────────────────────────────────────
+# [메일 발송] 탭 (Phase A-1 / task 00104-11)
+# ──────────────────────────────────────────────────────────────
+
+
+@router.get("/email", response_class=HTMLResponse)
+def email_page(
+    request: Request,
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """[메일 발송] 탭 HTML 페이지 — 메일 설정 form + (후속 subtask 의 테스트 발송/이력).
+
+    본 라우트는 SSR 골격만 그리며, 실제 데이터 로드 / 저장은 페이지의
+    ``admin_email.js`` 가 ``/api/admin/email/*`` JSON API 를 fetch 해 처리한다.
+    backup_page 와 같은 패턴으로 ``top_tab='system_group'`` + ``sub_tab='email'``
+    컨텍스트만 주입해 admin/base.html 의 sub-nav 가 [메일 발송] 탭을 active 로
+    표시하도록 한다.
+
+    Args:
+        request: FastAPI 요청 객체 (Jinja2 TemplateResponse 용).
+        current_user: 라우터 dependency 에서 이미 검증된 admin user. 템플릿
+            상단 네비 분기에 사용된다.
+
+    Returns:
+        ``admin/email.html`` 을 렌더한 HTMLResponse.
+    """
+    logger.debug("admin.email_page 진입: user_id={}", current_user.id)
+    return _templates.TemplateResponse(
+        request,
+        "admin/email.html",
+        {
+            "top_tab": "system_group",
+            "sub_tab": "email",
+            "current_user": current_user,
+        },
+    )
+
+
 __all__ = [
     "LOG_FILE_MAX_BYTES",
     "RECENT_RUN_LIMIT",

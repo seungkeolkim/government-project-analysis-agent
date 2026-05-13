@@ -60,6 +60,8 @@
     <nav class="admin-tabs" aria-label="시스템 관리 하위 탭">
         <a class="admin-tab {% if sub_tab == 'backup' %}admin-tab--active{% endif %}"
            href="/admin/backup">시스템 백업</a>
+        <a class="admin-tab {% if sub_tab == 'email' %}admin-tab--active{% endif %}"
+           href="/admin/email">메일 발송</a>
     </nav>
     {% endif %}
     {# usage_group 은 하위 탭이 1개이므로 sub-nav 를 표시하지 않는다. #}
