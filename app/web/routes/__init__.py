@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from app.web.routes.admin import router as admin_router
+from app.web.routes.admin_email import router as admin_email_router
 from app.web.routes.bulk import router as bulk_router
 from app.web.routes.dashboard import router as dashboard_router
 from app.web.routes.favorites import router as favorites_router
@@ -21,6 +22,7 @@ from app.web.routes.settings import router as settings_router
 from app.web.routes.suggestions import router as suggestions_router
 
 __all__ = [
+    "admin_email_router",
     "admin_router",
     "bulk_router",
     "dashboard_router",
