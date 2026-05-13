@@ -739,6 +739,89 @@ footer 의 두 버튼으로 진입. 메인 DB 와 분리된 `boards.sqlite3` 에
   (수정은 작성자 전용).
 - 공지사항: 작성·수정·삭제 모두 관리자 전용.
 
+### 메일 발송 설정 (Phase A-1, task 00104)
+
+「시스템 관리」 → 「메일 발송」 (`/admin/email`) 에서 자격증명 입력 + 테스트 발송 +
+이력 확인을 모두 수행한다. **자격증명은 SystemSetting 에 저장** 되며 환경변수는
+사용하지 않는다. 변경은 다음 발송부터 즉시 반영된다.
+
+#### 입력해야 하는 값 (IT 셋업 결과를 옮겨 받기)
+
+IT 팀이 Azure AD app registration (M365 OAuth XOAUTH2) 셋업 완료 후 알려주는
+3 개 값과 발신 mailbox 주소 1 개, 총 4 개를 「메일 설정」 폼에 입력한다.
+
+| 폼 라벨 | SystemSetting 키 | 의미 |
+|---|---|---|
+| Directory (tenant) ID | `email.m365.tenant_id` | Azure AD Directory ID (UUID) |
+| Application (client) ID | `email.m365.client_id` | Azure AD app registration 의 client ID (UUID) |
+| Client secret | `email.m365.client_secret` | client secret 평문. **응답에는 항상 마지막 4자 mask** (`****abcd`) 만 노출. 변경 시 [변경] 토글을 켜고 새 값 입력. 빈 값/누락 PUT 은 기존 값을 그대로 유지. |
+| 발신 mailbox | `email.m365.sender_address` | IT 가 SendAs 권한을 부여한 메일박스 주소. default = `gov-agent-noreply@innodep.com`. |
+| From 표시명 | `email.from_display_name` | 수신자 메일 클라이언트에 보이는 이름. default = `정부사업 모니터링 봇`. |
+| 재시도 횟수 | `email.max_retry_count` | 1 차 시도 실패 후 추가 재시도 횟수 (0~5, default 2). 재시도 간 2 초 단순 sleep. |
+
+저장 직후 폼은 새 값으로 다시 채워지며, client secret 토글은 자동 OFF 로 돌아간다.
+
+#### 「테스트 발송」 사용법
+
+「테스트 발송」 섹션에서 본인 메일로 plain text 한 통을 보낸다.
+
+1. **받는 사람**: 본인 회사 메일 주소 (예: `seungkeol_kim@innodep.com`).
+2. **제목**: default `A-1 테스트 발송` 그대로 두거나 수정.
+3. **본문**: 빈 칸이면 placeholder 안내 문구. 임의 텍스트 입력 가능.
+4. **발송** 클릭 → 발송 중 spinner 표시 → 결과 박스:
+   - 성공: 초록 박스 `발송 성공 (send_run_id: 123). 수신함과 정크메일 폴더를 모두 확인해주세요.`
+   - 실패: 빨간 박스 `발송 실패 (HTTP <status>): <예외 클래스명>: <메시지> (send_run_id=N)` + 발송 이력 안내.
+
+실패 시에도 EmailSendRun row 가 남으므로 같은 페이지의 「발송 이력」 섹션에서
+원인을 확인할 수 있다.
+
+#### 「발송 이력」 보는 법
+
+최근 50 건의 발송 시도가 시각(KST) 내림차순으로 표시된다. 컬럼:
+
+- **시각 (KST)**: 발송 시도 시작 시각.
+- **받는 사람** / **제목**: 입력값. 긴 제목은 자르고 hover 시 tooltip 으로 전체 노출.
+- **상태**: ✅ 성공 / ❌ 실패.
+- **시도 횟수**: 1 차 + 재시도 누적 (예: 2 = 1 차 실패 + 2 차 성공).
+- **에러**: 실패 row 만. 마지막 시도의 예외 메시지 첫 줄 + tooltip 으로 전체.
+- **발송자**: `requested_by_user_id` 의 username. 시스템 자동 발송 (향후 daily report)
+  이면 `(자동)` 으로 표시.
+
+「상태 필터」 드롭다운으로 전체 / 성공만 / 실패만 전환. 우측 **새로고침** 버튼으로
+수동 갱신. 「테스트 발송」 직후에는 페이지가 자동 새로고침되어 방금 발송한 row 가
+즉시 보인다 (`email-test-send-completed` custom event).
+
+#### 디버깅 순서 (테스트 발송 실패 시)
+
+테스트 발송이 빨간 박스로 떨어지면 아래 순서로 점검한다:
+
+1. **자격증명 4 개 값** — 「메일 설정」 폼의 tenant_id / client_id / client_secret /
+   sender_address 가 IT 가 전달한 값과 정확히 일치하는지 (앞뒤 공백·오타 확인).
+   client_secret 은 mask 만 보이므로 [변경] 토글 → 다시 붙여 넣기 → 저장.
+2. **「발송 이력」 의 `error_message`** — 실패 row 의 에러 컬럼 hover 로 전체 예외
+   확인. 메시지 패턴별 단서:
+   - `M365 OAuth token 발급 실패: error='invalid_client' ...` → client_secret 만료
+     또는 client_id / tenant_id 불일치.
+   - `M365 OAuth XOAUTH2 SMTP 인증 실패: code=535 ...` → 토큰은 받았지만 SMTP
+     서버가 거부. SendAs 권한이 sender_address 에 부여되지 않았을 가능성.
+   - `smtplib.SMTPRecipientsRefused` / `SMTPSenderRefused` → 수신자 / 발신자 도메인
+     문제. 회사 정책상 외부 도메인 발송 제한 가능성.
+3. **서버 로그 (loguru)** — `./run_compose.sh logs app | grep -i email` 로 본 발송
+   시도 직전후의 DEBUG/WARNING 라인 확인. msal / smtplib 가 어느 단계에서 실패
+   했는지 stack trace 와 함께 노출됨.
+4. **IT 측 셋업 재확인** — Azure AD app registration 상태 (Active),
+   `SMTP.SendAsApp` Application 권한 부여 + admin consent 완료, 발신 mailbox 에
+   대한 SendAs 권한 부여. 회사 Conditional Access 정책에서 본 app 이 차단되어
+   있지 않은지도 확인.
+
+#### 참고 메모: 다른 transport 옵션은?
+
+> **참고**: 회사 M365 정책상 OAuth 경로가 막힌 환경이라면, port 25 + IP 기반
+> inbound connector (옵션 A) 도 기술적으로는 가능합니다. 자세한 비교는
+> [`docs/email_transport_options.md`](docs/email_transport_options.md) 참조.
+> 현재 구현은 옵션 B (M365 OAuth XOAUTH2) 단독이며, 옵션 A 는 spoofing 위험 +
+> 회사 IT 정책상 IP 단독 허용 불가로 폐기되었습니다.
+
 ---
 
 ## 로그와 디버깅
