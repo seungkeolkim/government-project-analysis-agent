@@ -131,8 +131,74 @@
     </form>
 </section>
 
+{# ── 섹션 2: 테스트 발송 (task 00104-12) ─────────────────────
+   spec (phase_a1_prompt.md):
+     - 받는 사람: <input type=\"email\"> + placeholder 'example@innodep.com'
+     - 제목: text input, default 'A-1 테스트 발송'
+     - 본문: textarea 4~6 줄, placeholder '메일 발송이 정상 동작하는지 확인합니다.'
+     - 발송 버튼: 발송 중 disabled + spinner.
+     - 결과 박스: 성공/실패 시 각각 초록/빨강. #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">테스트 발송</h3>
+    <p class="admin-state__muted">
+        위에 저장된 설정으로 plain text 메일 한 통을 발송합니다.
+        IT 셋업이 완료된 후, 본인 메일 주소로 보내서 도착 확인용으로 사용하세요.
+    </p>
+    <form id="email-test-send-form" class="admin-form" autocomplete="off">
+        {# 받는 사람 — type=email 로 브라우저 1차 검증, 서버 EmailStr 가 2차 검증. #}
+        <label class="admin-schedule__text">
+            <span>받는 사람</span>
+            <input id="test-send-recipient"
+                   name="recipient"
+                   type="email"
+                   class="admin-schedule__input"
+                   placeholder="example@innodep.com"
+                   required
+                   autocomplete="off"
+                   spellcheck="false">
+        </label>
+
+        {# 제목 — default value 'A-1 테스트 발송' (spec 그대로).
+           maxlength=200 으로 클라이언트 측 1차 가드 + 서버 Pydantic 길이 검증. #}
+        <label class="admin-schedule__text">
+            <span>제목</span>
+            <input id="test-send-subject"
+                   name="subject"
+                   type="text"
+                   class="admin-schedule__input"
+                   value="A-1 테스트 발송"
+                   minlength="1"
+                   maxlength="200"
+                   required
+                   autocomplete="off">
+        </label>
+
+        {# 본문 — 4~6 줄. rows=5 로 spec 중간값.
+           default value 비어있음, placeholder 로 안내. maxlength=10000. #}
+        <label class="admin-schedule__text">
+            <span>본문</span>
+            <textarea id="test-send-body"
+                      name="body"
+                      class="admin-schedule__input admin-email-body-textarea"
+                      rows="5"
+                      minlength="1"
+                      maxlength="10000"
+                      placeholder="메일 발송이 정상 동작하는지 확인합니다."
+                      required></textarea>
+        </label>
+
+        {# 발송 버튼 — JS 가 발송 중 disabled + spinner span 삽입 후 텍스트 '발송 중...'. #}
+        <button id="test-send-button"
+                type="submit"
+                class="admin-button admin-button--primary">발송</button>
+    </form>
+
+    {# 발송 결과 박스 영역 — JS 가 성공 (admin-flash--success) /
+       실패 (admin-flash--error) 박스를 동적으로 그린다. 페이지 진입 시에는 비어 있다. #}
+    <div id="test-send-result-area"></div>
+</section>
+
 {# ── 후속 subtask 가 채울 자리 ───────────────────────────────
-   - 섹션 2: 테스트 발송 (00104-12)
    - 섹션 3: 발송 이력 (00104-13)
    현재 subtask 에서는 의도적으로 비워 둔다. #}
 

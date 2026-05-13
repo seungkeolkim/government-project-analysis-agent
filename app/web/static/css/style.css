@@ -1435,6 +1435,39 @@ body.is-anonymous .announcement-title-link--read {
     font-size: 13px;
 }
 
+/*
+ * 본문 textarea 최소 높이 + 사용자가 세로로만 늘릴 수 있도록 resize 제한.
+ * .admin-schedule__input 의 monospace 폰트를 inherit 으로 되돌려 본문 입력
+ * 시 한글 가독성을 약간 개선한다 (다른 admin 페이지의 단일 라인 input 과는
+ * 의도적으로 분리).
+ */
+.admin-email-body-textarea {
+    min-height: 96px;
+    resize: vertical;
+    font-family: inherit;
+}
+
+/*
+ * 발송 버튼의 spinner — admin_email.js 가 발송 중 버튼 텍스트 앞에 삽입한다.
+ * 12px 사이즈의 회전 원형 — currentColor 로 버튼 색상을 그대로 따라간다.
+ */
+.admin-button__spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    margin-right: 6px;
+    vertical-align: -2px;
+    border: 2px solid currentColor;
+    border-bottom-color: transparent;
+    border-radius: 50%;
+    animation: admin-button-spin 0.8s linear infinite;
+}
+
+@keyframes admin-button-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
 /* ---------- 관련성 판정 배지 (Phase 3a / 00035-3) ---------- */
 
 /* 배지 컨테이너 — 툴팁 위치 계산 기준점 */

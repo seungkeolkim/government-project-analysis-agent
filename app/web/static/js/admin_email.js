@@ -304,11 +304,164 @@
     }
 
     // ──────────────────────────────────────────────────────────
+    // 섹션 2: 테스트 발송 (task 00104-12)
+    // ──────────────────────────────────────────────────────────
+
+    var TEST_SEND_URL = '/api/admin/email/test-send';
+
+    /**
+     * 「테스트 발송」 섹션을 초기화한다.
+     *
+     * - submit 시 POST /api/admin/email/test-send.
+     *   body = { recipient, subject, body } (trim 후 전송, body 는 newline 보존).
+     * - 발송 중: 버튼 disabled + spinner + 텍스트 '발송 중...'.
+     * - 응답 처리:
+     *   - 200 + {success: true, send_run_id, message}: 초록색 박스
+     *     '발송 성공 (send_run_id: N). 수신함과 정크메일 폴더를 모두 확인해주세요.'
+     *     spec 의 한글 문구 그대로.
+     *   - 4xx/5xx: 빨간색 박스 두 줄
+     *     1) '발송 실패 (HTTP <status>): <detail>'
+     *     2) '아래 「발송 이력」 섹션에서 상세 정보를 확인할 수 있습니다.'
+     *   - fetch 자체 실패 (네트워크): 빨간색 박스, 동일 포맷.
+     *
+     * 페이지에 form 요소가 없으면 즉시 반환 (다른 탭에서 admin_email.js 가 잘못
+     * 로드된 경우 안전).
+     */
+    function initTestSendSection() {
+        var form = document.getElementById('email-test-send-form');
+        if (!form) {
+            return;
+        }
+
+        var recipientInput = document.getElementById('test-send-recipient');
+        var subjectInput = document.getElementById('test-send-subject');
+        var bodyInput = document.getElementById('test-send-body');
+        var sendButton = document.getElementById('test-send-button');
+        var resultArea = document.getElementById('test-send-result-area');
+        // 발송 중 버튼 텍스트를 복구하기 위해 default 마크업을 미리 저장.
+        var defaultButtonHtml = sendButton.innerHTML;
+
+        form.addEventListener('submit', function (event) {
+            event.preventDefault();
+            performTestSend();
+        });
+
+        /**
+         * 발송 중 / 대기 상태에 따라 버튼 모양과 disabled 를 전환한다.
+         *
+         * @param {boolean} isSending true 면 spinner + '발송 중...' + disabled.
+         *                            false 면 default 마크업 복구 + enabled.
+         */
+        function setSendingState(isSending) {
+            if (isSending) {
+                sendButton.disabled = true;
+                // spinner 는 .admin-button__spinner CSS 가 회전 애니메이션을 그린다.
+                // span 안에 텍스트가 없도록 비워두고, aria-hidden 으로 SR 에서 무시.
+                sendButton.innerHTML =
+                    '<span class="admin-button__spinner" aria-hidden="true"></span>발송 중...';
+            } else {
+                sendButton.disabled = false;
+                sendButton.innerHTML = defaultButtonHtml;
+            }
+        }
+
+        /**
+         * 결과 박스 영역을 비운다 (새 발송 시작 시 직전 결과 제거).
+         */
+        function clearResult() {
+            resultArea.innerHTML = '';
+        }
+
+        /**
+         * 결과 박스를 그린다. 여러 줄은 <br> 로 분리해 한 박스에 묶는다.
+         *
+         * @param {'success'|'error'} kind admin-flash--success / admin-flash--error.
+         * @param {string[]} lines 사용자에게 보여 줄 한글 메시지 줄들.
+         */
+        function showResult(kind, lines) {
+            resultArea.innerHTML = '';
+            var box = document.createElement('div');
+            box.className = 'admin-flash admin-flash--' + kind;
+            box.setAttribute(
+                'role', kind === 'error' ? 'alert' : 'status'
+            );
+            for (var index = 0; index < lines.length; index += 1) {
+                if (index > 0) {
+                    box.appendChild(document.createElement('br'));
+                }
+                box.appendChild(document.createTextNode(lines[index]));
+            }
+            resultArea.appendChild(box);
+        }
+
+        /**
+         * POST /api/admin/email/test-send 본 호출. 성공/실패에 따라 결과 박스 갱신.
+         *
+         * body 의 newline 은 보존 (서버가 plain text 본문에 그대로 사용).
+         * subject 는 trim 없이 그대로 (사용자가 의도적으로 trailing space 를 두는
+         * 경우는 거의 없으나, 길이 검증은 서버 Pydantic 이 maxlength 로 검사).
+         */
+        function performTestSend() {
+            clearResult();
+            setSendingState(true);
+
+            var requestBody = {
+                recipient: recipientInput.value.trim(),
+                subject: subjectInput.value,
+                body: bodyInput.value
+            };
+
+            fetch(TEST_SEND_URL, {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(requestBody)
+            })
+                .then(parseJsonResponse)
+                .then(function (result) {
+                    var resp = result.resp;
+                    var responseBody = result.body || {};
+                    if (resp.ok) {
+                        // 성공 — spec 그대로의 한글 안내.
+                        var sendRunId = responseBody.send_run_id;
+                        showResult('success', [
+                            '발송 성공 (send_run_id: ' + sendRunId +
+                                '). 수신함과 정크메일 폴더를 모두 확인해주세요.'
+                        ]);
+                    } else {
+                        // 실패 — HTTP status + detail + 발송 이력 안내 두 줄.
+                        var detail = extractErrorMessage(resp, responseBody);
+                        showResult('error', [
+                            '발송 실패 (HTTP ' + resp.status + '): ' + detail,
+                            '아래 「발송 이력」 섹션에서 상세 정보를 확인할 수 있습니다.'
+                        ]);
+                    }
+                })
+                .catch(function (error) {
+                    // fetch 자체 실패 (네트워크 단절 등) — 응답 객체가 없으므로
+                    // HTTP status 를 명시하지 않고 일반 메시지로.
+                    showResult('error', [
+                        '발송 요청 실패: ' + (error.message || error),
+                        '네트워크 연결을 확인하거나 잠시 후 다시 시도해주세요.'
+                    ]);
+                })
+                .then(function () {
+                    // finally 대신 then 한 번 더 — 성공/실패/예외 모두 마무리 단계 보장.
+                    setSendingState(false);
+                });
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────
     // DOMContentLoaded — 페이지 전체 진입점
     // ──────────────────────────────────────────────────────────
 
     document.addEventListener('DOMContentLoaded', function () {
         initSettingsSection();
-        // 후속 subtask 가 여기에 initTestSendSection() / initSendRunsSection() 호출 추가.
+        initTestSendSection();
+        // 후속 subtask 가 여기에 initSendRunsSection() 호출 추가 (00104-13).
     });
 })();
