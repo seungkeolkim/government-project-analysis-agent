@@ -42,7 +42,7 @@ from dataclasses import dataclass
 
 from loguru import logger
 from sqlalchemy import case, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.backup.service import get_setting
 from app.db.models import (
@@ -50,6 +50,7 @@ from app.db.models import (
     CanonicalProject,
     EmailForwardLog,
     EmailForwardStatus,
+    EmailSendRun,
     Organization,
     User,
 )
@@ -382,6 +383,109 @@ def forward_announcement(
 
 
 # ──────────────────────────────────────────────────────────────
+# Repository 함수 — 발송 이력 조회
+# ──────────────────────────────────────────────────────────────
+#
+# 발송 이력 섹션(00109-10)과 그 라우터(00109-5)가 사용하는 조회 전용 함수다.
+# EmailForwardLog / EmailSendRun 두 모델에만 의존하고 응집도가 높아 별도
+# forward_log_repository.py 로 쪼개지 않고 본 모듈에 함께 둔다
+# (design note §4). 쓰기 책임(forward_announcement)과 읽기 책임이 한 파일에
+# 있지만, 둘 다 "공고 포워딩" 도메인이라 위치가 자연스럽다.
+
+
+def list_forward_logs_for_canonical(
+    session: Session,
+    canonical_project_id: int,
+    *,
+    limit: int = 50,
+) -> list[EmailForwardLog]:
+    """공고 1건에 대한 포워딩 발송 이력 목록을 최근순으로 조회한다.
+
+    발송 이력 섹션(``GET /api/canonical/{id}/forward-logs``)의 데이터 소스다.
+    비로그인 호출도 로그인 사용자와 동일한 결과를 받는다 (조회 권한 분기는
+    라우터가 담당하고, 본 함수는 권한과 무관하게 같은 row 를 반환한다).
+
+    라우터 응답에는 발송자(``sender``)와 발송 조직(``sender_organization``)
+    정보가 포함되므로, 각 EmailForwardLog 마다 관계를 lazy 로딩하면 row 수
+    만큼 추가 SELECT 가 발생하는 N+1 문제가 생긴다. 이를 피하려고
+    ``selectinload`` 로 ``sender_user`` / ``sender_organization`` 을
+    한 번의 추가 쿼리로 일괄 로딩한다 (PROJECT_NOTES 의 N+1 제거 패턴).
+
+    Args:
+        session: SQLAlchemy ORM Session. 본 함수는 조회만 하고 commit 하지
+            않는다.
+        canonical_project_id: 발송 이력을 조회할 CanonicalProject PK.
+        limit: 최대 반환 건수. default 50. 라우터가 쿼리 파라미터로 받은
+            값(max 200)을 그대로 넘긴다.
+
+    Returns:
+        ``created_at`` 내림차순(최근 발송이 앞)으로 정렬된 ``EmailForwardLog``
+        목록. 해당 canonical 의 이력이 없으면 빈 리스트.
+    """
+    statement = (
+        select(EmailForwardLog)
+        .where(EmailForwardLog.canonical_project_id == canonical_project_id)
+        .options(
+            selectinload(EmailForwardLog.sender_user),
+            selectinload(EmailForwardLog.sender_organization),
+        )
+        .order_by(EmailForwardLog.created_at.desc())
+        .limit(limit)
+    )
+    return list(session.execute(statement).scalars().all())
+
+
+def get_forward_log_with_send_runs(
+    session: Session,
+    forward_log_id: int,
+) -> tuple[EmailForwardLog, list[EmailSendRun]]:
+    """포워딩 이력 1건과 그에 속한 수신자별 발송 시도 row 들을 함께 조회한다.
+
+    발송 이력 행 expand
+    (``GET /api/canonical/{id}/forward-logs/{forward_log_id}/sends``)의 데이터
+    소스다. 한 포워딩은 수신자 N명에게 1건씩 발송하므로, EmailForwardLog
+    1건에 EmailSendRun 이 N개 대응한다.
+
+    EmailSendRun 과 EmailForwardLog 사이에는 FK·relationship 이 없고
+    ``related_kind='forward'`` **AND** ``related_id=forward_log_id`` 로만
+    논리적으로 연결된다. ``(related_kind, related_id)`` 복합 인덱스는 없는
+    상태이지만(인덱스 추가는 명시적 범위 밖 — 스키마 변경 동반이라 후속
+    task), 로컬 규모에서는 풀스캔이라도 실측 성능 이슈가 없어 인덱스 없이
+    SELECT 만 작성한다 (design note §10).
+
+    Args:
+        session: SQLAlchemy ORM Session. 본 함수는 조회만 하고 commit 하지
+            않는다.
+        forward_log_id: 조회 대상 ``EmailForwardLog`` 의 PK.
+
+    Returns:
+        ``(EmailForwardLog, list[EmailSendRun])`` 튜플. EmailSendRun 목록은
+        ``created_at`` 오름차순(발송 시도 순서)으로 정렬된다. 매칭되는
+        EmailSendRun 이 없으면 두 번째 원소는 빈 리스트.
+
+    Raises:
+        LookupError: ``forward_log_id`` 에 해당하는 EmailForwardLog 가 없을
+            때. 라우터가 이를 404 로 변환한다.
+    """
+    forward_log = session.get(EmailForwardLog, forward_log_id)
+    if forward_log is None:
+        raise LookupError(
+            f"발송 이력을 찾을 수 없습니다: forward_log_id={forward_log_id}"
+        )
+
+    statement = (
+        select(EmailSendRun)
+        .where(
+            EmailSendRun.related_kind == RELATED_KIND_FORWARD,
+            EmailSendRun.related_id == forward_log_id,
+        )
+        .order_by(EmailSendRun.created_at.asc())
+    )
+    send_runs = list(session.execute(statement).scalars().all())
+    return forward_log, send_runs
+
+
+# ──────────────────────────────────────────────────────────────
 # 내부 헬퍼
 # ──────────────────────────────────────────────────────────────
 
@@ -462,4 +566,6 @@ __all__ = [
     "ForwardRequest",
     "ForwardResult",
     "forward_announcement",
+    "get_forward_log_with_send_runs",
+    "list_forward_logs_for_canonical",
 ]
