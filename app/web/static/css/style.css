@@ -4885,3 +4885,582 @@ details[open] .user-card__org-summary::before {
     gap: 8px;
     align-items: center;
 }
+
+/* ====================================================================
+   Phase A-2 Part 2 (task 00109) — 공고 포워딩("메일로 보내기") UI
+   ==================================================================== */
+
+/* ---------- 상세 페이지 '메일로 보내기' 버튼 ---------- */
+/* .detail-title-wrap 안, 즐겨찾기 별 다음 / 관련성 배지 앞에 배치된다. */
+.forward-open-btn {
+    flex-shrink: 0;
+    margin-top: 4px;
+    padding: 5px 12px;
+    background: #ffffff;
+    color: #374151;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.4;
+    white-space: nowrap;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.forward-open-btn:hover:not(:disabled) {
+    background: #f3f4f6;
+    border-color: #9ca3af;
+}
+
+.forward-open-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+/* ---------- 발송 모달 ---------- */
+#forward-modal {
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 0;
+    width: 480px;
+    max-width: 94vw;
+    /* 미리보기 펼침(iframe 280px)이나 자동완성 드롭다운이 열리면 모달 내용이
+       뷰포트보다 길어질 수 있다. <dialog> 의 UA 스타일은 높이를 뷰포트로
+       제한만 하고 스크롤을 주지 않아 발송/취소 버튼이 잘려 클릭 불가가 된다 —
+       max-height + overflow-y 로 모달 자체를 스크롤 가능하게 한다. */
+    max-height: 90vh;
+    overflow-y: auto;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+}
+
+#forward-modal::backdrop {
+    background: rgba(0, 0, 0, 0.4);
+}
+
+.forward-modal__inner {
+    padding: 24px;
+}
+
+.forward-modal__title {
+    margin: 0 0 18px;
+    font-size: 18px;
+    color: #111827;
+}
+
+/* 발송 진행 중 — 입력/버튼이 disabled 상태일 때 모달 전체를 살짝 흐리게. */
+#forward-modal.forward-modal--locked .forward-modal__inner {
+    opacity: 0.75;
+}
+
+/* ---------- 모달 공통 필드 ---------- */
+.forward-modal__field {
+    margin-bottom: 16px;
+}
+
+.forward-modal__label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    color: #374151;
+    margin-bottom: 6px;
+}
+
+.forward-modal__input,
+.forward-modal__select,
+.forward-modal__textarea {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    font-size: 14px;
+    font-family: inherit;
+    color: #111827;
+    box-sizing: border-box;
+}
+
+.forward-modal__textarea {
+    resize: vertical;
+    min-height: 96px;
+}
+
+.forward-modal__input:focus,
+.forward-modal__select:focus,
+.forward-modal__textarea:focus {
+    outline: 2px solid #93c5fd;
+    outline-offset: -1px;
+    border-color: #1d4ed8;
+}
+
+.forward-modal__counter {
+    margin-top: 4px;
+    font-size: 12px;
+    color: #6b7280;
+    text-align: right;
+}
+
+/* ---------- 받는 사람 — chip 입력 컨테이너 (skeleton, 00109-9 가 채움) ---------- */
+.forward-recipients {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    background: #ffffff;
+}
+
+.forward-recipients__chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.forward-recipients__input {
+    flex: 1 1 140px;
+    min-width: 120px;
+    border: none;
+    outline: none;
+    font-size: 14px;
+    font-family: inherit;
+    color: #111827;
+    padding: 4px 2px;
+}
+
+/* 외부 이메일 직접 입력 형식 검증 실패 시 — 입력 컨테이너에 빨간 border. */
+.forward-recipients--invalid {
+    border-color: #dc2626;
+}
+
+/* ---------- 수신자 chip (00109-9) ---------- */
+.forward-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+    padding: 2px 4px 2px 8px;
+    background: #eef2ff;
+    border: 1px solid #c7d2fe;
+    border-radius: 12px;
+    font-size: 13px;
+    color: #1e3a8a;
+}
+
+.forward-chip__label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 220px;
+}
+
+.forward-chip__remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: #4338ca;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.forward-chip__remove:hover {
+    background: #c7d2fe;
+}
+
+/* 자동완성 드롭다운 — 00109-9 가 결과를 채운다. 위치 기준점만 잡아둔다. */
+.forward-autocomplete {
+    position: relative;
+    margin-top: 2px;
+}
+
+/* 드롭다운이 펼쳐졌을 때만 테두리/그림자/스크롤을 입힌다 (hidden 이면 무테). */
+.forward-autocomplete:not([hidden]) {
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    background: #ffffff;
+    max-height: 220px;
+    overflow-y: auto;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.08);
+}
+
+.forward-autocomplete__item {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 10px;
+    border: none;
+    border-bottom: 1px solid #f3f4f6;
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+}
+
+.forward-autocomplete__item:last-child {
+    border-bottom: none;
+}
+
+.forward-autocomplete__item:hover,
+.forward-autocomplete__item--active {
+    background: #eef2ff;
+}
+
+.forward-autocomplete__name {
+    font-weight: 600;
+    color: #111827;
+}
+
+.forward-autocomplete__email {
+    color: #6b7280;
+}
+
+.forward-autocomplete__orgs {
+    color: #9ca3af;
+    font-size: 12px;
+}
+
+.forward-autocomplete__empty {
+    padding: 8px 10px;
+    font-size: 13px;
+    color: #9ca3af;
+}
+
+/* ---------- 발신 조직 ---------- */
+.forward-modal__org-single {
+    padding: 8px 10px;
+    background: #f3f4f6;
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    font-size: 14px;
+    color: #374151;
+}
+
+.forward-modal__org-notice {
+    margin: 0;
+    font-size: 13px;
+    color: #6b7280;
+}
+
+/* ---------- 본문 미리보기 ---------- */
+.forward-modal__preview-toggle {
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    color: #1d4ed8;
+}
+
+.forward-modal__preview-toggle:hover:not(:disabled) {
+    text-decoration: underline;
+}
+
+.forward-modal__preview-toggle:disabled {
+    cursor: not-allowed;
+    color: #9ca3af;
+}
+
+.forward-modal__preview-region {
+    margin-top: 10px;
+}
+
+.forward-modal__preview-notice {
+    margin: 0 0 6px;
+    font-size: 12px;
+    color: #b45309;
+}
+
+.forward-modal__preview-frame {
+    width: 100%;
+    height: 280px;
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    background: #ffffff;
+}
+
+/* ---------- 에러 / 결과 박스 ---------- */
+.forward-modal__error {
+    color: #b91c1c;
+    font-size: 13px;
+    min-height: 18px;
+    margin: 0 0 10px;
+}
+
+.forward-modal__result {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    border-radius: 4px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.forward-modal__result--success {
+    background: #ecfdf5;
+    color: #065f46;
+    border: 1px solid #a7f3d0;
+}
+
+.forward-modal__result--error {
+    background: #fef2f2;
+    color: #b91c1c;
+    border: 1px solid #fecaca;
+}
+
+/* ---------- 액션 버튼 + spinner ---------- */
+.forward-modal__actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.forward-modal__send-btn {
+    padding: 8px 20px;
+    background: #1d4ed8;
+    color: #ffffff;
+    border: 1px solid #1d4ed8;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.forward-modal__send-btn:hover:not(:disabled) {
+    background: #1e40af;
+}
+
+.forward-modal__send-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+.forward-modal__cancel-btn {
+    padding: 8px 14px;
+    background: #ffffff;
+    color: #6b7280;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    margin-left: auto;
+}
+
+.forward-modal__cancel-btn:hover:not(:disabled) {
+    background: #f3f4f6;
+}
+
+.forward-modal__cancel-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+/* 발송 진행 중 spinner — 외부 라이브러리 없이 CSS 회전 애니메이션. */
+.forward-modal__spinner {
+    width: 16px;
+    height: 16px;
+    border: 2px solid #c7d2fe;
+    border-top-color: #1d4ed8;
+    border-radius: 50%;
+    animation: forward-spin 0.7s linear infinite;
+}
+
+@keyframes forward-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* ---------- 공고 상세 페이지 하단 '발송 이력' 섹션 (task 00109-10) ---------- */
+.forward-history-section {
+    margin-top: 32px;
+}
+
+.forward-history-section__title {
+    font-size: 16px;
+    font-weight: 600;
+    color: #374151;
+    margin: 0 0 12px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+/* 로딩 / 빈 상태 / 에러 안내 문구 — 회색 텍스트. */
+.forward-history__loading,
+.forward-history__empty,
+.forward-history__error {
+    font-size: 13px;
+    color: #6b7280;
+    margin: 8px 0;
+}
+
+.forward-history__error {
+    color: #b91c1c;
+}
+
+/* 발송 이력 목록 테이블 — 동적 expand 가 있으므로 table-layout: fixed +
+   비제목 컬럼 명시 너비 (PROJECT_NOTES 컨벤션). 제목 컬럼만 너비 없이 나머지
+   폭을 흡수한다. */
+.forward-history__table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    font-size: 13px;
+}
+
+.forward-history__table th,
+.forward-history__table td {
+    padding: 6px 8px;
+    border-bottom: 1px solid #f1f1f1;
+    text-align: left;
+    vertical-align: top;
+}
+
+.forward-history__table thead th {
+    color: #6b7280;
+    font-weight: 600;
+    border-bottom: 1px solid #e5e7eb;
+    white-space: nowrap;
+}
+
+.forward-history__col-time {
+    width: 150px;
+}
+
+.forward-history__col-sender {
+    width: 180px;
+}
+
+.forward-history__col-count {
+    width: 64px;
+}
+
+.forward-history__col-status {
+    width: 120px;
+}
+
+.forward-history__col-message {
+    width: 64px;
+    text-align: center;
+}
+
+.forward-history__col-toggle {
+    width: 44px;
+}
+
+/* 제목 컬럼 — 명시 너비 없이 나머지 폭 흡수. truncate + hover tooltip. */
+.forward-history__subject {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.forward-history__message {
+    text-align: center;
+}
+
+/* main 행 — 전체가 클릭 가능 (행 클릭 → expand toggle). */
+.forward-history__row {
+    cursor: pointer;
+}
+
+.forward-history__row:hover {
+    background: #f9fafb;
+}
+
+.forward-history__row--expanded {
+    background: #f3f4f6;
+}
+
+.forward-history__toggle-cell {
+    text-align: center;
+}
+
+.forward-history__toggle {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 13px;
+    color: #6b7280;
+    padding: 2px 6px;
+    line-height: 1;
+}
+
+.forward-history__toggle:hover {
+    color: #374151;
+}
+
+/* expand 행 — 수신자별 발송 결과를 담는다. */
+.forward-history__expand-cell {
+    padding: 12px 16px;
+    background: #f9fafb;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.forward-history__sends-loading,
+.forward-history__sends-empty,
+.forward-history__sends-error-msg {
+    font-size: 12px;
+    color: #6b7280;
+    margin: 4px 0;
+}
+
+.forward-history__sends-error-msg {
+    color: #b91c1c;
+}
+
+/* 수신자별 발송 결과 표 — 이 또한 동적 렌더이므로 table-layout: fixed +
+   비제목 컬럼 명시 너비. 에러 컬럼만 너비 없이 나머지 폭을 흡수한다. */
+.forward-history__sends-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    font-size: 12px;
+}
+
+.forward-history__sends-table th,
+.forward-history__sends-table td {
+    padding: 4px 8px;
+    border-bottom: 1px solid #ececec;
+    text-align: left;
+    vertical-align: top;
+    overflow-wrap: anywhere;
+}
+
+.forward-history__sends-table thead th {
+    color: #6b7280;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.forward-history__sends-col-recipient {
+    width: 220px;
+    overflow-wrap: anywhere;
+}
+
+.forward-history__sends-col-status {
+    width: 80px;
+}
+
+.forward-history__sends-col-attempt {
+    width: 72px;
+}
+
+.forward-history__sends-col-sent-at {
+    width: 150px;
+}
+
+/* 에러 메시지 — 길 수 있으므로 줄바꿈을 허용한다. */
+.forward-history__sends-error {
+    overflow-wrap: anywhere;
+    color: #b91c1c;
+}

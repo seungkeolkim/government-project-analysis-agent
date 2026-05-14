@@ -55,6 +55,7 @@ FastAPI + Jinja2 (`templates/`) + 로컬 정적 리소스 (`static/`, 외부 CDN
 - `routes/bulk.py` — 읽음 bulk. `POST /announcements/bulk-mark-read|unread`. 두 가지 모드: `ids`(명시 목록) / `filter`(서버가 필터 파라미터로 announcement id 추출). `current_user_required + ensure_same_origin`.
 - `routes/favorites.py` — 즐겨찾기 폴더·항목 CRUD. 폴더(`GET /favorites/folders` 트리, `POST/PATCH /favorites/folders/{id}`, `GET /favorites/folders/{id}/delete-preview` cascade 미리보기, `DELETE /favorites/folders/{id}` 자식·공고 모두 cascade), 항목(`POST /favorites/entries` announcement 단위 + `apply_to_all_siblings` 라디오. 이미 있는 announcement 는 409 대신 `skipped_announcement_ids` 응답. `PATCH /favorites/entries/{id}` 폴더 이동(동일 폴더는 no-op), `DELETE /favorites/entries/{id}`, `GET /favorites/folders/{id}/entries` 페이지네이션). 쓰기는 `current_user_required + ensure_same_origin`. 타 사용자 폴더는 404(존재 비노출). 루트 폴더 동명 중복은 SQLite UNIQUE NULL 이슈로 app-level SELECT 체크.
 - `routes/admin_email.py` — `/admin/email` 관리자 이메일 설정 페이지 및 API. `GET /admin/email` SSR 페이지, `GET/PUT /admin/email/settings` (설정 조회·저장), `POST /admin/email/test-send` (테스트 발송), `GET /admin/email/send-runs` (발송 이력 목록). 모두 `admin_user_required`. `email.html` 템플릿에 메일 설정 form·테스트 발송 섹션·발송 이력 테이블이 포함됨.
+- `routes/forward.py` — 공고 포워딩 API 4종. `POST /api/canonical/{id}/forward` (로그인 필수, `current_user_required + ensure_same_origin`), `GET /api/canonical/{id}/forward-logs` (비로그인 허용), `GET /api/canonical/{id}/forward-logs/{log_id}/sends` (수신자별 발송 결과, 비로그인 허용), `GET /api/users/search` (내부 사용자 자동완성, 로그인 필수). 수신자 최대 50명 제한. 공고 상세 페이지 하단 '발송 이력' 섹션 API 공급. admin_email.py 와 분리된 이유: admin 라우터는 전체 라우터 레벨 admin 전용인 반면 포워딩은 일반 로그인 + 비로그인 혼재 — endpoint 단위 권한 분기가 필요 (progress.py 와 동일 패턴).
 - `routes/settings.py` — `GET/POST /settings`. 로그인 사용자 전용 개인 설정. 비밀번호 변경·이메일 변경·이메일 수신 토글·소속 조직 다중 선택. `current_user_required + ensure_same_origin`.
 - `routes/suggestions.py` — `/suggestions` 건의사항 게시판. 목록 / 작성 / 뷰어(비밀글은 작성자·관리자만) / 댓글 작성·수정·삭제(댓글 삭제는 하드 삭제) / 수용여부 저장(관리자, 예상 개발일 `planned_at` 포함) / 게시글 수정(작성자 본인만) / 게시글 삭제(작성자 또는 관리자, `_apply_owner_edit_gates(allow_admin=True)` 게이트). 작성자명은 `current_user.username` 자동 등록.
 - `routes/notices.py` — `/notices` 공지사항 게시판. 목록·뷰어·작성·수정·삭제 모두 관리자 전용. 댓글·비밀글·수용여부 없음. `boards.sqlite3` 공유 + 별도 테이블.
@@ -72,9 +73,10 @@ FastAPI + Jinja2 (`templates/`) + 로컬 정적 리소스 (`static/`, 외부 CDN
 - `app/email/transport/m365_oauth.py` — `M365OAuthSmtpTransport`. Azure AD `msal.ConfidentialClientApplication` 으로 XOAUTH2 액세스 토큰 발급 → `smtplib.SMTP("smtp.office365.com", 587)` STARTTLS + `AUTH XOAUTH2`. 매 `send()` 마다 msal 인스턴스 새로 생성(토큰 캐시 포기, 항상 최신 자격증명 보장).
 - `app/email/transport/factory.py` — `build_transport(session)`. `SystemSetting["email.transport.type"]` 값(`m365_oauth`)에 따라 구현체를 인스턴스화. 향후 옵션 추가 시 `constants.ALLOWED_EMAIL_TRANSPORT_TYPES`에 값 추가 + `elif` 분기 1줄로 확장 완결.
 - `app/email/config.py` — `M365OAuthSmtpConfig` frozen dataclass + `load_m365_oauth_config(session)`. `SystemSetting` 5개 키(tenant_id/client_id/client_secret/sender_address/from_display_name)를 읽어 반환. 미설정 키는 `constants.DEFAULT_*` fallback.
-- `app/email/message_builder.py` — `build_plain_text_message(to, subject, body)`. `email.message.EmailMessage` 생성. UTF-8 plain text 전용.
+- `app/email/message_builder.py` — 두 종류의 빌더를 노출한다. ① `build_plain_text_message(to, subject, body)` — 기존 plain text 전용 (Phase A-1 테스트 발송용). ② `build_multipart_message(recipient, subject, text_body, html_body, sender_address, sender_display_name)` — text/plain + text/html 두 alternative 를 가진 multipart/alternative EmailMessage (Phase A-2 Part 2 공고 포워딩용). 부속 헬퍼: `build_default_forward_subject`, `build_forward_text_body`, `build_forward_html_body`, `build_announcement_detail_url`.
+- `app/email/forwarding.py` — `forward_announcement(canonical_id, request, session, transport, max_retry)` + 조회 헬퍼. 트랜잭션 3단계: ① `EmailForwardLog` 선(先) commit → ② 수신자별 `send_with_retry` 루프 → ③ success/failure 집계 후 최종 status commit. 수신자 1명씩 개별 발송(프라이버시 + per-recipient 추적). 발신 모듈: `app/email/message_builder` 에 본문 빌드 위임, `app/email/sender.send_with_retry` 에 재시도·이력 위임.
 - `app/email/sender.py` — `send_with_retry(transport, message, session, max_retry_count)`. 1차 시도 + 최대 `max_retry_count`회 재시도, 2초 flat backoff. `EmailSendRun` row 생성·`attempt_count` 증가·`error_message` 업데이트·`session.commit()` 직접 수행.
-- `app/email/constants.py` — `SystemSetting` 키 상수 7개(`email.transport.type`, `email.m365.*` 5개, `email.from_display_name`) + 기본값 상수 + `ALLOWED_EMAIL_TRANSPORT_TYPES` frozenset.
+- `app/email/constants.py` — `SystemSetting` 키 상수(`email.transport.type`, `email.m365.*` 5개, `email.from_display_name`, `email.max_retry_count`, `app.public_base_url`) + 기본값 상수 + `ALLOWED_EMAIL_TRANSPORT_TYPES` frozenset. `RELATED_KIND_FORWARD="forward"` / `RELATED_KIND_TEST_SEND="test_send"` 는 `EmailSendRun.related_kind` 컬럼 값 도메인 상수. `SETTING_KEY_APP_PUBLIC_BASE_URL` 은 메일 본문 URL prefix — email.* 네임스페이스 밖이지만 이메일 본문 전용 용도라 동일 모듈에 배치.
 
 ### IRIS 목록 API 구조
 
@@ -300,7 +302,14 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - **`EmailForwardLog` 메시지 본문 미저장**: 개인정보·DB 크기 고려로 포워딩 메시지 본문은 저장하지 않고 `has_additional_message` boolean 만 기록. 제목·수신자 목록·성공/실패 카운트는 메타데이터로 보존.
 - **`EmailForwardLog.status` 는 default 없음**: 포워딩 완료 후에야 결과가 확정되므로 ORM 레벨 default 를 두지 않고 Part 2 application 코드가 INSERT 시 명시적으로 채우도록 강제 (의도된 제약).
 - **`EmailForwardLog` relationship 은 단방향**: `CanonicalProject`, `User`, `Organization` 을 향한 `lazy="select"` 단방향 relationship 만 선언. 상대 모델에서 `email_forward_logs` collection 을 조회할 활용 시나리오가 Part 1 에는 없어 back_populates 추가로 불필요한 ORM surface 를 늘리지 않음 (`EmailSendRun.requested_by` 와 동일 패턴).
-- **`EmailForwardLog` ↔ `EmailSendRun` 연결은 Part 2 에서**: `EmailSendRun.related_kind='forward'`, `related_id=EmailForwardLog.id` 로 연결하는 FK 는 Part 1 에서 모델·migration 을 변경하지 않고 Part 2 application 코드가 row INSERT 시 채우는 설계 — Part 1 은 `EmailForwardLog` 독립 테이블로만 완결.
+- **`EmailForwardLog` ↔ `EmailSendRun` 연결은 application 레벨 (FK 없음)**: `EmailSendRun.related_kind='forward'`, `related_id=EmailForwardLog.id` 조합으로 연결. DB FK constraint 는 추가하지 않고 application 코드(`forwarding.py`)가 INSERT 시 채움. 발송 이력 expand 조회(`/forward-logs/{id}/sends`)는 이 두 컬럼으로 join. Phase A-1 은 `EmailForwardLog` 독립 테이블로 완결하고, Phase A-2 Part 2(00109)가 `related_kind`/`related_id` 연결을 완성.
+
+### 공고 포워딩 (`app/email/forwarding.py`, Phase A-2 Part 2)
+
+- **수신자 1명씩 개별 발송 (BCC 금지)**: 동보 메일(수신자 전체를 To/BCC 에 묶어 1회 발송) 대신 수신자마다 별도 `EmailMessage` 를 생성·발송. 프라이버시(수신자 목록 비노출) + per-recipient 발송 성공/실패 추적 + `EmailSendRun` row 개별 생성이 이유. 성능 희생이 있으나 수신자 최대 50명 상한으로 허용 범위.
+- **`app.public_base_url` SystemSetting 으로 메일 본문 URL 관리**: 메일 본문에 공고 상세 URL(`{base_url}/announcements/{id}`)을 삽입할 때, 운영 환경마다 다른 서버 주소(예: `http://team-server.lan:8000`)를 `SystemSetting["app.public_base_url"]`로 관리. row 없으면 `http://localhost:8000` fallback (seed migration 없음). 관리자 UI 설정 화면은 Part 2 범위 밖 — 현재는 DB 직접 수정으로 변경.
+- **포워딩 트랜잭션 3단계**: (1) `EmailForwardLog` 선(先) commit으로 "발송 시도 기록" 확보 → (2) 수신자별 `send_with_retry` 루프(각각 session.commit) → (3) 집계 후 최종 status/completed_at commit. `send_with_retry`가 호출자 session을 직접 commit하므로 미커밋 변경을 최소화하는 3단계 구조.
+- **포워딩 canonical 단위, 발송은 최신 announcement 1건 기준**: 모달이 canonical_id를 받아 is_current=True·최신 버전 announcement를 선택해 메일 본문(제목·기관·마감일·링크)을 구성. 동일 과제의 여러 소스·버전 중 "대표 1건"을 자동 선택.
 
 ### UI / UX
 
@@ -312,6 +321,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
+- [00109] Phase A-2 Part 2 공고 포워딩 구현 — `app/email/forwarding.py` 신규(수신자별 개별 발송·트랜잭션 3단계), `message_builder.py` multipart/HTML 확장, `routes/forward.py` API 4종(POST /forward·GET /forward-logs·sends·GET /users/search), 상세 페이지 '메일로 보내기' 버튼 + 수신자 chip 입력 + 발송 이력 섹션 UI — 2026-05-14
 - [00106] Phase A-2 Part 1: `EmailForwardLog` ORM + Alembic migration + 단위 테스트 (`email_forward_logs` 테이블 신설, `EmailForwardStatus` enum) — 2026-05-14
 - [00105] `email-validator` 의존성 누락 수정 — pydantic `EmailStr` 사용 시 필수인 `email-validator>=2.0,<3.0` 패키지가 00104에서 빠져 기동 오류 발생, pyproject.toml 에 추가하여 복구 — 2026-05-14
 - [00104] 메일 발송 인프라 + 관리자 UI 구현 (Phase A-1) — `app/email/` 패키지(Transport ABC·M365 OAuth SMTP·재시도 sender·factory), `email_send_runs` Alembic migration, admin_email API 4종, 관리자 이메일 탭 Frontend (설정 form·테스트 발송·발송 이력) — 2026-05-13
@@ -322,4 +332,3 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - [00097] 공고 진행 상태(Progress) 기능 구현 — 조직 단위 관심/검토/진행/종료 4단계, 진행 선점 제약(canonical당 1조직, app-level transactional check), 조직 멤버 누구나 수정 권한, 다중 체크박스 필터 + 목록 셀/상세 인라인 섹션 UI — 2026-05-08
 - [00096] 관리자 페이지 「시스템 관리」 탭 신설 — 시스템 백업을 공고 수집 제어 하위에서 분리, 백업 스케줄 표시도 시스템 백업 탭으로 통합 — 2026-05-08
 - [00095] Docker 실행 스크립트 개선 — compose.sh → run_compose.sh/run_admin.sh 분화, dev/prod 분기 제거, alembic 바인드 마운트로 migration 재빌드 불필요화 — 2026-05-08
-- [00094] DB 정기 백업 시스템 구현 — app.sqlite+boards.sqlite 스케줄 백업, SystemSetting·BackupHistory 모델, 관리자 '시스템 백업' 탭(설정·수동 실행·이력·파일 목록) — 2026-05-08
