@@ -36,6 +36,8 @@ dependencies = [
     # 설정/검증
     "pydantic>=2.6,<3.0",
     "pydantic-settings>=2.2,<3.0",
+    # pydantic EmailStr 검증용 — admin_email.TestSendIn.recipient 가 의존
+    "email-validator>=2.0,<3.0",
     "python-dotenv>=1.0,<2.0",
     "pyyaml>=6.0,<7.0",
 
