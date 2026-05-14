@@ -4,16 +4,15 @@
     docs/phase_a2_part2_design_note.md §10 (API 스펙 요약) + 첨부
     phase_a2_part2_prompt.md "백엔드 변경 §4 API endpoints".
 
-엔드포인트 3 개:
+엔드포인트 4 개:
     POST /api/canonical/{canonical_id}/forward
         → 공고 1건을 N명에게 메일로 포워딩한다. 로그인 사용자 전용.
     GET  /api/canonical/{canonical_id}/forward-logs
         → 해당 공고의 포워딩 발송 이력 목록. 비로그인 허용.
     GET  /api/canonical/{canonical_id}/forward-logs/{forward_log_id}/sends
         → 발송 이력 1건의 수신자별 발송 시도 결과. 비로그인 허용.
-
-내부 사용자 자동완성 endpoint(``GET /api/users/search``)는 00109-6 의
-책임이므로 본 모듈에 포함하지 않는다.
+    GET  /api/users/search
+        → 수신자 chip 입력의 내부 사용자 자동완성용 검색. 로그인 사용자 전용.
 
 라우터 분리 근거 (design note §4):
     ``admin_email.py`` 는 라우터 레벨 ``admin_user_required`` 로 admin 전용이다.
@@ -35,6 +34,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
 from loguru import logger
 from pydantic import BaseModel, EmailStr, Field
+from sqlalchemy import func, or_, select
+from sqlalchemy.orm import selectinload
 
 from app.auth.dependencies import (
     current_user_optional,
@@ -42,7 +43,7 @@ from app.auth.dependencies import (
     ensure_same_origin,
 )
 from app.backup.service import get_setting
-from app.db.models import EmailForwardLog, EmailSendRun, User
+from app.db.models import EmailForwardLog, EmailSendRun, User, UserOrganization
 from app.db.repository import get_canonical_project_by_id
 from app.db.session import session_scope
 from app.email.constants import (
@@ -78,6 +79,16 @@ ADDITIONAL_MESSAGE_MAX_LENGTH: int = 5000
 # String(200) 이므로, 200 자 초과 입력을 DB INSERT 단계의 500 이 아니라
 # 라우터 단계의 422 로 먼저 끊는다 (design note §10 "subject ≤200").
 SUBJECT_MAX_LENGTH: int = 200
+
+# GET /api/users/search 의 q query 파라미터 길이 제한 (첨부 prompt §4 /
+# design note §10). 1 자 미만/50 자 초과는 FastAPI 가 자동으로 422 로 막는다.
+USER_SEARCH_QUERY_MIN_LENGTH: int = 1
+USER_SEARCH_QUERY_MAX_LENGTH: int = 50
+
+# GET /api/users/search 의 limit query 파라미터 상하한 (첨부 prompt §4 /
+# design note §10).
+USER_SEARCH_LIMIT_DEFAULT: int = 10
+USER_SEARCH_LIMIT_MAX: int = 30
 
 
 # ──────────────────────────────────────────────────────────────
@@ -271,6 +282,42 @@ def _serialize_send_run(send_run: EmailSendRun) -> dict[str, Any]:
         "sent_at": (
             send_run.sent_at.isoformat() if send_run.sent_at is not None else None
         ),
+    }
+
+
+def _serialize_user_search_result(user: User) -> dict[str, Any]:
+    """User 1 row 를 GET /api/users/search 응답용 dict 로 직렬화한다.
+
+    첨부 prompt §4 의 ``/api/users/search`` 응답 예시 스키마를 그대로 따른다 —
+    수신자 chip 자동완성에 필요한 ``id`` / ``username`` / ``email`` 과, 발송자
+    참고용 소속 조직 목록(``organizations``)만 노출한다.
+
+    소속 조직은 ``search_users_route`` 가 ``selectinload`` 로 eager 로딩해 둔
+    ``user_organizations`` 관계를 사용한다 (N+1 회피). 조직이 삭제되어 매핑만
+    남은 비정상 row 는 건너뛰며, 결과는 조직명 알파벳순으로 정렬해 표시
+    순서를 안정화한다.
+
+    Args:
+        user: 직렬화할 ``User`` 인스턴스. ``email`` 은 호출부 쿼리에서 이미
+            ``IS NOT NULL`` 로 걸러졌으므로 항상 값이 있다.
+
+    Returns:
+        JSON 응답에 그대로 넣을 dict.
+    """
+    organizations = [
+        {
+            "id": mapping.organization.id,
+            "name": mapping.organization.name,
+        }
+        for mapping in user.user_organizations
+        if mapping.organization is not None
+    ]
+    organizations.sort(key=lambda organization: organization["name"])
+    return {
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "organizations": organizations,
     }
 
 
@@ -602,6 +649,98 @@ def get_forward_log_sends_route(
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content=[_serialize_send_run(send_run) for send_run in send_runs],
+        )
+
+
+# ──────────────────────────────────────────────────────────────
+# 4. GET /api/users/search
+# ──────────────────────────────────────────────────────────────
+
+
+@router.get(
+    "/api/users/search",
+    status_code=status.HTTP_200_OK,
+)
+def search_users_route(
+    q: str = Query(
+        min_length=USER_SEARCH_QUERY_MIN_LENGTH,
+        max_length=USER_SEARCH_QUERY_MAX_LENGTH,
+    ),
+    limit: int = Query(
+        default=USER_SEARCH_LIMIT_DEFAULT,
+        ge=1,
+        le=USER_SEARCH_LIMIT_MAX,
+    ),
+    current_user: User = Depends(current_user_required),
+) -> JSONResponse:
+    """수신자 chip 입력의 내부 사용자 자동완성용 검색 결과를 반환한다.
+
+    권한: 로그인 사용자 전용(``current_user_required``) — 자동완성은 로그인
+    시에만 제공하므로 비로그인 요청은 401 이다.
+
+    검색 조건 (첨부 prompt §4 / design note §10):
+        - ``q`` 가 ``username`` 또는 ``email`` 에 부분 일치(대소문자 무시).
+          대소문자 무시 검색은 ``func.lower()`` + ``LIKE`` 로 수행한다
+          (PROJECT_NOTES "Migration / ORM 이식성" 컨벤션).
+        - ``email IS NOT NULL`` 인 사용자만 — 이메일이 없으면 수신자로 쓸 수
+          없으므로 자동완성 결과에서 제외한다.
+        - ``User`` 모델에 ``is_active`` 류 컬럼이 없으므로 활성 필터는 적용하지
+          않는다 (첨부 prompt: "없으면 무시").
+        - 결과는 ``username`` 알파벳순. 정확 일치 우선 정렬은 over-engineering
+          으로 보아 도입하지 않는다 (design note §10 결정).
+
+    Args:
+        q: 검색어. ``username`` 또는 ``email`` 의 부분 일치 대상. 1 ~ 50 자 —
+           위반 시 FastAPI 가 자동으로 422 를 반환한다.
+        limit: 반환할 최대 사용자 수. 기본 10, 최대 30 (design note §10).
+        current_user: ``current_user_required`` 가 통과시킨 로그인 User.
+            응답 내용에는 영향을 주지 않으며, 로그인 여부 게이트로만 쓰인다.
+
+    Returns:
+        200 + ``_serialize_user_search_result`` 직렬화 결과 list. 매칭되는
+        사용자가 없으면 빈 list.
+    """
+    # current_user 는 응답에 영향을 주지 않는다 — 로그인 게이트 용도로만 받는다.
+    _ = current_user
+
+    # 앞뒤 공백만 입력된 경우(예: "   ")는 Pydantic 길이 검증은 통과하지만
+    # 검색어로서 의미가 없으므로, 정규화 후 빈 문자열이면 빈 결과를 반환한다.
+    normalized_query = q.strip()
+    if not normalized_query:
+        return JSONResponse(status_code=status.HTTP_200_OK, content=[])
+
+    logger.debug(
+        "GET /api/users/search 진입: q={!r} limit={}", normalized_query, limit
+    )
+
+    # func.lower() 로 컬럼 값을, 파이썬 .lower() 로 검색어를 각각 소문자화해
+    # 대소문자 무시 부분 일치(LIKE) 를 만든다.
+    like_pattern = f"%{normalized_query.lower()}%"
+
+    with session_scope() as session:
+        statement = (
+            select(User)
+            .where(
+                User.email.isnot(None),
+                or_(
+                    func.lower(User.username).like(like_pattern),
+                    func.lower(User.email).like(like_pattern),
+                ),
+            )
+            .order_by(User.username)
+            .limit(limit)
+            # 응답의 organizations 를 채우려면 user_organizations → organization
+            # 까지 필요하다. selectinload 2 단으로 N+1 을 회피한다.
+            .options(
+                selectinload(User.user_organizations).selectinload(
+                    UserOrganization.organization
+                )
+            )
+        )
+        users = session.execute(statement).scalars().all()
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content=[_serialize_user_search_result(user) for user in users],
         )
 
 
