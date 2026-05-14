@@ -5273,3 +5273,188 @@ details[open] .user-card__org-summary::before {
         transform: rotate(360deg);
     }
 }
+
+/* ---------- 공고 상세 페이지 하단 '발송 이력' 섹션 (task 00109-10) ---------- */
+.forward-history-section {
+    margin-top: 32px;
+}
+
+.forward-history-section__title {
+    font-size: 16px;
+    font-weight: 600;
+    color: #374151;
+    margin: 0 0 12px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+/* 로딩 / 빈 상태 / 에러 안내 문구 — 회색 텍스트. */
+.forward-history__loading,
+.forward-history__empty,
+.forward-history__error {
+    font-size: 13px;
+    color: #6b7280;
+    margin: 8px 0;
+}
+
+.forward-history__error {
+    color: #b91c1c;
+}
+
+/* 발송 이력 목록 테이블 — 동적 expand 가 있으므로 table-layout: fixed +
+   비제목 컬럼 명시 너비 (PROJECT_NOTES 컨벤션). 제목 컬럼만 너비 없이 나머지
+   폭을 흡수한다. */
+.forward-history__table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    font-size: 13px;
+}
+
+.forward-history__table th,
+.forward-history__table td {
+    padding: 6px 8px;
+    border-bottom: 1px solid #f1f1f1;
+    text-align: left;
+    vertical-align: top;
+}
+
+.forward-history__table thead th {
+    color: #6b7280;
+    font-weight: 600;
+    border-bottom: 1px solid #e5e7eb;
+    white-space: nowrap;
+}
+
+.forward-history__col-time {
+    width: 150px;
+}
+
+.forward-history__col-sender {
+    width: 180px;
+}
+
+.forward-history__col-count {
+    width: 64px;
+}
+
+.forward-history__col-status {
+    width: 120px;
+}
+
+.forward-history__col-message {
+    width: 64px;
+    text-align: center;
+}
+
+.forward-history__col-toggle {
+    width: 44px;
+}
+
+/* 제목 컬럼 — 명시 너비 없이 나머지 폭 흡수. truncate + hover tooltip. */
+.forward-history__subject {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.forward-history__message {
+    text-align: center;
+}
+
+/* main 행 — 전체가 클릭 가능 (행 클릭 → expand toggle). */
+.forward-history__row {
+    cursor: pointer;
+}
+
+.forward-history__row:hover {
+    background: #f9fafb;
+}
+
+.forward-history__row--expanded {
+    background: #f3f4f6;
+}
+
+.forward-history__toggle-cell {
+    text-align: center;
+}
+
+.forward-history__toggle {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 13px;
+    color: #6b7280;
+    padding: 2px 6px;
+    line-height: 1;
+}
+
+.forward-history__toggle:hover {
+    color: #374151;
+}
+
+/* expand 행 — 수신자별 발송 결과를 담는다. */
+.forward-history__expand-cell {
+    padding: 12px 16px;
+    background: #f9fafb;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.forward-history__sends-loading,
+.forward-history__sends-empty,
+.forward-history__sends-error-msg {
+    font-size: 12px;
+    color: #6b7280;
+    margin: 4px 0;
+}
+
+.forward-history__sends-error-msg {
+    color: #b91c1c;
+}
+
+/* 수신자별 발송 결과 표 — 이 또한 동적 렌더이므로 table-layout: fixed +
+   비제목 컬럼 명시 너비. 에러 컬럼만 너비 없이 나머지 폭을 흡수한다. */
+.forward-history__sends-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    font-size: 12px;
+}
+
+.forward-history__sends-table th,
+.forward-history__sends-table td {
+    padding: 4px 8px;
+    border-bottom: 1px solid #ececec;
+    text-align: left;
+    vertical-align: top;
+    overflow-wrap: anywhere;
+}
+
+.forward-history__sends-table thead th {
+    color: #6b7280;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.forward-history__sends-col-recipient {
+    width: 220px;
+    overflow-wrap: anywhere;
+}
+
+.forward-history__sends-col-status {
+    width: 80px;
+}
+
+.forward-history__sends-col-attempt {
+    width: 72px;
+}
+
+.forward-history__sends-col-sent-at {
+    width: 150px;
+}
+
+/* 에러 메시지 — 길 수 있으므로 줄바꿈을 허용한다. */
+.forward-history__sends-error {
+    overflow-wrap: anywhere;
+    color: #b91c1c;
+}

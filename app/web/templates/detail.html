@@ -352,4 +352,18 @@
 </ul>
 {% endif %}
 
+{# ── task 00109 (Phase A-2 Part 2) — 공고 발송 이력 섹션 ──
+   포워딩은 canonical 단위 기능이므로 canonical_id 가 있을 때만 렌더한다.
+   빈 상태 / 목록 / 행 expand 는 모두 forward_history.js 가
+   GET /api/canonical/{id}/forward-logs 결과로 클라이언트 렌더한다 (SSR 안 함).
+   비로그인 사용자도 동일하게 노출된다 (GET endpoint 가 비로그인 허용). #}
+{% if canonical_id %}
+<section class="forward-history-section" data-canonical-id="{{ canonical_id }}">
+    <h3 class="forward-history-section__title">발송 이력</h3>
+    <div class="forward-history-section__body" id="forward-history-body">
+        <p class="forward-history__loading">발송 이력을 불러오는 중…</p>
+    </div>
+</section>
+{% endif %}
+
 {% endblock %}

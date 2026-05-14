@@ -97,6 +97,11 @@
        early-return 하므로 모든 페이지에서 무조건 로드해도 무해하다. #}
     {% include "_forward_modal.html" %}
     <script src="/static/js/forward.js"></script>
+    {# Phase A-2 Part 2 (task 00109) — 공고 발송 이력 섹션. 상세 페이지의
+       .forward-history-section 이 없는 페이지에서는 early-return 으로 무해.
+       forward.js 와 분리한 이유: 발송 이력 섹션은 비로그인도 노출되지만
+       forward.js 는 #forward-modal(로그인 시만 렌더)이 없으면 early-return 한다. #}
+    <script src="/static/js/forward_history.js"></script>
     {# task 00097-5 — Phase C 진행 상태 / 선점 UI. 목록 / 상세 양쪽에 모두 필요.
        해당 셀 / 섹션이 없는 페이지에서는 early-return 으로 무해. #}
     <script src="/static/js/progress.js"></script>
