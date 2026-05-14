@@ -4925,6 +4925,12 @@ details[open] .user-card__org-summary::before {
     padding: 0;
     width: 480px;
     max-width: 94vw;
+    /* 미리보기 펼침(iframe 280px)이나 자동완성 드롭다운이 열리면 모달 내용이
+       뷰포트보다 길어질 수 있다. <dialog> 의 UA 스타일은 높이를 뷰포트로
+       제한만 하고 스크롤을 주지 않아 발송/취소 버튼이 잘려 클릭 불가가 된다 —
+       max-height + overflow-y 로 모달 자체를 스크롤 가능하게 한다. */
+    max-height: 90vh;
+    overflow-y: auto;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
 }
 
