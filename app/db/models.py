@@ -2522,6 +2522,221 @@ class EmailSendRun(Base):
         )
 
 
+class EmailForwardStatus(StrEnum):
+    """공고 포워딩 액션 전체의 결과 요약 (Phase A-2 Part 1 / task 00106).
+
+    한 포워딩 요청에서 모든 수신자에 대한 발송이 끝난 뒤의 최종 결과를 기록한다.
+    개별 수신자 단위 성공/실패 카운트는 ``EmailForwardLog.success_count`` /
+    ``EmailForwardLog.failure_count`` 컬럼에 별도 저장한다.
+
+    값은 영문 소문자 — 기술 상태 enum 컨벤션 (EmailSendRunStatus 와 동일).
+    사용자 화면 표시용 레이블 변환은 Part 2 UI 레이어에서 처리한다.
+
+    값:
+        SUCCESS  'success' — 모든 수신자 발송 성공.
+        PARTIAL  'partial' — 일부 성공·일부 실패 혼재.
+        FAILED   'failed'  — 모든 수신자 발송 실패.
+    """
+
+    SUCCESS = "success"
+    PARTIAL = "partial"
+    FAILED = "failed"
+
+
+class EmailForwardLog(Base):
+    """공고 포워딩 액션 이력 한 건 (Phase A-2 Part 1 / task 00106).
+
+    사용자가 특정 공고를 여러 수신자에게 메일로 포워딩할 때 1 row 가 생성된다.
+    개인정보·DB 크기 고려로 메시지 본문은 저장하지 않으며, 사용자가 추가 메시지를
+    첨부했는지 여부만 ``has_additional_message`` boolean 으로 기록한다.
+
+    ``EmailSendRun`` 과의 관계:
+        - ``EmailSendRun.related_kind = 'forward'``, ``related_id = EmailForwardLog.id``
+          로 연결된다 (Part 2 에서 row INSERT 시 application 코드가 채운다).
+        - ``EmailSendRun`` 의 컬럼·인덱스·의미는 Part 1 에서 변경하지 않는다.
+
+    설계 근거: docs/phase_a2_part1_design_note.md, docs/db_portability.md §3.
+
+    시간 처리:
+        - ``created_at`` / ``completed_at`` 은 UTC tz-aware 로 저장 (PROJECT_NOTES
+          시각 컨벤션). 사용자 화면 표시 직전에 ``app.timezone.format_kst`` /
+          Jinja2 ``kst_format`` 필터로 KST 변환.
+
+    status 의 default 없음:
+        포워딩 액션 시작 시점에는 어느 결과가 될지 알 수 없으므로, status 에는
+        default 를 두지 않는다. row INSERT 시 application 코드(Part 2)가 명시적으로
+        채워야 하는 의도된 제약이다.
+    """
+
+    __tablename__ = "email_forward_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # 어떤 공고를 포워딩했는지. 공고 삭제 시 포워딩 이력도 함께 삭제(CASCADE).
+    canonical_project_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "canonical_projects.id",
+            name="fk_email_forward_logs_canonical_project_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+        doc="포워딩 대상 공고 PK. 공고 삭제 시 CASCADE 로 이력도 삭제.",
+    )
+
+    # 발송을 트리거한 사용자. 사용자 탈퇴 시 SET NULL 로 row 자체는 보존.
+    sender_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "users.id",
+            name="fk_email_forward_logs_sender_user_id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+        doc="발송 트리거 사용자 PK. 사용자 삭제 시 SET NULL (row 보존).",
+    )
+
+    # 발송 시점 발송자의 조직 입장. 무소속/미지정이면 NULL.
+    sender_organization_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "organizations.id",
+            name="fk_email_forward_logs_sender_organization_id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        doc=(
+            "발송 시점 발송자 조직 PK (Phase B/C 조직 단위 패턴과 일관). "
+            "무소속·미지정이면 NULL. 조직 삭제 시 SET NULL."
+        ),
+    )
+
+    subject: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+        doc=(
+            "메일 제목. 본문은 개인정보·DB 크기 고려로 미저장 — "
+            "제목만 메타데이터로 보존."
+        ),
+    )
+
+    # 사용자가 추가 메시지를 첨부했는지 여부만 기록. 본문 텍스트 자체는 미저장.
+    has_additional_message: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        doc=(
+            "사용자가 추가 메시지를 첨부했는지 여부. "
+            "메시지 본문 자체는 개인정보 사유로 DB 에 저장하지 않는다."
+        ),
+    )
+
+    # 수신자 이메일 주소 목록 (list of str). db_portability §1 — JSON 범용 타입 사용.
+    recipient_addresses: Mapped[list] = mapped_column(
+        JSON,
+        nullable=False,
+        doc=(
+            "수신자 이메일 주소 목록 (list of str). "
+            "빈 리스트는 DB 차원에서 허용, app-level 검증은 Part 2 담당."
+        ),
+    )
+
+    # len(recipient_addresses) 의 denormalize. 통계·UI 표시용.
+    recipient_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        doc="수신자 수. recipient_addresses 길이를 denormalize 한 값.",
+    )
+
+    # 포워딩 결과 enum. native_enum=False — Postgres ENUM 타입 미생성,
+    # CHECK constraint 만 추가 (db_portability §3 / EmailSendRun 동일 패턴).
+    # default 없음 — INSERT 시 application 코드(Part 2)가 명시적으로 채워야 한다.
+    status: Mapped[EmailForwardStatus] = mapped_column(
+        Enum(
+            EmailForwardStatus,
+            name="email_forward_status",
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+            native_enum=False,
+        ),
+        nullable=False,
+        doc="포워딩 결과. 'success' / 'partial' / 'failed' 중 하나. default 없음.",
+    )
+
+    success_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        doc="발송 성공 수신자 수.",
+    )
+
+    failure_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        doc="발송 실패 수신자 수.",
+    )
+
+    # 포워딩 트리거 시각 (UTC tz-aware). _utcnow 는 파일 내 공용 UTC 헬퍼.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        doc="포워딩 트리거 시각 (UTC tz-aware).",
+    )
+
+    # 모든 send 완료 시각 (UTC tz-aware). 동기 루프라도 트리거/완료 시각이
+    # 갈릴 수 있어 보존한다. 완료 전이거나 기록 생략 시 NULL.
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        doc="모든 send 완료 시각 (UTC tz-aware). 완료 전·기록 생략 시 NULL.",
+    )
+
+    # ── 단방향 relationship ──────────────────────────────────────────────────
+    # EmailSendRun.requested_by 와 동일 패턴 — back_populates 없음, lazy="select".
+    # 상대 모델 쪽에 collection 을 만들 명확한 활용 시나리오가 아직 없으므로
+    # 단방향이 안전하다 (docs/phase_a2_part1_design_note.md §1-c).
+
+    canonical_project: Mapped["CanonicalProject"] = relationship(
+        "CanonicalProject",
+        foreign_keys=[canonical_project_id],
+        lazy="select",
+    )
+
+    sender_user: Mapped["User | None"] = relationship(
+        "User",
+        foreign_keys=[sender_user_id],
+        lazy="select",
+    )
+
+    sender_organization: Mapped["Organization | None"] = relationship(
+        "Organization",
+        foreign_keys=[sender_organization_id],
+        lazy="select",
+    )
+
+    __table_args__ = (
+        # status enum DB 레벨 강제. SQLAlchemy 의 Enum(native_enum=False) 는
+        # create_constraint=False 가 기본이라 CHECK 를 자동 추가하지 않으므로
+        # 명시적으로 선언한다 (EmailSendRun / AnnouncementProgress 와 동일 패턴).
+        # migration 파일에도 동일 CHECK 를 중복 선언한다.
+        CheckConstraint(
+            "status IN ('success', 'partial', 'failed')",
+            name="ck_email_forward_logs_status",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현을 반환한다."""
+        return (
+            f"<EmailForwardLog id={self.id} "
+            f"canonical_project_id={self.canonical_project_id} "
+            f"status={self.status!r} recipient_count={self.recipient_count}>"
+        )
+
+
 __all__ = [
     "Base",
     "Announcement",
@@ -2536,6 +2751,8 @@ __all__ = [
     "CanonicalProject",
     "DeltaAnnouncement",
     "DeltaAttachment",
+    "EmailForwardLog",
+    "EmailForwardStatus",
     "EmailSendRun",
     "EmailSendRunStatus",
     "FavoriteEntry",
