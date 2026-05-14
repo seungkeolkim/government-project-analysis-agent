@@ -51,6 +51,22 @@
         {% if fav_entry_id %}★{% else %}☆{% endif %}
     </button>
     {% endif %}
+    {# task 00109 (Phase A-2 Part 2) — '메일로 보내기' 버튼.
+       포워딩은 canonical 단위 API 이므로 canonical_id 가 있을 때만 렌더한다.
+       비로그인 시 disabled + tooltip "로그인 후 사용 가능".
+       forward.js 가 data-* 를 읽어 모달을 열고 제목 prefill / 미리보기를 구성한다. #}
+    {% if canonical_id %}
+    <button type="button"
+            class="forward-open-btn"
+            {% if not current_user %}disabled title="로그인 후 사용 가능"{% endif %}
+            data-canonical-id="{{ canonical_id }}"
+            data-announcement-title="{{ announcement.title }}"
+            data-announcement-agency="{{ announcement.agency or '' }}"
+            data-announcement-status="{{ announcement.status.value }}"
+            data-announcement-deadline="{% if announcement.deadline_at %}{{ announcement.deadline_at | kst_date }}{% endif %}">
+        &#9993; 메일로 보내기
+    </button>
+    {% endif %}
     {# task 00085 — canonical 매칭이 있으면 큰 배지 + 카운터를 표시 (비로그인 동일 노출). #}
     {% if canonical_id %}
     {{ relevance_badge(canonical_id, relevance_summary, current_user) }}

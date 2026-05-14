@@ -1,0 +1,163 @@
+{#
+  공고 포워딩("메일로 보내기") 발송 모달 (Phase A-2 Part 2 / task 00109-8).
+
+  base.html 이 </body> 직전에 {% include "_forward_modal.html" %} 로 삽입한다.
+  비로그인(current_user 가 None/Undefined) 이면 렌더하지 않는다 — 상세 페이지의
+  "메일로 보내기" 버튼도 비로그인 시 disabled 라 모달이 없어도 무해하다.
+
+  _relevance_modal.html / _favorites_modal.html 의 <dialog> + <form method="dialog">
+  + IIFE JS 패턴을 그대로 모방한다. JS(forward.js)가 window.openForwardModal() 로
+  이 dialog 를 제어한다 — <form method="dialog"> 의 자동 닫기는 forward.js 가
+  e.preventDefault() 로 막고, fetch 응답을 받은 뒤 직접 닫는다.
+
+  컨텍스트:
+    - current_user                : User | None (None 이면 모달 자체를 렌더하지 않는다)
+    - user_organization_options   : list[{"id": int, "name": str}] (무소속이면 빈 리스트)
+
+  주의:
+    - <script> 블록 안 Jinja 태그 리터럴 금지 (00031 선례) —
+      user_organization_options 는 발신 조직 <select> <option> 으로 SSR 렌더되어
+      JS 는 DOM 에서 읽는다.
+    - 공고 제목 / 메타는 페이지마다 다르므로 SSR 하지 않는다. forward.js 가
+      "메일로 보내기" 버튼의 data-* 속성에서 읽어 제목 prefill / 미리보기를
+      구성한다 (모달은 base.html 에 1 개만 존재).
+
+  필드 구성 (위에서 아래):
+    1. 받는 사람       — chip 입력 컨테이너 (skeleton 만. chip / 자동완성 JS 는 00109-9).
+    2. 발신 조직       — user_organization_options 기반 SSR. 0 개=안내문구 /
+                         1 개=조직명 텍스트(자동 선택) / 복수=<select> 드롭다운.
+    3. 제목            — text input. forward.js 가 모달 열 때 default 제목을 prefill.
+    4. 추가 메시지     — textarea 5 행, 최대 5000 자, 글자 수 카운터.
+    5. 본문 미리보기   — toggle + iframe (클라이언트 mock — forward.js 가 조립).
+    + 에러 / 결과 박스 + 발송 / 취소 버튼.
+#}
+{% if current_user %}
+{# 무소속 사용자는 user_organization_options 가 빈 리스트. #}
+{% set has_any_organization = user_organization_options and (user_organization_options | length) > 0 %}
+{% set is_single_organization = has_any_organization and (user_organization_options | length) == 1 %}
+
+<dialog id="forward-modal" aria-labelledby="forward-modal-title">
+    <div class="forward-modal__inner">
+        <h3 class="forward-modal__title" id="forward-modal-title">공고 메일 보내기</h3>
+        <form id="forward-form" method="dialog">
+
+            {# ── 1. 받는 사람 — chip 입력 컨테이너 (skeleton). ──
+               chip 추가/삭제와 /api/users/search 자동완성 동작은 00109-9 가
+               이 컨테이너 위에 구현한다. 본 subtask 는 DOM 골격만 둔다.
+               forward.js 의 collectRecipients() 가 #forward-recipients-chips 안의
+               .forward-chip[data-email] 을 읽어 발송 수신자 목록을 만든다 —
+               이것이 00109-8 ↔ 00109-9 의 계약 지점이다. #}
+            <div class="forward-modal__field">
+                <label class="forward-modal__label" for="forward-recipient-input">받는 사람</label>
+                <div id="forward-recipients" class="forward-recipients">
+                    <div id="forward-recipients-chips" class="forward-recipients__chips"></div>
+                    <input id="forward-recipient-input"
+                           class="forward-recipients__input"
+                           type="text"
+                           autocomplete="off"
+                           placeholder="이름 또는 이메일 입력 후 Enter / 콤마">
+                </div>
+                {# 자동완성 드롭다운 placeholder — 00109-9 가 결과를 채운다. #}
+                <div id="forward-autocomplete" class="forward-autocomplete" hidden></div>
+            </div>
+
+            {# ── 2. 발신 조직 — user_organization_options SSR. ── #}
+            {% if has_any_organization %}
+            <div id="forward-organization-row"
+                 class="forward-modal__field"
+                 data-forward-org-mode="{% if is_single_organization %}single{% else %}multiple{% endif %}"
+                 data-single-organization-id="{% if is_single_organization %}{{ user_organization_options[0].id }}{% endif %}">
+                <label class="forward-modal__label"
+                       {% if not is_single_organization %}for="forward-organization"{% endif %}>발신 조직</label>
+                {% if is_single_organization %}
+                {# 단일 조직 — 드롭다운 대신 조직명 텍스트만 표시(자동 선택). #}
+                <div class="forward-modal__org-single">{{ user_organization_options[0].name }}</div>
+                {% else %}
+                {# 복수 조직 — 드롭다운으로 선택. default 는 첫 번째 option. #}
+                <select id="forward-organization"
+                        class="forward-modal__select"
+                        name="forward-organization-id">
+                    {% for option in user_organization_options %}
+                    <option value="{{ option.id }}">{{ option.name }}</option>
+                    {% endfor %}
+                </select>
+                {% endif %}
+            </div>
+            {% else %}
+            {# 무소속 — 발신 조직 없이 개인 자격으로 발송. #}
+            <div id="forward-organization-row"
+                 class="forward-modal__field"
+                 data-forward-org-mode="none">
+                <span class="forward-modal__label">발신 조직</span>
+                <p class="forward-modal__org-notice">소속된 조직이 없습니다 — 개인 자격으로 발송됩니다.</p>
+            </div>
+            {% endif %}
+
+            {# ── 3. 제목 — forward.js 가 모달 열 때 default 제목을 prefill. ── #}
+            <div class="forward-modal__field">
+                <label class="forward-modal__label" for="forward-subject">제목</label>
+                <input id="forward-subject"
+                       class="forward-modal__input"
+                       type="text"
+                       maxlength="200"
+                       placeholder="메일 제목 (비우면 기본 제목으로 발송됩니다)">
+            </div>
+
+            {# ── 4. 추가 메시지 — textarea + 글자 수 카운터. ── #}
+            <div class="forward-modal__field">
+                <label class="forward-modal__label" for="forward-message">추가 메시지 (선택)</label>
+                <textarea id="forward-message"
+                          class="forward-modal__textarea"
+                          rows="5"
+                          maxlength="5000"
+                          placeholder="수신자에게 전달할 추가 메시지 (선택)"></textarea>
+                <div class="forward-modal__counter">
+                    <span id="forward-message-count">0</span> / 5000
+                </div>
+            </div>
+
+            {# ── 5. 본문 미리보기 — toggle + iframe (클라이언트 mock). ──
+               기본 접힘. forward.js 가 textarea 내용 + 버튼 data-* 의 공고 메타로
+               간이 HTML 을 조립해 iframe srcdoc 으로 렌더한다.
+               sandbox="" 로 스크립트 실행을 차단하고 CSS 를 격리한다. #}
+            <div class="forward-modal__field">
+                <button type="button"
+                        id="forward-preview-toggle"
+                        class="forward-modal__preview-toggle">&#9656; 본문 미리보기</button>
+                <div id="forward-preview-region" class="forward-modal__preview-region" hidden>
+                    <p class="forward-modal__preview-notice">
+                        실제 발송 본문과 다를 수 있습니다 — 참고용 미리보기입니다.
+                    </p>
+                    <iframe id="forward-preview-frame"
+                            class="forward-modal__preview-frame"
+                            title="본문 미리보기"
+                            sandbox=""></iframe>
+                </div>
+            </div>
+
+            {# 인라인 검증 에러 (발송 전 입력 검증 실패 시). #}
+            <p class="forward-modal__error"
+               id="forward-error-msg"
+               role="alert"
+               aria-live="polite"></p>
+
+            {# 발송 결과 박스 — 성공(초록) / 실패(빨강). 기본 숨김. #}
+            <div class="forward-modal__result"
+                 id="forward-result-box"
+                 role="status"
+                 aria-live="polite"
+                 hidden></div>
+
+            <div class="forward-modal__actions">
+                <button type="submit"
+                        id="forward-send-btn"
+                        class="forward-modal__send-btn">발송</button>
+                <span class="forward-modal__spinner" id="forward-spinner" hidden aria-hidden="true"></span>
+                <button type="button"
+                        id="forward-cancel-btn"
+                        class="forward-modal__cancel-btn">취소</button>
+            </div>
+        </form>
+    </div>
+</dialog>
+{% endif %}
