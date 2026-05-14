@@ -119,6 +119,12 @@ ALLOWED_EMAIL_TRANSPORT_TYPES: frozenset[str] = frozenset({"m365_oauth"})
 # 정의된다.
 RELATED_KIND_TEST_SEND: str = "test_send"
 
+# ``EmailSendRun.related_kind`` 컬럼에 채워지는 A-2 Part 2 (공고 포워딩) 값.
+# forwarding service (00109-3) 가 수신자별 ``send_with_retry`` 호출 시
+# ``related_kind=RELATED_KIND_FORWARD`` / ``related_id=EmailForwardLog.id`` 로
+# 넘겨, 발송 이력 expand 조회 시 EmailForwardLog 와 EmailSendRun 을 잇는다.
+RELATED_KIND_FORWARD: str = "forward"
+
 
 # ``EmailSendRun.transport_type`` 컬럼에 채워지는 A-1 범위 값. 현재
 # ``DEFAULT_EMAIL_TRANSPORT_TYPE`` 와 동일하지만, 의미상 \"SystemSetting 의 default
@@ -171,6 +177,7 @@ __all__ = [
     "DEFAULT_EMAIL_TRANSPORT_TYPE",
     "EMAIL_SETTING_DEFAULTS",
     "EMAIL_SETTING_KEYS",
+    "RELATED_KIND_FORWARD",
     "RELATED_KIND_TEST_SEND",
     "SETTING_KEY_APP_PUBLIC_BASE_URL",
     "SETTING_KEY_EMAIL_FROM_DISPLAY_NAME",
