@@ -308,6 +308,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
+- [00105] `email-validator` 의존성 누락 수정 — pydantic `EmailStr` 사용 시 필수인 `email-validator>=2.0,<3.0` 패키지가 00104에서 빠져 기동 오류 발생, pyproject.toml 에 추가하여 복구 — 2026-05-14
 - [00104] 메일 발송 인프라 + 관리자 UI 구현 (Phase A-1) — `app/email/` 패키지(Transport ABC·M365 OAuth SMTP·재시도 sender·factory), `email_send_runs` Alembic migration, admin_email API 4종, 관리자 이메일 탭 Frontend (설정 form·테스트 발송·발송 이력) — 2026-05-13
 - [00101] 공지사항/건의사항 게시판 링크를 사이트 헤더 최상단으로 이동 — `base.html` 네비게이션 순서 조정, `style.css` 보더·여백 CSS 수정으로 정부과제 수집 섹션보다 위에 배치 — 2026-05-12
 - [00100] 공고 목록 진행상태 pill 컨테이너 세로 배치 — `.pg-wrap` flex-direction을 row→column으로 변경, 관심/검토/진행/종료 배지가 각 1줄씩 표시 — 2026-05-11
@@ -318,4 +319,3 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - [00095] Docker 실행 스크립트 개선 — compose.sh → run_compose.sh/run_admin.sh 분화, dev/prod 분기 제거, alembic 바인드 마운트로 migration 재빌드 불필요화 — 2026-05-08
 - [00094] DB 정기 백업 시스템 구현 — app.sqlite+boards.sqlite 스케줄 백업, SystemSetting·BackupHistory 모델, 관리자 '시스템 백업' 탭(설정·수동 실행·이력·파일 목록) — 2026-05-08
 - [00093] 개인 판정(organization_id=NULL) 기능 완전 제거 — CRUD·API·UI·DB 데이터 일괄 삭제, 조직 판정만 유지, Alembic migration 적용 — 2026-05-08
-- [00091] 관련성 모달 내 판정 목록 UX 개선 — 사유 있는 항목에 사유 텍스트 표시, X 버튼 클릭 시 window.confirm() 확인 다이얼로그 추가 — 2026-05-08
