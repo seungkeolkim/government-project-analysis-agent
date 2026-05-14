@@ -62,6 +62,13 @@ SETTING_KEY_EMAIL_FROM_DISPLAY_NAME: str = "email.from_display_name"
 # 발송 실패 시 추가 재시도 횟수. 1차 시도는 별도 — 본 값이 2 이면 총 시도는 최대 3회.
 SETTING_KEY_EMAIL_MAX_RETRY_COUNT: str = "email.max_retry_count"
 
+# 메일 본문에 넣는 공고 상세 페이지 URL 의 prefix (Phase A-2 Part 2 / task 00109).
+# email.* 키는 아니지만 "메일 본문 조립 전용" 용도라 같은 모듈에 둔다 — 별도 모듈
+# 신설은 over-engineering (docs/phase_a2_part2_design_note.md §7). 운영자가 외부
+# 노출 URL(예: http://team-server.lan:8000) 로 바꿀 수 있도록 SystemSetting 으로
+# 둔다. row 가 없으면 아래 DEFAULT 상수로 fallback — seed migration 없음.
+SETTING_KEY_APP_PUBLIC_BASE_URL: str = "app.public_base_url"
+
 
 # ──────────────────────────────────────────────────────────────
 # Default 값 상수 (SystemSetting row 가 없을 때 fallback 으로 사용)
@@ -88,6 +95,11 @@ DEFAULT_EMAIL_FROM_DISPLAY_NAME: str = "정부사업 모니터링 봇"
 
 # 재시도 횟수 default. int 로 둔다 (저장 시 호출자가 str 화).
 DEFAULT_EMAIL_MAX_RETRY_COUNT: int = 2
+
+# 공고 상세 URL prefix default. SystemSetting row 가 없을 때 사용한다. 운영
+# 환경에서는 관리자가 실제 외부 노출 URL 로 변경한다 (현재 admin UI 입력란은
+# Part 2 범위 밖 — 필요 시 DB 직접 수정 또는 후속 task).
+DEFAULT_APP_PUBLIC_BASE_URL: str = "http://localhost:8000"
 
 
 # ──────────────────────────────────────────────────────────────
@@ -149,6 +161,7 @@ EMAIL_SETTING_DEFAULTS: dict[str, object] = {
 
 __all__ = [
     "ALLOWED_EMAIL_TRANSPORT_TYPES",
+    "DEFAULT_APP_PUBLIC_BASE_URL",
     "DEFAULT_EMAIL_FROM_DISPLAY_NAME",
     "DEFAULT_EMAIL_M365_CLIENT_ID",
     "DEFAULT_EMAIL_M365_CLIENT_SECRET",
@@ -159,6 +172,7 @@ __all__ = [
     "EMAIL_SETTING_DEFAULTS",
     "EMAIL_SETTING_KEYS",
     "RELATED_KIND_TEST_SEND",
+    "SETTING_KEY_APP_PUBLIC_BASE_URL",
     "SETTING_KEY_EMAIL_FROM_DISPLAY_NAME",
     "SETTING_KEY_EMAIL_M365_CLIENT_ID",
     "SETTING_KEY_EMAIL_M365_CLIENT_SECRET",
