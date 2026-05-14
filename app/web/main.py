@@ -86,6 +86,7 @@ from app.web.routes import (
     bulk_router,
     dashboard_router,
     favorites_router,
+    forward_router,
     notices_router,
     progress_router,
     relevance_router,
@@ -453,6 +454,13 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     # Phase 3b(00036-4): 즐겨찾기 라우터(/favorites/*) mount.
     fastapi_app.include_router(favorites_router)
+
+    # Phase A-2 Part 2 (task 00109-5): 공고 포워딩 라우터
+    # (POST /api/canonical/{id}/forward, GET /api/canonical/{id}/forward-logs,
+    #  GET /api/canonical/{id}/forward-logs/{forward_log_id}/sends) mount.
+    # admin_email_router 와 달리 일반 로그인 사용자(POST) + 비로그인 GET 이
+    # 혼재하므로, 권한은 라우터 내부에서 endpoint 단위로 분기한다.
+    fastapi_app.include_router(forward_router)
 
     # Phase 5b(00042-2): 대시보드 라우터(/dashboard, /dashboard/api/*) mount.
     # 비로그인도 접근 가능 — 라우터 내부에서 current_user_optional 로 분기한다.
