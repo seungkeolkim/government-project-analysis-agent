@@ -1,0 +1,239 @@
+{#
+  [메일 발송] 탭 (Phase A-1 / task 00104-11).
+
+  구성 (현재 subtask 범위):
+    1. flash 박지 영역 (JS 로 success/error 박스를 동적으로 그린다)
+    2. 「메일 설정」 섹션 — 7 개 입력 + 저장 버튼 (PUT /api/admin/email/settings 연동).
+
+  후속 subtask 가 추가할 섹션 (본 subtask 에서는 만들지 않음):
+    - 「테스트 발송」 섹션 (00104-12)
+    - 「발송 이력」 섹션 (00104-13)
+
+  컨텍스트 규약:
+    - top_tab:     'system_group'
+    - sub_tab:     'email'
+    - current_user: 상단 네비 분기용.
+#}
+{% extends "admin/base.html" %}
+
+{% block page_title %}메일 발송 · {{ super() }}{% endblock %}
+
+{% block admin_content %}
+
+{# ── flash 박지 영역 ─────────────────────────────────────────
+   admin_email.js 가 fetch 결과에 따라 success / error 박스를 동적으로 그린다.
+   페이지 진입 직후에는 비어 있다. #}
+<div id="email-flash-area"></div>
+
+{# ── 섹션 1: 메일 설정 ──────────────────────────────────────── #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">메일 설정</h3>
+    <p class="admin-state__muted">
+        M365 OAuth (XOAUTH2) 발송 자격증명. IT 팀이 Azure AD app registration
+        셋업 완료 후 알려준 3 개 값 (tenant ID / client ID / client secret) 과
+        발신 mailbox 주소를 입력합니다.
+    </p>
+    <form id="email-settings-form" class="admin-form" autocomplete="off">
+        {# Transport 종류 — A-1 단계에서는 disabled 단일 옵션. 향후 옵션 C
+           추가 시 활성화 + 추가 옵션. #}
+        <label class="admin-schedule__text">
+            <span>Transport 종류</span>
+            <select id="email-transport-type"
+                    class="admin-schedule__input"
+                    disabled>
+                <option value="m365_oauth">M365 OAuth (XOAUTH2)</option>
+            </select>
+        </label>
+
+        {# Directory (tenant) ID — Azure AD Directory ID. UUID 형식. #}
+        <label class="admin-schedule__text">
+            <span>Directory (tenant) ID</span>
+            <input id="email-tenant-id"
+                   name="tenant_id"
+                   type="text"
+                   class="admin-schedule__input"
+                   autocomplete="off"
+                   spellcheck="false">
+        </label>
+
+        {# Application (client) ID — Azure AD app registration 의 client ID. UUID 형식. #}
+        <label class="admin-schedule__text">
+            <span>Application (client) ID</span>
+            <input id="email-client-id"
+                   name="client_id"
+                   type="text"
+                   class="admin-schedule__input"
+                   autocomplete="off"
+                   spellcheck="false">
+        </label>
+
+        {# Client secret — masked input + 변경 토글.
+           default 상태: 비활성화 + placeholder 에 마지막 4 자 mask 표시.
+           [변경] 클릭 시: 활성화 + placeholder 가 \"새 값을 입력하세요\" 로 바뀜.
+           저장 성공 시 자동 OFF. #}
+        <label class="admin-schedule__text">
+            <span>Client secret</span>
+            <div class="admin-email-secret-row">
+                <input id="email-client-secret"
+                       name="client_secret"
+                       type="password"
+                       class="admin-schedule__input"
+                       placeholder="기존 값 유지"
+                       autocomplete="new-password"
+                       spellcheck="false"
+                       disabled>
+                <button id="email-client-secret-toggle"
+                        type="button"
+                        class="admin-button admin-button--secondary"
+                        aria-pressed="false">변경</button>
+            </div>
+        </label>
+
+        {# 발신 mailbox — IT 가 SendAs 권한 부여한 mailbox 주소. #}
+        <label class="admin-schedule__text">
+            <span>발신 mailbox</span>
+            <input id="email-sender-address"
+                   name="sender_address"
+                   type="email"
+                   class="admin-schedule__input"
+                   placeholder="gov-agent-noreply@innodep.com"
+                   autocomplete="off"
+                   spellcheck="false">
+        </label>
+
+        {# From 표시명 — 수신자 메일 클라이언트에서 보이는 표시명. #}
+        <label class="admin-schedule__text">
+            <span>From 표시명</span>
+            <input id="email-from-display-name"
+                   name="from_display_name"
+                   type="text"
+                   class="admin-schedule__input"
+                   placeholder="정부사업 모니터링 봇"
+                   autocomplete="off">
+        </label>
+
+        {# 재시도 횟수 — 발송 실패 시 추가 재시도 횟수. 1차 시도 별도. #}
+        <label class="admin-schedule__text">
+            <span>재시도 횟수 (1 차 시도 제외)</span>
+            <input id="email-max-retry-count"
+                   name="max_retry_count"
+                   type="number"
+                   class="admin-schedule__input"
+                   min="0"
+                   max="5"
+                   value="2"
+                   autocomplete="off">
+        </label>
+
+        <button id="email-settings-save"
+                type="submit"
+                class="admin-button admin-button--primary">저장</button>
+    </form>
+</section>
+
+{# ── 섹션 2: 테스트 발송 (task 00104-12) ─────────────────────
+   spec (phase_a1_prompt.md):
+     - 받는 사람: <input type=\"email\"> + placeholder 'example@innodep.com'
+     - 제목: text input, default 'A-1 테스트 발송'
+     - 본문: textarea 4~6 줄, placeholder '메일 발송이 정상 동작하는지 확인합니다.'
+     - 발송 버튼: 발송 중 disabled + spinner.
+     - 결과 박스: 성공/실패 시 각각 초록/빨강. #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">테스트 발송</h3>
+    <p class="admin-state__muted">
+        위에 저장된 설정으로 plain text 메일 한 통을 발송합니다.
+        IT 셋업이 완료된 후, 본인 메일 주소로 보내서 도착 확인용으로 사용하세요.
+    </p>
+    <form id="email-test-send-form" class="admin-form" autocomplete="off">
+        {# 받는 사람 — type=email 로 브라우저 1차 검증, 서버 EmailStr 가 2차 검증. #}
+        <label class="admin-schedule__text">
+            <span>받는 사람</span>
+            <input id="test-send-recipient"
+                   name="recipient"
+                   type="email"
+                   class="admin-schedule__input"
+                   placeholder="example@innodep.com"
+                   required
+                   autocomplete="off"
+                   spellcheck="false">
+        </label>
+
+        {# 제목 — default value 'A-1 테스트 발송' (spec 그대로).
+           maxlength=200 으로 클라이언트 측 1차 가드 + 서버 Pydantic 길이 검증. #}
+        <label class="admin-schedule__text">
+            <span>제목</span>
+            <input id="test-send-subject"
+                   name="subject"
+                   type="text"
+                   class="admin-schedule__input"
+                   value="A-1 테스트 발송"
+                   minlength="1"
+                   maxlength="200"
+                   required
+                   autocomplete="off">
+        </label>
+
+        {# 본문 — 4~6 줄. rows=5 로 spec 중간값.
+           default value 비어있음, placeholder 로 안내. maxlength=10000. #}
+        <label class="admin-schedule__text">
+            <span>본문</span>
+            <textarea id="test-send-body"
+                      name="body"
+                      class="admin-schedule__input admin-email-body-textarea"
+                      rows="5"
+                      minlength="1"
+                      maxlength="10000"
+                      placeholder="메일 발송이 정상 동작하는지 확인합니다."
+                      required></textarea>
+        </label>
+
+        {# 발송 버튼 — JS 가 발송 중 disabled + spinner span 삽입 후 텍스트 '발송 중...'. #}
+        <button id="test-send-button"
+                type="submit"
+                class="admin-button admin-button--primary">발송</button>
+    </form>
+
+    {# 발송 결과 박스 영역 — JS 가 성공 (admin-flash--success) /
+       실패 (admin-flash--error) 박스를 동적으로 그린다. 페이지 진입 시에는 비어 있다. #}
+    <div id="test-send-result-area"></div>
+</section>
+
+{# ── 섹션 3: 발송 이력 (task 00104-13) ─────────────────────
+   spec (phase_a1_prompt.md):
+     - 필터: status 드롭다운 (전체 / 성공만 / 실패만), 변경 시 즉시 재조회.
+     - 새로고침 버튼: 우상단.
+     - 테이블 컬럼: 시각(KST) / 받는 사람 / 제목(truncate+tooltip) /
+       상태(✅성공/❌실패 배지) / 시도 횟수 / 에러(truncate+tooltip) /
+       발송자(username, 시스템이면 '(자동)').
+     - 빈 상태: '발송 이력이 없습니다.' 텍스트.
+     - 페이지네이션 없음, limit=50 고정 (API default).
+     - 「테스트 발송」 완료 후 'email-test-send-completed' custom event 로 자동 새로고침. #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">발송 이력</h3>
+    <p class="admin-state__muted">최근 발송 시도 50건. 새로고침 버튼으로 갱신.</p>
+
+    {# 컨트롤 영역 — 좌측에 status 필터, 우측에 새로고침 버튼. #}
+    <div class="admin-email-runs-controls">
+        <label class="admin-email-runs-filter-label">
+            <span>상태 필터</span>
+            <select id="send-runs-status-filter"
+                    class="admin-schedule__input">
+                <option value="all">전체</option>
+                <option value="sent">성공만</option>
+                <option value="failed">실패만</option>
+            </select>
+        </label>
+        <button id="send-runs-refresh-button"
+                type="button"
+                class="admin-button admin-button--secondary">새로고침</button>
+    </div>
+
+    {# 테이블/빈상태/에러 박스 영역 — admin_email.js 가 fetch 결과로 동적 렌더링. #}
+    <div id="send-runs-table-area"></div>
+</section>
+
+{# 페이지 전용 JS — admin_email.js. 본 subtask 에서는 initSettingsSection() 만
+   호출되며 후속 subtask 가 같은 파일에 initTestSendSection /
+   initSendRunsSection 호출을 추가한다. #}
+<script src="/static/js/admin_email.js"></script>
+{% endblock %}

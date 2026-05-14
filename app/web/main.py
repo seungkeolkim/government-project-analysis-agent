@@ -81,6 +81,7 @@ from app.web.observability import (
     install_unhandled_exception_handler,
 )
 from app.web.routes import (
+    admin_email_router,
     admin_router,
     bulk_router,
     dashboard_router,
@@ -432,6 +433,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # 라우터 자체에 admin_user_required dependency 가 걸려 있어 비로그인 401,
     # 비관리자 403. 본 subtask 범위는 [수집 제어] 탭 + startup stale cleanup.
     fastapi_app.include_router(admin_router)
+
+    # Phase A-1 (task 00104-9): 메일 인프라 관리자 JSON API (/api/admin/email/*) mount.
+    # 4 endpoints: GET/PUT settings, POST test-send, GET send-runs. 라우터 자체에
+    # admin_user_required dependency 가 걸려 있어 비관리자 접근은 403. HTML 페이지
+    # (/admin/email) 와 frontend 는 후속 subtask(00104-11~13)가 담당.
+    fastapi_app.include_router(admin_email_router)
 
     # Phase 3a(00035-2): 관련성 판정 라우터(/canonical/{id}/relevance*) mount.
     fastapi_app.include_router(relevance_router)

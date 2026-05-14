@@ -1408,6 +1408,103 @@ body.is-anonymous .announcement-title-link--read {
     cursor: not-allowed;
 }
 
+/* ---------- 메일 발송 「메일 설정」 (Phase A-1 / 00104-11) ---------- */
+/*
+ * Client secret 입력 + [변경] 토글 버튼을 같은 행에 배치하기 위한 wrapper.
+ * .admin-schedule__text 가 label + input 을 세로 정렬하므로, 그 안에서 입력과
+ * 버튼만 가로로 묶으려고 추가한 최소 클래스.
+ *
+ * 다른 admin 페이지에서 \"input + 보조 버튼\" 패턴이 또 필요해지면 이 클래스를
+ * `.admin-input-with-action` 등으로 일반화 검토.
+ */
+.admin-email-secret-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.admin-email-secret-row .admin-schedule__input {
+    /* 가용 폭을 차지해 우측 버튼만 자기 크기로 자리하게 한다. */
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.admin-email-secret-row .admin-button {
+    flex: 0 0 auto;
+    padding: 6px 12px;
+    font-size: 13px;
+}
+
+/*
+ * 본문 textarea 최소 높이 + 사용자가 세로로만 늘릴 수 있도록 resize 제한.
+ * .admin-schedule__input 의 monospace 폰트를 inherit 으로 되돌려 본문 입력
+ * 시 한글 가독성을 약간 개선한다 (다른 admin 페이지의 단일 라인 input 과는
+ * 의도적으로 분리).
+ */
+.admin-email-body-textarea {
+    min-height: 96px;
+    resize: vertical;
+    font-family: inherit;
+}
+
+/*
+ * 발송 버튼의 spinner — admin_email.js 가 발송 중 버튼 텍스트 앞에 삽입한다.
+ * 12px 사이즈의 회전 원형 — currentColor 로 버튼 색상을 그대로 따라간다.
+ */
+.admin-button__spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    margin-right: 6px;
+    vertical-align: -2px;
+    border: 2px solid currentColor;
+    border-bottom-color: transparent;
+    border-radius: 50%;
+    animation: admin-button-spin 0.8s linear infinite;
+}
+
+@keyframes admin-button-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+/*
+ * Phase A-1 / 00104-13 — 발송 이력 섹션 컨트롤 행.
+ * 좌측: status 필터 (select), 우측: 새로고침 버튼. 좁은 화면에서는 wrap.
+ */
+.admin-email-runs-controls {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 12px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+
+/* 필터 라벨은 label > span(설명) + select 의 세로 정렬 — admin-schedule__text 와
+ * 동일한 시각 패턴이지만 max-width 가 있는 그쪽과 달리 너비를 강제하지 않는다. */
+.admin-email-runs-filter-label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 13px;
+    color: #374151;
+}
+
+/*
+ * 긴 셀 값을 ellipsis (...) 로 자르는 inline-block. td 의 title 속성 (tooltip) 과
+ * 결합해 사용한다 — JS 가 truncate span 내부에 textContent 로 첫 줄만 넣고,
+ * 상위 td 의 title 에 full text 를 넣어 hover 로 확인 가능.
+ */
+.admin-email-runs-truncate {
+    display: inline-block;
+    max-width: 280px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: middle;
+}
+
 /* ---------- 관련성 판정 배지 (Phase 3a / 00035-3) ---------- */
 
 /* 배지 컨테이너 — 툴팁 위치 계산 기준점 */
