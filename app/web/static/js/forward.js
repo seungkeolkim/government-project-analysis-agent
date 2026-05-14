@@ -40,6 +40,9 @@
     var previewRegion = document.getElementById('forward-preview-region');
     var previewFrame = document.getElementById('forward-preview-frame');
     var chipsContainer = document.getElementById('forward-recipients-chips');
+    var recipientsBox = document.getElementById('forward-recipients');
+    var recipientInput = document.getElementById('forward-recipient-input');
+    var autocompleteBox = document.getElementById('forward-autocomplete');
     var errorMsg = document.getElementById('forward-error-msg');
     var resultBox = document.getElementById('forward-result-box');
     var sendBtn = document.getElementById('forward-send-btn');
@@ -56,6 +59,16 @@
     var TITLE_TRUNCATE_LENGTH = 100;
     // 발송 성공 후 모달 자동 닫기까지의 지연.
     var AUTO_CLOSE_DELAY_MS = 3000;
+    // 자동완성 debounce — 사용자가 입력을 멈춘 뒤 검색 API 를 호출하기까지의 지연
+    // (design note §9-l 확정값).
+    var AUTOCOMPLETE_DEBOUNCE_MS = 250;
+    // /api/users/search 로 한 번에 받아올 최대 결과 수 (서버 default 와 동일).
+    var USER_SEARCH_LIMIT = 10;
+    // 자동완성 검색어 길이 상한 — 서버 q 파라미터 제한(1~50자)과 일치시킨다.
+    var USER_SEARCH_QUERY_MAX_LENGTH = 50;
+    // 외부 이메일 직접 입력 시 chip 으로 확정하기 위한 간단 형식 검증 정규식
+    // (design note §9-l 확정값).
+    var EMAIL_PATTERN = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
     // 현재 모달이 대상으로 하는 canonical_project PK (문자열).
     var currentCanonicalId = null;
@@ -63,6 +76,13 @@
     var autoCloseTimerId = null;
     // 발송 진행 중 모달 잠금 여부 — 잠겨 있으면 배경 클릭/취소로 닫지 않는다.
     var isLocked = false;
+    // 자동완성 debounce 타이머 핸들 — 새 입력마다 정리하고 다시 건다.
+    var autocompleteTimerId = null;
+    // 자동완성 요청 토큰 — 응답이 도착했을 때 가장 최근 요청인지 판별해 stale
+    // 응답으로 드롭다운을 덮어쓰지 않게 한다.
+    var autocompleteRequestToken = 0;
+    // 키보드(↑/↓)로 강조 중인 드롭다운 항목 index. -1 이면 강조 없음.
+    var autocompleteActiveIndex = -1;
 
     // ──────────────────────────────────────────────────────────
     // 헬퍼
@@ -218,6 +238,13 @@
         if (organizationSelect) {
             organizationSelect.disabled = locked;
         }
+        if (recipientInput) {
+            recipientInput.disabled = locked;
+        }
+        if (locked) {
+            // 발송 중에는 자동완성 드롭다운을 띄워 두지 않는다.
+            hideAutocomplete();
+        }
         if (previewToggle) {
             previewToggle.disabled = locked;
         }
@@ -329,6 +356,439 @@
     }
 
     // ──────────────────────────────────────────────────────────
+    // 수신자 chip 입력 + 내부 사용자 자동완성 (00109-9)
+    //
+    // #forward-recipients-chips 안에 .forward-chip[data-email] 을 채우고 지우는
+    // 책임을 진다. collectRecipients() 가 이 chip 들을 읽어 발송 수신자 목록을
+    // 만든다 — 00109-8 과의 계약 지점.
+    //   - 입력칸 타이핑 → 250ms debounce 후 GET /api/users/search 호출, 결과를
+    //     드롭다운으로 표시. 항목 클릭 / Enter → chip 추가 (데이터는 이메일 주소).
+    //   - 외부 이메일 직접 입력 + Enter / 콤마 → 간단 형식 검증 후 chip 추가.
+    //     형식이 틀리면 입력 컨테이너에 빨간 border.
+    //   - chip 우상단 X → 제거. 입력칸이 빈 상태에서 Backspace → 마지막 chip 제거.
+    //   - chip 최대 50 개 (서버 제한과 일치). 초과 시 추가 차단 + 인라인 안내.
+    // ──────────────────────────────────────────────────────────
+
+    /**
+     * 수신자 chip DOM 요소를 만든다. chip 의 식별 데이터는 항상 이메일 주소이며
+     * (data-email), 화면에 보이는 라벨은 내부 사용자면 username, 외부 입력이면
+     * 이메일 그대로다. 우상단 X 버튼으로 제거한다.
+     *
+     * @param {string} email chip 의 수신자 이메일 주소 (data-email 값).
+     * @param {string} label 화면에 표시할 라벨 (없으면 이메일로 대체).
+     * @returns {HTMLElement} .forward-chip 요소.
+     */
+    function createChipElement(email, label) {
+        var chip = document.createElement('span');
+        chip.className = 'forward-chip';
+        chip.dataset.email = email;
+
+        var labelSpan = document.createElement('span');
+        labelSpan.className = 'forward-chip__label';
+        labelSpan.textContent = label || email;
+        // 라벨이 username 으로 줄어들어도 실제 발송 주소를 hover 로 확인할 수 있게 한다.
+        labelSpan.title = email;
+
+        var removeButton = document.createElement('button');
+        removeButton.type = 'button';
+        removeButton.className = 'forward-chip__remove';
+        removeButton.setAttribute('aria-label', '수신자 제거');
+        removeButton.textContent = '×';
+
+        chip.appendChild(labelSpan);
+        chip.appendChild(removeButton);
+        return chip;
+    }
+
+    /**
+     * 수신자 입력 컨테이너의 빨간 border(형식 오류 표시)를 켜거나 끈다.
+     *
+     * @param {boolean} invalid true 면 빨간 border, false 면 해제.
+     */
+    function setRecipientInputInvalid(invalid) {
+        if (recipientsBox) {
+            recipientsBox.classList.toggle('forward-recipients--invalid', !!invalid);
+        }
+    }
+
+    /**
+     * 수신자 chip 을 추가한다. 이미 같은 이메일(대소문자 무시)이 있으면 중복으로
+     * 보고 추가하지 않으며, chip 이 이미 50 개면 한도 초과로 막는다.
+     *
+     * @param {string} email chip 으로 추가할 이메일 주소.
+     * @param {string} label 화면에 표시할 라벨.
+     * @returns {string} 'added' | 'duplicate' | 'limit'.
+     */
+    function addRecipientChip(email, label) {
+        var normalizedEmail = (email || '').trim();
+        if (!normalizedEmail) {
+            return 'duplicate';
+        }
+        var lowerEmail = normalizedEmail.toLowerCase();
+        var existingChips = chipsContainer.querySelectorAll('.forward-chip[data-email]');
+        for (var index = 0; index < existingChips.length; index += 1) {
+            var existingEmail = (existingChips[index].dataset.email || '')
+                .trim()
+                .toLowerCase();
+            if (existingEmail === lowerEmail) {
+                return 'duplicate';
+            }
+        }
+        if (existingChips.length >= RECIPIENTS_MAX_COUNT) {
+            if (errorMsg) {
+                errorMsg.textContent =
+                    '받는 사람은 최대 ' +
+                    RECIPIENTS_MAX_COUNT +
+                    '명까지 입력할 수 있습니다.';
+            }
+            return 'limit';
+        }
+        chipsContainer.appendChild(createChipElement(normalizedEmail, label));
+        // chip 이 정상 추가되면 직전의 인라인 안내(한도 초과 등)는 더 이상 유효하지 않다.
+        if (errorMsg && errorMsg.textContent) {
+            errorMsg.textContent = '';
+        }
+        return 'added';
+    }
+
+    /**
+     * #forward-recipients-chips 안의 모든 chip 을 제거한다. 모달을 새로 열 때
+     * 이전 입력을 남기지 않기 위해 호출한다.
+     */
+    function clearRecipientChips() {
+        if (chipsContainer) {
+            chipsContainer.innerHTML = '';
+        }
+    }
+
+    /**
+     * 자동완성 드롭다운을 숨기고 내용을 비운다 + 키보드 강조 상태를 초기화한다.
+     */
+    function hideAutocomplete() {
+        if (!autocompleteBox) {
+            return;
+        }
+        autocompleteBox.hidden = true;
+        autocompleteBox.innerHTML = '';
+        autocompleteActiveIndex = -1;
+    }
+
+    /**
+     * 자동완성 드롭다운에 검색 결과를 렌더한다. 결과가 없으면 "검색 결과가
+     * 없습니다" 안내를 표시한다. 각 항목은 username + email + 조직명을 보여주며,
+     * data-email 에 chip 으로 확정할 이메일 주소를 담는다. 모든 텍스트는
+     * textContent 로 주입해 XSS 를 방지한다.
+     *
+     * @param {Array} users /api/users/search 응답 배열.
+     */
+    function renderAutocomplete(users) {
+        if (!autocompleteBox) {
+            return;
+        }
+        autocompleteBox.innerHTML = '';
+        autocompleteActiveIndex = -1;
+
+        if (!users.length) {
+            var emptyRow = document.createElement('div');
+            emptyRow.className = 'forward-autocomplete__empty';
+            emptyRow.textContent = '검색 결과가 없습니다';
+            autocompleteBox.appendChild(emptyRow);
+            autocompleteBox.hidden = false;
+            return;
+        }
+
+        users.forEach(function (user) {
+            var item = document.createElement('button');
+            item.type = 'button';
+            item.className = 'forward-autocomplete__item';
+            item.dataset.email = user && user.email ? user.email : '';
+
+            var nameSpan = document.createElement('span');
+            nameSpan.className = 'forward-autocomplete__name';
+            nameSpan.textContent = user && user.username ? user.username : '';
+
+            var emailSpan = document.createElement('span');
+            emailSpan.className = 'forward-autocomplete__email';
+            emailSpan.textContent = user && user.email ? user.email : '';
+
+            item.appendChild(nameSpan);
+            item.appendChild(emailSpan);
+
+            var organizations =
+                user && Array.isArray(user.organizations) ? user.organizations : [];
+            if (organizations.length) {
+                var organizationNames = organizations
+                    .map(function (organization) {
+                        return organization && organization.name
+                            ? organization.name
+                            : '';
+                    })
+                    .filter(function (name) {
+                        return name;
+                    });
+                if (organizationNames.length) {
+                    var orgSpan = document.createElement('span');
+                    orgSpan.className = 'forward-autocomplete__orgs';
+                    orgSpan.textContent = organizationNames.join(', ');
+                    item.appendChild(orgSpan);
+                }
+            }
+            autocompleteBox.appendChild(item);
+        });
+        autocompleteBox.hidden = false;
+    }
+
+    /**
+     * 자동완성 드롭다운 항목을 chip 으로 확정한다. 항목의 username 을 라벨로,
+     * data-email 을 chip 데이터로 쓴다. 추가 / 중복 / 한도 어느 결과든 입력칸과
+     * 드롭다운은 정리한다.
+     *
+     * @param {HTMLElement} item .forward-autocomplete__item 요소.
+     */
+    function selectAutocompleteItem(item) {
+        var email = (item.dataset.email || '').trim();
+        if (!email) {
+            return;
+        }
+        var nameSpan = item.querySelector('.forward-autocomplete__name');
+        var label = nameSpan && nameSpan.textContent ? nameSpan.textContent : email;
+        addRecipientChip(email, label);
+        recipientInput.value = '';
+        setRecipientInputInvalid(false);
+        hideAutocomplete();
+        recipientInput.focus();
+    }
+
+    /**
+     * 키보드 ↑/↓ 로 자동완성 드롭다운의 강조 항목을 이동한다. 양 끝에서
+     * 순환하며, 강조 항목이 보이도록 스크롤한다.
+     *
+     * @param {number} delta +1 이면 아래로, -1 이면 위로.
+     * @param {NodeList} items 현재 드롭다운의 .forward-autocomplete__item 목록.
+     */
+    function moveAutocompleteActive(delta, items) {
+        var count = items.length;
+        if (!count) {
+            return;
+        }
+        var nextIndex = autocompleteActiveIndex + delta;
+        if (nextIndex < 0) {
+            nextIndex = count - 1;
+        } else if (nextIndex >= count) {
+            nextIndex = 0;
+        }
+        items.forEach(function (item, index) {
+            item.classList.toggle(
+                'forward-autocomplete__item--active',
+                index === nextIndex
+            );
+        });
+        autocompleteActiveIndex = nextIndex;
+        items[nextIndex].scrollIntoView({ block: 'nearest' });
+    }
+
+    /**
+     * 입력칸에 직접 타이핑한 외부 이메일을 chip 으로 확정한다. 간단 형식 검증에
+     * 실패하면 입력 컨테이너에 빨간 border 를 켜고 텍스트를 유지한다.
+     */
+    function commitTypedEmail() {
+        var rawValue = recipientInput.value.trim();
+        if (!rawValue) {
+            return;
+        }
+        if (!EMAIL_PATTERN.test(rawValue)) {
+            setRecipientInputInvalid(true);
+            return;
+        }
+        var outcome = addRecipientChip(rawValue, rawValue);
+        if (outcome === 'limit') {
+            // 한도 초과 — 텍스트를 남겨 사용자가 상황을 인지하게 한다.
+            return;
+        }
+        // 'added' / 'duplicate' 모두 입력칸은 비운다 (중복은 이미 chip 이 있음).
+        recipientInput.value = '';
+        setRecipientInputInvalid(false);
+        hideAutocomplete();
+    }
+
+    /**
+     * 내부 사용자 자동완성 검색을 1 회 수행한다. 응답이 도착했을 때 가장 최근
+     * 요청인지(token), 그리고 입력칸이 여전히 포커스 상태인지 확인한 뒤에만
+     * 드롭다운을 갱신해 stale 응답이 화면을 덮어쓰지 않게 한다.
+     *
+     * @param {string} query 검색어 (1~50 자).
+     */
+    function runUserSearch(query) {
+        var requestToken = autocompleteRequestToken + 1;
+        autocompleteRequestToken = requestToken;
+
+        fetch(
+            '/api/users/search?q=' +
+                encodeURIComponent(query) +
+                '&limit=' +
+                USER_SEARCH_LIMIT,
+            { headers: { Accept: 'application/json' } }
+        )
+            .then(function (response) {
+                if (!response.ok) {
+                    return [];
+                }
+                return response.json().catch(function () {
+                    return [];
+                });
+            })
+            .then(function (users) {
+                if (requestToken !== autocompleteRequestToken) {
+                    // 이후 더 최근 요청이 있었다 — stale 응답은 버린다.
+                    return;
+                }
+                if (document.activeElement !== recipientInput) {
+                    // 입력칸을 이미 떠났으면 드롭다운을 띄우지 않는다.
+                    return;
+                }
+                renderAutocomplete(Array.isArray(users) ? users : []);
+            })
+            .catch(function () {
+                if (requestToken === autocompleteRequestToken) {
+                    hideAutocomplete();
+                }
+            });
+    }
+
+    /**
+     * 수신자 입력칸 input 이벤트 핸들러. 빨간 border 를 풀고, 250ms debounce 후
+     * 자동완성 검색을 건다. 검색어가 비었거나 서버 한도(50 자)를 넘으면
+     * 드롭다운을 닫는다.
+     */
+    function handleRecipientInput() {
+        setRecipientInputInvalid(false);
+        if (autocompleteTimerId !== null) {
+            window.clearTimeout(autocompleteTimerId);
+            autocompleteTimerId = null;
+        }
+        var query = recipientInput.value.trim();
+        if (query.length < 1 || query.length > USER_SEARCH_QUERY_MAX_LENGTH) {
+            hideAutocomplete();
+            return;
+        }
+        autocompleteTimerId = window.setTimeout(function () {
+            autocompleteTimerId = null;
+            runUserSearch(query);
+        }, AUTOCOMPLETE_DEBOUNCE_MS);
+    }
+
+    /**
+     * 수신자 입력칸 keydown 핸들러.
+     *   - Enter: 드롭다운에서 강조 항목이 있으면 그 항목을 chip 으로, 없으면
+     *     입력한 외부 이메일을 chip 으로 확정.
+     *   - 콤마(,): 입력한 외부 이메일을 chip 으로 확정.
+     *   - ↑/↓: 드롭다운 강조 항목 이동.
+     *   - Escape: 드롭다운 닫기.
+     *   - Backspace(입력칸이 빈 상태): 마지막 chip 제거.
+     *
+     * @param {KeyboardEvent} event keydown 이벤트.
+     */
+    function handleRecipientKeydown(event) {
+        var key = event.key;
+
+        if (key === 'Enter' || key === ',') {
+            event.preventDefault();
+            if (
+                key === 'Enter' &&
+                autocompleteBox &&
+                !autocompleteBox.hidden &&
+                autocompleteActiveIndex >= 0
+            ) {
+                var highlightedItems = autocompleteBox.querySelectorAll(
+                    '.forward-autocomplete__item'
+                );
+                if (highlightedItems[autocompleteActiveIndex]) {
+                    selectAutocompleteItem(highlightedItems[autocompleteActiveIndex]);
+                    return;
+                }
+            }
+            commitTypedEmail();
+            return;
+        }
+
+        if (key === 'ArrowDown' || key === 'ArrowUp') {
+            if (!autocompleteBox || autocompleteBox.hidden) {
+                return;
+            }
+            var navigableItems = autocompleteBox.querySelectorAll(
+                '.forward-autocomplete__item'
+            );
+            if (!navigableItems.length) {
+                return;
+            }
+            event.preventDefault();
+            moveAutocompleteActive(key === 'ArrowDown' ? 1 : -1, navigableItems);
+            return;
+        }
+
+        if (key === 'Escape') {
+            if (autocompleteBox && !autocompleteBox.hidden) {
+                event.preventDefault();
+                hideAutocomplete();
+            }
+            return;
+        }
+
+        if (key === 'Backspace' && recipientInput.value === '') {
+            var chips = chipsContainer.querySelectorAll('.forward-chip');
+            if (chips.length) {
+                var lastChip = chips[chips.length - 1];
+                lastChip.parentNode.removeChild(lastChip);
+            }
+        }
+    }
+
+    // 수신자 입력칸 — 타이핑(자동완성) / 키 입력(chip 확정·이동) / 포커스 이탈.
+    if (recipientInput) {
+        recipientInput.addEventListener('input', handleRecipientInput);
+        recipientInput.addEventListener('keydown', handleRecipientKeydown);
+        recipientInput.addEventListener('blur', function () {
+            // 드롭다운 항목은 mousedown 에서 preventDefault 로 포커스를 유지하므로,
+            // 진짜 포커스 이탈일 때만 약간의 지연 후 드롭다운을 닫는다.
+            window.setTimeout(hideAutocomplete, 150);
+        });
+    }
+
+    // 자동완성 드롭다운 — 항목 선택(클릭). mousedown 에서 처리해 입력칸 blur 보다
+    // 먼저 동작하게 하고, preventDefault 로 포커스를 유지한다.
+    if (autocompleteBox) {
+        autocompleteBox.addEventListener('mousedown', function (event) {
+            var item = event.target.closest('.forward-autocomplete__item');
+            if (!item) {
+                return;
+            }
+            event.preventDefault();
+            selectAutocompleteItem(item);
+        });
+    }
+
+    // chip 우상단 X 버튼 — 이벤트 위임으로 제거한다.
+    if (chipsContainer) {
+        chipsContainer.addEventListener('click', function (event) {
+            var removeButton = event.target.closest('.forward-chip__remove');
+            if (!removeButton) {
+                return;
+            }
+            var chip = removeButton.closest('.forward-chip');
+            if (chip) {
+                chip.parentNode.removeChild(chip);
+            }
+            // chip 을 지웠으면 한도 초과 안내는 더 이상 유효하지 않다.
+            if (errorMsg && errorMsg.textContent.indexOf('최대') !== -1) {
+                errorMsg.textContent = '';
+            }
+            if (recipientInput) {
+                recipientInput.focus();
+            }
+        });
+    }
+
+    // ──────────────────────────────────────────────────────────
     // 모달 열기
     // ──────────────────────────────────────────────────────────
 
@@ -359,6 +819,13 @@
         // 추가 메시지 초기화 + 카운터 갱신.
         messageTextarea.value = '';
         updateMessageCount();
+        // 수신자 chip / 입력칸 / 자동완성 드롭다운 초기화 (입력 미유지).
+        clearRecipientChips();
+        if (recipientInput) {
+            recipientInput.value = '';
+        }
+        setRecipientInputInvalid(false);
+        hideAutocomplete();
         // 미리보기는 기본 접힘으로 초기화.
         collapsePreview();
         // 에러 / 결과 박스 초기화 + 자동 닫기 타이머 정리.

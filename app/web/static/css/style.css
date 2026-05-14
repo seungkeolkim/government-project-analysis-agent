@@ -5022,10 +5022,111 @@ details[open] .user-card__org-summary::before {
     padding: 4px 2px;
 }
 
+/* 외부 이메일 직접 입력 형식 검증 실패 시 — 입력 컨테이너에 빨간 border. */
+.forward-recipients--invalid {
+    border-color: #dc2626;
+}
+
+/* ---------- 수신자 chip (00109-9) ---------- */
+.forward-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+    padding: 2px 4px 2px 8px;
+    background: #eef2ff;
+    border: 1px solid #c7d2fe;
+    border-radius: 12px;
+    font-size: 13px;
+    color: #1e3a8a;
+}
+
+.forward-chip__label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 220px;
+}
+
+.forward-chip__remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: #4338ca;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.forward-chip__remove:hover {
+    background: #c7d2fe;
+}
+
 /* 자동완성 드롭다운 — 00109-9 가 결과를 채운다. 위치 기준점만 잡아둔다. */
 .forward-autocomplete {
     position: relative;
     margin-top: 2px;
+}
+
+/* 드롭다운이 펼쳐졌을 때만 테두리/그림자/스크롤을 입힌다 (hidden 이면 무테). */
+.forward-autocomplete:not([hidden]) {
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    background: #ffffff;
+    max-height: 220px;
+    overflow-y: auto;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.08);
+}
+
+.forward-autocomplete__item {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 10px;
+    border: none;
+    border-bottom: 1px solid #f3f4f6;
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+}
+
+.forward-autocomplete__item:last-child {
+    border-bottom: none;
+}
+
+.forward-autocomplete__item:hover,
+.forward-autocomplete__item--active {
+    background: #eef2ff;
+}
+
+.forward-autocomplete__name {
+    font-weight: 600;
+    color: #111827;
+}
+
+.forward-autocomplete__email {
+    color: #6b7280;
+}
+
+.forward-autocomplete__orgs {
+    color: #9ca3af;
+    font-size: 12px;
+}
+
+.forward-autocomplete__empty {
+    padding: 8px 10px;
+    font-size: 13px;
+    color: #9ca3af;
 }
 
 /* ---------- 발신 조직 ---------- */
