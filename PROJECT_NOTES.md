@@ -70,7 +70,7 @@ FastAPI + Jinja2 (`templates/`) + 로컬 정적 리소스 (`static/`, 외부 CDN
 #### 이메일 발송 (`app/email/`)
 
 - `app/email/transport/base.py` — `EmailTransport` 추상 클래스. `send(EmailMessage) -> None` 단일 추상 메서드. 표준 라이브러리만 사용해 외부 의존성 없음.
-- `app/email/transport/m365_oauth.py` — `M365OAuthSmtpTransport`. Azure AD `msal.ConfidentialClientApplication` 으로 XOAUTH2 액세스 토큰 발급 → `smtplib.SMTP("smtp.office365.com", 587)` STARTTLS + `AUTH XOAUTH2`. 매 `send()` 마다 msal 인스턴스 새로 생성(토큰 캐시 포기, 항상 최신 자격증명 보장).
+- `app/email/transport/m365_oauth.py` — `M365OAuthSmtpTransport`. Azure AD `msal.ConfidentialClientApplication` 으로 XOAUTH2 액세스 토큰 발급 → `smtplib.SMTP("smtp.office365.com", 587)` STARTTLS → 명시적 `smtp.ehlo()` 재전송 → `AUTH XOAUTH2`. STARTTLS 직후 EHLO 를 명시적으로 재전송하는 이유: RFC 3207 §4.2 요구사항이며, Python `smtplib.starttls()` 는 내부 상태(`ehlo_resp`/`helo_resp`)를 None 으로 클리어만 하고 EHLO 를 자동 재전송하지 않는다. `raw docmd()` 도 `ehlo_or_helo_if_needed()` 를 호출하지 않아 명시적 호출 없이는 M365 가 `503 5.5.2 Send hello first` 를 반환한다. 매 `send()` 마다 msal 인스턴스 새로 생성(토큰 캐시 포기, 항상 최신 자격증명 보장).
 - `app/email/transport/factory.py` — `build_transport(session)`. `SystemSetting["email.transport.type"]` 값(`m365_oauth`)에 따라 구현체를 인스턴스화. 향후 옵션 추가 시 `constants.ALLOWED_EMAIL_TRANSPORT_TYPES`에 값 추가 + `elif` 분기 1줄로 확장 완결.
 - `app/email/config.py` — `M365OAuthSmtpConfig` frozen dataclass + `load_m365_oauth_config(session)`. `SystemSetting` 5개 키(tenant_id/client_id/client_secret/sender_address/from_display_name)를 읽어 반환. 미설정 키는 `constants.DEFAULT_*` fallback.
 - `app/email/message_builder.py` — 두 종류의 빌더를 노출한다. ① `build_plain_text_message(to, subject, body)` — 기존 plain text 전용 (Phase A-1 테스트 발송용). ② `build_multipart_message(recipient, subject, text_body, html_body, sender_address, sender_display_name)` — text/plain + text/html 두 alternative 를 가진 multipart/alternative EmailMessage (Phase A-2 Part 2 공고 포워딩용). 부속 헬퍼: `build_default_forward_subject`, `build_forward_text_body`, `build_forward_html_body`, `build_announcement_detail_url`.
@@ -321,6 +321,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
+- [00110] M365 OAuth SMTP STARTTLS 후 EHLO 재전송 버그 수정 — `smtplib.starttls()` 는 EHLO 를 자동 재전송하지 않아 M365 가 `503 5.5.2 Send hello first` 를 반환하는 문제를 `smtp.ehlo()` 명시적 호출 추가로 해결 — 2026-05-15
 - [00109] Phase A-2 Part 2 공고 포워딩 구현 — `app/email/forwarding.py` 신규(수신자별 개별 발송·트랜잭션 3단계), `message_builder.py` multipart/HTML 확장, `routes/forward.py` API 4종(POST /forward·GET /forward-logs·sends·GET /users/search), 상세 페이지 '메일로 보내기' 버튼 + 수신자 chip 입력 + 발송 이력 섹션 UI — 2026-05-14
 - [00106] Phase A-2 Part 1: `EmailForwardLog` ORM + Alembic migration + 단위 테스트 (`email_forward_logs` 테이블 신설, `EmailForwardStatus` enum) — 2026-05-14
 - [00105] `email-validator` 의존성 누락 수정 — pydantic `EmailStr` 사용 시 필수인 `email-validator>=2.0,<3.0` 패키지가 00104에서 빠져 기동 오류 발생, pyproject.toml 에 추가하여 복구 — 2026-05-14
@@ -330,5 +331,3 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - [00099] 목록 expand 사유 다중행 표시 CSS 수정 — progress.css expand 영역에 `white-space: pre-wrap; overflow-wrap: anywhere` 추가, 관심/검토/진행/종료 모든 상태에 동일 적용 — 2026-05-11
 - [00098] 진행상태 종료 mutex 확장 + 목록 셀 pill UI 개선 — 진행·종료 통합 선점 제약 적용, ProgressSummary.done_org 추가, 셀 표시를 pill 4종(관심=노란·검토=연두·진행=파랑·종료=회색)으로 교체 + 진행/종료 시 팀명 표시 — 2026-05-11
 - [00097] 공고 진행 상태(Progress) 기능 구현 — 조직 단위 관심/검토/진행/종료 4단계, 진행 선점 제약(canonical당 1조직, app-level transactional check), 조직 멤버 누구나 수정 권한, 다중 체크박스 필터 + 목록 셀/상세 인라인 섹션 UI — 2026-05-08
-- [00096] 관리자 페이지 「시스템 관리」 탭 신설 — 시스템 백업을 공고 수집 제어 하위에서 분리, 백업 스케줄 표시도 시스템 백업 탭으로 통합 — 2026-05-08
-- [00095] Docker 실행 스크립트 개선 — compose.sh → run_compose.sh/run_admin.sh 분화, dev/prod 분기 제거, alembic 바인드 마운트로 migration 재빌드 불필요화 — 2026-05-08
