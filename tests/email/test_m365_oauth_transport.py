@@ -3,11 +3,16 @@
 검증 시나리오 (subtask guidance bullet 1 a/b/c):
     1. test_m365_oauth_send_success — msal mock 이 access_token 반환,
        smtplib mock 의 docmd 가 235, send_message 가 올바른 EmailMessage 로 호출,
-       From 헤더가 ``f\"{display_name} <{sender_address}>\"`` 형식.
+       From 헤더가 ``f\"{display_name} <{sender_address}>\"`` 형식. SMTP 시퀀스가
+       ``starttls → ehlo → docmd(AUTH) → send_message`` 순서로 호출되는지 함께
+       검증한다 (RFC 3207 §4.2 — STARTTLS 후 EHLO 재전송 누락 회귀 방지, task
+       00110).
     2. test_m365_oauth_token_failure — msal mock 이 ``access_token`` 키 없는
-       dict 반환 시 RuntimeError. error/description 이 메시지에 포함.
+       dict 반환 시 RuntimeError. error/description 이 메시지에 포함. SMTP
+       단계 도달 전에 raise 되므로 ehlo 도 호출되지 않아야 함.
     3. test_m365_oauth_auth_response_not_235 — smtp.docmd 가 535 등 반환 시
-       RuntimeError. code/response 가 메시지에 포함.
+       RuntimeError. code/response 가 메시지에 포함. AUTH docmd 보다 먼저
+       ehlo 가 호출되었음을 함께 검증.
 
 외부 의존성은 monkeypatch 로 모두 차단 — msal.ConfidentialClientApplication
 과 smtplib.SMTP 가 모두 가짜 객체로 치환되어 실제 네트워크 호출 0회.
@@ -136,6 +141,24 @@ def test_m365_oauth_send_success(monkeypatch: pytest.MonkeyPatch) -> None:
         "smtp.office365.com", 587
     )
     smtp_ctx.starttls.assert_called_once_with()
+    # 2-1. RFC 3207 §4.2 — STARTTLS 직후 EHLO 가 한 번 호출되어야 한다.
+    # (task 00110 — 빠지면 M365 가 503 5.5.2 'Send hello first' 응답.)
+    smtp_ctx.ehlo.assert_called_once_with()
+    # 2-2. SMTP 시퀀스 순서 검증: starttls → ehlo → docmd → send_message.
+    # method_calls 에는 mock 위에 호출된 모든 attribute 접근이 시간순으로
+    # 쌓이므로, 관심 있는 4 개 메서드만 필터링해 순서를 단언한다.
+    interested_method_names = {"starttls", "ehlo", "docmd", "send_message"}
+    actual_sequence = [
+        call[0]
+        for call in smtp_ctx.method_calls
+        if call[0] in interested_method_names
+    ]
+    assert actual_sequence == [
+        "starttls",
+        "ehlo",
+        "docmd",
+        "send_message",
+    ], f"SMTP method 호출 순서가 예상과 다름: {actual_sequence!r}"
 
     # 3. XOAUTH2 base64 blob 검증.
     auth_call = smtp_ctx.docmd.call_args
@@ -235,3 +258,20 @@ def test_m365_oauth_auth_response_not_235(monkeypatch: pytest.MonkeyPatch) -> No
 
     # send_message 는 호출되지 않아야 함.
     smtp_ctx.send_message.assert_not_called()
+
+    # RFC 3207 §4.2 회귀 방지 (task 00110): AUTH 실패 케이스에서도 ehlo 가
+    # docmd 보다 먼저 호출되었어야 한다. AUTH 응답 코드 검증보다 앞서
+    # EHLO 가 누락되면 M365 가 503 'Send hello first' 를 돌려주는데 그
+    # 분기는 본 transport 의 인증 실패 처리와 분리해 두지 않으면 디버깅이
+    # 어려워진다.
+    interested_method_names = {"starttls", "ehlo", "docmd"}
+    actual_sequence = [
+        call[0]
+        for call in smtp_ctx.method_calls
+        if call[0] in interested_method_names
+    ]
+    assert actual_sequence == [
+        "starttls",
+        "ehlo",
+        "docmd",
+    ], f"SMTP method 호출 순서가 예상과 다름: {actual_sequence!r}"

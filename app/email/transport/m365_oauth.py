@@ -15,13 +15,21 @@
        키가 없으면 RuntimeError (응답의 ``error`` / ``error_description`` 포함).
     3. ``smtplib.SMTP(\"smtp.office365.com\", 587)`` 컨텍스트로 연결을 열고
        ``starttls()`` 로 TLS 업그레이드.
-    4. RFC 4954 + Google·M365 XOAUTH2 스펙대로 ``user=...\\x01auth=Bearer
+    4. STARTTLS 직후 ``smtp.ehlo()`` 로 EHLO 를 재전송 (RFC 3207 §4.2 — TLS
+       성공 후에는 새 세션처럼 EHLO 를 다시 보내 서버 capability 를 재협상해야
+       한다). Python smtplib 는 starttls() 내부에서 ehlo_resp/helo_resp 를
+       None 으로 클리어만 하고 EHLO 를 자동으로 다시 보내지 않으며, raw
+       ``docmd()`` 도 ``ehlo_or_helo_if_needed()`` 를 호출하지 않으므로 본
+       단계가 누락되면 M365 가 ``503 5.5.2 Send hello first`` 를 응답한다.
+    5. RFC 4954 + Google·M365 XOAUTH2 스펙대로 ``user=...\\x01auth=Bearer
        ...\\x01\\x01`` 문자열을 base64 로 인코딩해 ``AUTH XOAUTH2 <b64>`` 명령
        을 raw ``docmd`` 로 전송. 응답 코드가 235 가 아니면 RuntimeError.
-    5. EmailMessage 의 ``From`` 헤더가 비어 있으면
+    6. EmailMessage 의 ``From`` 헤더가 비어 있으면
        ``f\"{from_display_name} <{sender_address}>\"`` 형식으로 채운다. 이미 값이
        있으면 그대로 보존.
-    6. ``smtp.send_message(message)`` 로 발송.
+    7. ``smtp.send_message(message)`` 로 발송. (send_message 내부는
+       ``ehlo_or_helo_if_needed()`` 를 호출하므로 별도의 명시적 EHLO 는 필요
+       하지 않다 — STARTTLS 와 AUTH 사이만 명시적으로 챙기면 된다.)
 
 토큰 캐싱:
     MSAL 의 내부 in-memory cache 만 사용한다 (디자인 노트 §6-1, 외부 영속
@@ -157,7 +165,17 @@ class M365OAuthSmtpTransport(EmailTransport):
         # 예외 발생 시에도 cleanup 보장.
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp:
             smtp.starttls()
-            logger.debug("STARTTLS 완료. XOAUTH2 AUTH 명령 송신.")
+            # RFC 3207 §4.2 — STARTTLS 성공 후에는 SMTP 클라이언트가 새 세션
+            # 처럼 EHLO 를 다시 보내야 한다. Python smtplib.starttls() 는
+            # ehlo_resp/helo_resp 만 None 으로 클리어하고 EHLO 를 자동 재전송
+            # 하지 않으며, 아래에서 사용하는 raw ``docmd()`` 도
+            # ``ehlo_or_helo_if_needed()`` 를 호출하지 않는다. 따라서 AUTH
+            # 명령을 보내기 전에 명시적으로 EHLO 를 한 번 더 보내지 않으면
+            # M365 가 ``503 5.5.2 Send hello first`` 를 반환한다.
+            # (이후의 send_message() 는 내부적으로 ehlo_or_helo_if_needed()
+            # 를 호출하므로 추가 ehlo 는 필요 없다.)
+            smtp.ehlo()
+            logger.debug("STARTTLS 완료 후 EHLO 재전송. XOAUTH2 AUTH 명령 송신.")
 
             xoauth2_b64 = self._build_xoauth2_blob(
                 self._config.sender_address, access_token
