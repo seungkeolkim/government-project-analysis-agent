@@ -103,6 +103,7 @@ def test_put_settings_client_secret_blank_preserves_existing(
             },
             "from_display_name": "테스트 봇",
             "max_retry_count": 2,
+            "public_base_url": "http://localhost:8000",
         },
     )
     assert response.status_code == 200, response.text
@@ -121,6 +122,7 @@ def test_put_settings_client_secret_blank_preserves_existing(
             },
             "from_display_name": "테스트 봇 2",
             "max_retry_count": 3,
+            "public_base_url": "http://localhost:8000",
         },
     )
     assert response.status_code == 200, response.text
@@ -142,6 +144,7 @@ def test_put_settings_client_secret_blank_preserves_existing(
             },
             "from_display_name": "테스트 봇 3",
             "max_retry_count": 4,
+            "public_base_url": "http://localhost:8000",
         },
     )
     assert response.status_code == 200, response.text
@@ -162,6 +165,7 @@ def test_put_settings_client_secret_blank_preserves_existing(
             },
             "from_display_name": "테스트 봇 4",
             "max_retry_count": 5,
+            "public_base_url": "http://localhost:8000",
         },
     )
     assert response.status_code == 200
@@ -198,6 +202,7 @@ def test_get_settings_client_secret_masked(admin_client: TestClient) -> None:
             },
             "from_display_name": "x",
             "max_retry_count": 2,
+            "public_base_url": "http://localhost:8000",
         },
     )
     response = admin_client.get("/api/admin/email/settings")
@@ -224,6 +229,7 @@ def test_get_settings_client_secret_masked(admin_client: TestClient) -> None:
             },
             "from_display_name": "x",
             "max_retry_count": 2,
+            "public_base_url": "http://localhost:8000",
         },
     )
     response = admin_client.get("/api/admin/email/settings")
@@ -232,6 +238,119 @@ def test_get_settings_client_secret_masked(admin_client: TestClient) -> None:
 
 # ──────────────────────────────────────────────────────────────
 # 3. test_non_admin_403
+# ──────────────────────────────────────────────────────────────
+
+
+# ──────────────────────────────────────────────────────────────
+# 4. test_get_settings_public_base_url_default
+# ──────────────────────────────────────────────────────────────
+
+
+def test_get_settings_public_base_url_default(admin_client: TestClient) -> None:
+    """GET /settings 에서 public_base_url 이 default 값(localhost)으로 반환됨을 확인.
+
+    SystemSetting 에 app.public_base_url row 가 없을 때
+    DEFAULT_APP_PUBLIC_BASE_URL(='http://localhost:8000') 로 fallback 되어야 한다.
+    """
+    response = admin_client.get("/api/admin/email/settings")
+    assert response.status_code == 200
+    data = response.json()
+    assert "public_base_url" in data, f"public_base_url 키가 없음: {data.keys()}"
+    assert data["public_base_url"] == "http://localhost:8000", (
+        f"default 값이 아님: {data['public_base_url']!r}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# 5. test_put_settings_public_base_url_saved
+# ──────────────────────────────────────────────────────────────
+
+
+def test_put_settings_public_base_url_saved(admin_client: TestClient) -> None:
+    """PUT /settings 으로 public_base_url 저장 후 GET 에서 동일 값이 반환됨을 확인.
+
+    http/https 스킴 모두 정상 저장되어야 한다. 앞뒤 공백은 strip 되어 저장.
+    """
+    # http 스킴
+    response = admin_client.put(
+        "/api/admin/email/settings",
+        json={
+            "m365": {
+                "tenant_id": "t",
+                "client_id": "c",
+                "sender_address": "s@innodep.com",
+            },
+            "from_display_name": "봇",
+            "max_retry_count": 2,
+            "public_base_url": "http://172.23.10.19:8000/",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["public_base_url"] == "http://172.23.10.19:8000/"
+
+    # GET 으로 재확인
+    get_response = admin_client.get("/api/admin/email/settings")
+    assert get_response.status_code == 200
+    assert get_response.json()["public_base_url"] == "http://172.23.10.19:8000/"
+
+    # https 스킴 변경
+    response = admin_client.put(
+        "/api/admin/email/settings",
+        json={
+            "m365": {
+                "tenant_id": "t",
+                "client_id": "c",
+                "sender_address": "s@innodep.com",
+            },
+            "from_display_name": "봇",
+            "max_retry_count": 2,
+            "public_base_url": "https://myserver.example.com/",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["public_base_url"] == "https://myserver.example.com/"
+
+
+# ──────────────────────────────────────────────────────────────
+# 6. test_put_settings_public_base_url_invalid_scheme
+# ──────────────────────────────────────────────────────────────
+
+
+def test_put_settings_public_base_url_invalid_scheme(
+    admin_client: TestClient,
+) -> None:
+    """http/https 이외 스킴 또는 상대경로로 PUT 시 422 응답.
+
+    Pydantic validator 가 스킴을 거부해야 한다.
+    """
+    invalid_values = [
+        "ftp://172.23.10.19:8000/",
+        "//172.23.10.19:8000/",
+        "172.23.10.19:8000/",
+        "",
+        "   ",
+    ]
+    for bad_url in invalid_values:
+        response = admin_client.put(
+            "/api/admin/email/settings",
+            json={
+                "m365": {
+                    "tenant_id": "t",
+                    "client_id": "c",
+                    "sender_address": "s@innodep.com",
+                },
+                "from_display_name": "봇",
+                "max_retry_count": 2,
+                "public_base_url": bad_url,
+            },
+        )
+        assert response.status_code == 422, (
+            f"잘못된 스킴 {bad_url!r} 에 대해 422 가 아닌 {response.status_code} 응답"
+        )
+
+
+# ──────────────────────────────────────────────────────────────
+# 7. test_non_admin_403
 # ──────────────────────────────────────────────────────────────
 
 
@@ -264,6 +383,7 @@ def test_non_admin_403(client: TestClient) -> None:
             },
             "from_display_name": "n",
             "max_retry_count": 2,
+            "public_base_url": "http://localhost:8000",
         },
         follow_redirects=False,
     )
