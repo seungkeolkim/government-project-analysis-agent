@@ -53,6 +53,7 @@ from app.db.models import (
     EmailSendRun,
     Organization,
     User,
+    UserOrganization,
 )
 from app.email.constants import (
     DEFAULT_APP_PUBLIC_BASE_URL,
@@ -213,6 +214,17 @@ def forward_announcement(
             f"발송자 사용자를 찾을 수 없습니다: sender_user_id={request.sender_user_id}"
         )
 
+    # 발송자의 모든 소속 조직을 로드한다 — 메일 본문 발신자 정보 표에 전체 목록을
+    # 표시하기 위해 단일 선택 org 가 아닌 사용자 전체 소속 목록이 필요하다.
+    sender_organizations: list[Organization] = list(
+        session.execute(
+            select(Organization)
+            .join(UserOrganization, Organization.id == UserOrganization.organization_id)
+            .where(UserOrganization.user_id == request.sender_user_id)
+            .order_by(Organization.id)
+        ).scalars().all()
+    )
+
     # ── 준비 3: 발신 조직 검증 + 로드 ─────────────────────────────
     sender_organization: Organization | None = None
     if request.sender_organization_id is not None:
@@ -277,14 +289,14 @@ def forward_announcement(
         announcement=announcement,
         additional_message=request.additional_message,
         sender_user=sender_user,
-        sender_organization=sender_organization,
+        sender_organizations=sender_organizations,
         detail_url=detail_url,
     )
     html_body = build_forward_html_body(
         announcement=announcement,
         additional_message=request.additional_message,
         sender_user=sender_user,
-        sender_organization=sender_organization,
+        sender_organizations=sender_organizations,
         detail_url=detail_url,
     )
 

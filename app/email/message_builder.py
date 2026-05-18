@@ -349,28 +349,105 @@ def _format_sender_display(sender_user: Any, sender_organization: Any) -> str:
     return f"{base} (개인)"
 
 
+def _build_sender_info_text_block(
+    sender_user: Any,
+    sender_organizations: list[Any],
+) -> str:
+    """발신자 정보를 plain text 표 블록으로 만든다.
+
+    메일 수신자가 누가 보냈는지 바로 알 수 있도록 [발신자 정보] 헤더와
+    3개 항목(사용자 ID / 조직명 / 이메일)을 줄 형식으로 반환한다.
+    조직이 여러 개면 콤마로 구분해 한 줄에 나열한다.
+
+    Args:
+        sender_user: 발송자 ``User`` ORM 인스턴스.
+        sender_organizations: 발송자가 속한 모든 ``Organization`` 인스턴스 목록.
+            빈 리스트면 조직명 항목을 공란으로 표시한다.
+
+    Returns:
+        ``[발신자 정보]`` 라벨과 3개 항목으로 구성된 plain text 블록 문자열.
+    """
+    org_display = (
+        ", ".join(org.name for org in sender_organizations)
+        if sender_organizations
+        else ""
+    )
+    email_display = sender_user.email or ""
+    return "\n".join(
+        [
+            "[발신자 정보]",
+            f"- 사용자 ID: {sender_user.username}",
+            f"- 조직명: {org_display}",
+            f"- 이메일: {email_display}",
+        ]
+    )
+
+
+def _build_sender_info_html_block(
+    sender_user: Any,
+    sender_organizations: list[Any],
+) -> str:
+    """발신자 정보를 HTML 표 블록으로 만든다.
+
+    기존 메타 박스(``#f5f5f5`` 배경)와 동일한 스타일의 3행 테이블을 반환한다.
+    모든 동적 값은 ``html.escape`` 처리한다.
+
+    Args:
+        sender_user: 발송자 ``User`` ORM 인스턴스.
+        sender_organizations: 발송자가 속한 모든 ``Organization`` 인스턴스 목록.
+            빈 리스트면 조직명 셀을 공란으로 표시한다.
+
+    Returns:
+        인라인 CSS 가 적용된 발신자 정보 테이블 HTML 문자열.
+    """
+    org_names = (
+        ", ".join(org.name for org in sender_organizations)
+        if sender_organizations
+        else ""
+    )
+    safe_username = html.escape(sender_user.username)
+    safe_org_names = html.escape(org_names)
+    safe_email = html.escape(sender_user.email or "")
+
+    rows = [
+        _html_meta_row("사용자 ID", safe_username),
+        _html_meta_row("조직명", safe_org_names),
+        _html_meta_row("이메일", safe_email),
+    ]
+    return (
+        '<div style="margin:16px 0;">'
+        '<div style="font-size:12px;color:#888;margin-bottom:6px;">발신자 정보</div>'
+        '<table style="width:100%;background:#f5f5f5;border-radius:6px;'
+        'padding:12px 16px;font-size:14px;border-collapse:collapse;">'
+        f"{''.join(rows)}"
+        "</table>"
+        "</div>"
+    )
+
+
 def build_forward_text_body(
     *,
     announcement: Any,
     additional_message: str | None,
     sender_user: Any,
-    sender_organization: Any,
+    sender_organizations: list[Any],
     detail_url: str,
 ) -> str:
     """포워딩 메일의 text/plain 본문을 만든다.
 
     multipart/alternative 의 text 대체본용 — HTML 을 렌더하지 못하는 MUA 가
     표시한다. 첨부 prompt '#### plain text 본문 구성' 레이아웃을 그대로 따른다:
-    공고 메타(제목/발주기관/상태/마감일/예산) → 공고 요약 → 보낸 사람 메시지
-    → 상세 링크 → footer. 예산·요약·보낸 사람 메시지는 값이 없으면 해당
-    구획을 생략한다.
+    공고 메타(제목/발주기관/상태/마감일/예산) → 발신자 정보 표 → 공고 요약
+    → 보낸 사람 메시지 → 상세 링크 → footer. 예산·요약·보낸 사람 메시지는
+    값이 없으면 해당 구획을 생략한다.
 
     Args:
         announcement: 메일 컨텐츠로 쓸 ``Announcement`` ORM 인스턴스.
         additional_message: 사용자가 입력한 추가 메시지. 비어 있으면 보낸
             사람 메시지 구획을 생략한다 (메일 본문 빌드 후 저장되지 않음).
         sender_user: 발송자 ``User`` ORM 인스턴스.
-        sender_organization: 발신 조직 ``Organization`` 또는 ``None``.
+        sender_organizations: 발송자가 속한 모든 ``Organization`` 인스턴스 목록.
+            빈 리스트면 조직명 항목을 공란으로 표시한다.
         detail_url: 공고 상세 페이지 절대 URL
             (``build_announcement_detail_url`` 의 반환값).
 
@@ -390,6 +467,9 @@ def build_forward_text_body(
     if budget is not None:
         lines.append(f"예산: {budget}")
 
+    # ── 발신자 정보 표 (메타와 요약 사이에 배치) ─────────────────
+    lines.extend(["", _build_sender_info_text_block(sender_user, sender_organizations)])
+
     # ── 공고 요약 (본문이 없으면 구획 생략) ──────────────────────
     summary = _extract_summary(announcement)
     if summary is not None:
@@ -401,6 +481,8 @@ def build_forward_text_body(
         lines.extend(["", "[보낸 사람 메시지]", message_text])
 
     # ── 상세 링크 + footer ───────────────────────────────────────
+    # footer 는 sender_organizations 첫 번째 항목을 대표 조직으로 표시한다.
+    footer_org = sender_organizations[0] if sender_organizations else None
     lines.extend(
         [
             "",
@@ -408,7 +490,7 @@ def build_forward_text_body(
             f"공고 상세 보기: {detail_url}",
             "",
             "이 메일은 정부사업 모니터링 시스템에서 발송되었습니다.",
-            f"보낸 사람: {_format_sender_display(sender_user, sender_organization)}",
+            f"보낸 사람: {_format_sender_display(sender_user, footer_org)}",
             "회신은 발송자에게 직접 부탁드립니다.",
         ]
     )
@@ -421,7 +503,7 @@ def build_forward_html_body(
     announcement: Any,
     additional_message: str | None,
     sender_user: Any,
-    sender_organization: Any,
+    sender_organizations: list[Any],
     detail_url: str,
 ) -> str:
     """포워딩 메일의 text/html 본문을 만든다.
@@ -432,8 +514,9 @@ def build_forward_html_body(
     (텍스트 #333 / 메타 박스 #f5f5f5 / CTA 버튼 #444 / 보조 텍스트 #888·#999).
 
     본문 요소(위→아래): 공고 제목(h2, 상세 링크) → 메타 박스(발주기관/상태/
-    마감일/예산) → 공고 요약 → 보낸 사람 메시지 인용 박스 → CTA 버튼 →
-    footer. 예산·요약·보낸 사람 메시지는 값이 없으면 해당 요소를 생략한다.
+    마감일/예산) → 발신자 정보 박스(사용자 ID/조직명/이메일) → 공고 요약
+    → 보낸 사람 메시지 인용 박스 → CTA 버튼 → footer. 예산·요약·보낸 사람
+    메시지는 값이 없으면 해당 요소를 생략한다.
 
     모든 외부 입력(공고 제목·기관·요약·추가 메시지·발송자 정보·URL)은
     ``html.escape`` 로 이스케이프해 HTML injection 을 막는다.
@@ -443,7 +526,8 @@ def build_forward_html_body(
         additional_message: 사용자가 입력한 추가 메시지. 비어 있으면 인용
             박스를 생략한다.
         sender_user: 발송자 ``User`` ORM 인스턴스.
-        sender_organization: 발신 조직 ``Organization`` 또는 ``None``.
+        sender_organizations: 발송자가 속한 모든 ``Organization`` 인스턴스 목록.
+            빈 리스트면 조직명 셀을 공란으로 표시한다.
         detail_url: 공고 상세 페이지 절대 URL.
 
     Returns:
@@ -468,6 +552,9 @@ def build_forward_html_body(
     if budget is not None:
         meta_rows.append(_html_meta_row("예산", html.escape(budget)))
 
+    # ── 발신자 정보 박스 ────────────────────────────────────────
+    sender_info_html = _build_sender_info_html_block(sender_user, sender_organizations)
+
     # ── 공고 요약 (본문이 없으면 빈 문자열 → 섹션 생략) ──────────
     summary = _extract_summary(announcement)
     summary_html = ""
@@ -490,8 +577,10 @@ def build_forward_html_body(
             f"{html.escape(message_text)}</div>"
         )
 
+    # footer 는 sender_organizations 첫 번째 항목을 대표 조직으로 표시한다.
+    footer_org = sender_organizations[0] if sender_organizations else None
     safe_sender = html.escape(
-        _format_sender_display(sender_user, sender_organization)
+        _format_sender_display(sender_user, footer_org)
     )
 
     # design note §8 mockup 그대로. 전부 인라인 style, 외부 리소스 없음.
@@ -513,17 +602,19 @@ def build_forward_html_body(
         'padding:12px 16px;font-size:14px;border-collapse:collapse;">'
         f"{''.join(meta_rows)}"
         "</table>"
-        # 3. 공고 요약 (없으면 빈 문자열)
+        # 3. 발신자 정보 박스
+        f"{sender_info_html}"
+        # 4. 공고 요약 (없으면 빈 문자열)
         f"{summary_html}"
-        # 4. 보낸 사람 메시지 (없으면 빈 문자열)
+        # 5. 보낸 사람 메시지 (없으면 빈 문자열)
         f"{message_html}"
-        # 5. CTA 버튼
+        # 6. CTA 버튼
         '<div style="margin:24px 0;">'
         f'<a href="{safe_detail_url}" '
         'style="display:inline-block;background:#444;color:#fff;'
         'padding:10px 20px;border-radius:6px;text-decoration:none;'
         'font-size:14px;">공고 상세 보기</a></div>'
-        # 6. footer
+        # 7. footer
         '<hr style="border:none;border-top:1px solid #e0e0e0;margin:24px 0;">'
         '<div style="font-size:12px;color:#999;">'
         f"보낸 사람: {safe_sender}<br>"
