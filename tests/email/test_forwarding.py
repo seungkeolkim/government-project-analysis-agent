@@ -54,6 +54,8 @@ from app.email.constants import RELATED_KIND_FORWARD
 from app.email.forwarding import ForwardRequest, forward_announcement
 from app.email.message_builder import (
     build_default_forward_subject,
+    build_forward_html_body,
+    build_forward_text_body,
     build_multipart_message,
 )
 from app.email.transport.base import EmailTransport
@@ -630,3 +632,129 @@ def test_forward_announcement_sender_org_not_member_raises_permission_error(
     # 권한 검증은 forward_log INSERT 이전 단계 → row 가 생성되지 않아야 함.
     forward_logs = db_session.execute(select(EmailForwardLog)).scalars().all()
     assert forward_logs == []
+
+
+# ──────────────────────────────────────────────────────────────
+# 8. 발신자 정보 표 — text/plain 본문에 포함되는지
+# ──────────────────────────────────────────────────────────────
+
+
+class _FakeAnnouncement:
+    """body builder 테스트용 최소 Announcement 더블."""
+
+    def __init__(self) -> None:
+        """기본값으로 Announcement 더블을 초기화한다."""
+        self.title = "테스트 공고"
+        self.agency = "테스트 기관"
+        self.status = None
+        self.deadline_at = None
+        self.raw_metadata = {}
+        self.detail_text = None
+
+
+class _FakeUser:
+    """body builder 테스트용 최소 User 더블."""
+
+    def __init__(self, username: str, email: str | None) -> None:
+        """주어진 username/email 로 User 더블을 초기화한다."""
+        self.username = username
+        self.email = email
+
+
+class _FakeOrg:
+    """body builder 테스트용 최소 Organization 더블."""
+
+    def __init__(self, name: str) -> None:
+        """주어진 이름으로 Organization 더블을 초기화한다."""
+        self.name = name
+
+
+def test_build_forward_text_body_includes_sender_info_with_multiple_orgs() -> None:
+    """조직이 여러 개일 때 plain text 본문에 발신자 정보 표가 포함된다.
+
+    검증 포인트:
+        - ``[발신자 정보]`` 헤더가 포함됨.
+        - 사용자 ID(username)가 표 안에 포함됨.
+        - 두 조직명이 콤마 구분으로 포함됨.
+        - 이메일이 포함됨.
+        - 발신자 정보 표는 공고 메타 블록과 요약 사이에 위치함
+          (``[공고 요약]`` 보다 앞에 등장).
+    """
+    user = _FakeUser(username="alice", email="alice@example.com")
+    orgs = [_FakeOrg("팀A"), _FakeOrg("팀B")]
+    announcement = _FakeAnnouncement()
+
+    body = build_forward_text_body(
+        announcement=announcement,
+        additional_message=None,
+        sender_user=user,
+        sender_organizations=orgs,
+        detail_url="https://example.com/announcements/1",
+    )
+
+    assert "[발신자 정보]" in body
+    assert "- 사용자 ID: alice" in body
+    assert "팀A, 팀B" in body
+    assert "- 이메일: alice@example.com" in body
+
+    # 발신자 정보 블록이 공고 메타 뒤, 요약보다 앞에 오는지 순서 확인.
+    sender_info_pos = body.index("[발신자 정보]")
+    agency_pos = body.index("발주기관: 테스트 기관")
+    assert agency_pos < sender_info_pos, "발신자 정보는 공고 메타 뒤에 와야 한다"
+
+
+def test_build_forward_text_body_sender_info_empty_org_and_email() -> None:
+    """조직 없고 이메일 없는 사용자는 발신자 정보 항목이 공란으로 표시된다.
+
+    검증 포인트:
+        - ``- 조직명: `` 다음이 빈 값 (공란).
+        - ``- 이메일: `` 다음이 빈 값 (공란).
+    """
+    user = _FakeUser(username="bob", email=None)
+    body = build_forward_text_body(
+        announcement=_FakeAnnouncement(),
+        additional_message=None,
+        sender_user=user,
+        sender_organizations=[],
+        detail_url="https://example.com/announcements/2",
+    )
+
+    assert "- 조직명: \n" in body or body.endswith("- 조직명: ")
+    assert "- 이메일: \n" in body or "- 이메일: \n" in body
+
+
+def test_build_forward_html_body_includes_sender_info_block() -> None:
+    """HTML 본문에 발신자 정보 박스가 포함된다.
+
+    검증 포인트:
+        - ``발신자 정보`` 라벨이 HTML 안에 포함됨.
+        - 사용자 ID 값이 포함됨.
+        - 조직명 값이 포함됨 (이스케이프 후라도).
+        - 이메일 값이 포함됨.
+        - HTML injection 방어: ``<script>`` 태그가 이스케이프됨.
+    """
+    user = _FakeUser(username="charlie", email="charlie@corp.com")
+    orgs = [_FakeOrg("개발팀")]
+    body = build_forward_html_body(
+        announcement=_FakeAnnouncement(),
+        additional_message=None,
+        sender_user=user,
+        sender_organizations=orgs,
+        detail_url="https://example.com/announcements/3",
+    )
+
+    assert "발신자 정보" in body
+    assert "charlie" in body
+    assert "개발팀" in body
+    assert "charlie@corp.com" in body
+
+    # XSS 방어 검증 — 조직명에 스크립트를 넣어도 그대로 렌더되지 않아야 한다.
+    xss_org = _FakeOrg("<script>alert(1)</script>")
+    xss_body = build_forward_html_body(
+        announcement=_FakeAnnouncement(),
+        additional_message=None,
+        sender_user=user,
+        sender_organizations=[xss_org],
+        detail_url="https://example.com/announcements/3",
+    )
+    assert "<script>" not in xss_body
