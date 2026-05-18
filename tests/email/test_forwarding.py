@@ -758,3 +758,69 @@ def test_build_forward_html_body_includes_sender_info_block() -> None:
         detail_url="https://example.com/announcements/3",
     )
     assert "<script>" not in xss_body
+
+
+# ──────────────────────────────────────────────────────────────
+# 9. forward_announcement — 선택된 단일 조직만 메일 본문에 노출 (task 00113)
+# ──────────────────────────────────────────────────────────────
+
+
+def test_forward_announcement_only_selected_org_in_body(db_session: Session) -> None:
+    """발신 조직 선택 시 선택한 조직명만 메일 본문에 노출되고 다른 소속 조직명은 나타나지 않는다.
+
+    검증 포인트 (task 00113):
+        - 발송자가 2개 조직(org_selected, org_other)에 소속된 상태에서
+          org_selected 를 sender_organization_id 로 지정해 forward_announcement 를 호출한다.
+        - 발송된 메일의 text/plain 본문에 org_selected.name 이 포함된다.
+        - 발송된 메일의 text/plain 본문에 org_other.name 이 포함되지 않는다.
+    """
+    project = _make_canonical_project(db_session, key_suffix="single-org")
+    _make_announcement(
+        db_session,
+        canonical_project=project,
+        source_announcement_id="IRIS-SINGLE-ORG-1",
+    )
+    sender = _make_user(db_session, username="fwd_sender_two_orgs")
+    org_selected = _make_organization(db_session, name="선택된조직AA")
+    org_other = _make_organization(db_session, name="다른소속조직BB")
+    _add_membership(db_session, user=sender, organization=org_selected)
+    _add_membership(db_session, user=sender, organization=org_other)
+    db_session.commit()
+
+    # 발송된 EmailMessage 를 캡처하기 위한 인라인 transport
+    captured_messages: list[EmailMessage] = []
+
+    class _CapturingTransport(EmailTransport):
+        """발송된 메일 메시지를 캡처해 검증에 쓰는 테스트용 transport."""
+
+        def send(self, message: EmailMessage) -> None:
+            """메시지를 캡처하고 성공으로 처리한다."""
+            captured_messages.append(message)
+
+    request = ForwardRequest(
+        canonical_project_id=project.id,
+        sender_user_id=sender.id,
+        sender_organization_id=org_selected.id,
+        recipients=["recipient@example.com"],
+        subject="단일 조직 노출 테스트",
+        additional_message=None,
+    )
+
+    result = forward_announcement(
+        request,
+        session=db_session,
+        transport=_CapturingTransport(),
+        max_retry_count=0,
+    )
+
+    assert result.status == EmailForwardStatus.SUCCESS
+    assert len(captured_messages) == 1
+
+    # text/plain 파트 본문 추출
+    parts = list(captured_messages[0].iter_parts())
+    plain_content = parts[0].get_content()
+
+    # 선택된 조직명은 본문에 포함되어야 한다
+    assert "선택된조직AA" in plain_content, "선택한 조직명이 메일 본문에 없습니다"
+    # 다른 소속 조직명은 본문에 나타나지 않아야 한다
+    assert "다른소속조직BB" not in plain_content, "선택하지 않은 조직명이 메일 본문에 노출되었습니다"

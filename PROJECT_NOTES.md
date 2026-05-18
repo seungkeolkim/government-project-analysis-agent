@@ -74,7 +74,7 @@ FastAPI + Jinja2 (`templates/`) + 로컬 정적 리소스 (`static/`, 외부 CDN
 - `app/email/transport/factory.py` — `build_transport(session)`. `SystemSetting["email.transport.type"]` 값(`m365_oauth`)에 따라 구현체를 인스턴스화. 향후 옵션 추가 시 `constants.ALLOWED_EMAIL_TRANSPORT_TYPES`에 값 추가 + `elif` 분기 1줄로 확장 완결.
 - `app/email/config.py` — `M365OAuthSmtpConfig` frozen dataclass + `load_m365_oauth_config(session)`. `SystemSetting` 5개 키(tenant_id/client_id/client_secret/sender_address/from_display_name)를 읽어 반환. 미설정 키는 `constants.DEFAULT_*` fallback.
 - `app/email/message_builder.py` — 두 종류의 빌더를 노출한다. ① `build_plain_text_message(to, subject, body)` — 기존 plain text 전용 (Phase A-1 테스트 발송용). ② `build_multipart_message(recipient, subject, text_body, html_body, sender_address, sender_display_name)` — text/plain + text/html 두 alternative 를 가진 multipart/alternative EmailMessage (Phase A-2 Part 2 공고 포워딩용). 부속 헬퍼: `build_default_forward_subject`, `build_forward_text_body(sender_organizations: list[Any], ...)`, `build_forward_html_body(sender_organizations: list[Any], ...)`, `build_announcement_detail_url`. `_build_sender_info_text_block` / `_build_sender_info_html_block` 가 발신자 정보(사용자 ID·조직명 목록·이메일) 표를 각각 plain text 줄 블록과 인라인 CSS HTML 표로 생성해 본문 메타 박스 바로 아래에 삽입한다.
-- `app/email/forwarding.py` — `forward_announcement(canonical_id, request, session, transport, max_retry)` + 조회 헬퍼. 트랜잭션 3단계: ① `EmailForwardLog` 선(先) commit → ② 수신자별 `send_with_retry` 루프 → ③ success/failure 집계 후 최종 status commit. 수신자 1명씩 개별 발송(프라이버시 + per-recipient 추적). 발신자 소속 조직은 `user_organizations` 조인으로 **전체 목록**을 로드(`sender_organizations: list[Organization]`) 해 message_builder 에 전달 — 선택한 단일 조직(request.sender_organization_id) 이 아니라 사용자의 모든 소속 조직을 본문 발신자 표에 표시하기 위함. 발신 모듈: `app/email/message_builder` 에 본문 빌드 위임, `app/email/sender.send_with_retry` 에 재시도·이력 위임.
+- `app/email/forwarding.py` — `forward_announcement(canonical_id, request, session, transport, max_retry)` + 조회 헬퍼. 트랜잭션 3단계: ① `EmailForwardLog` 선(先) commit → ② 수신자별 `send_with_retry` 루프 → ③ success/failure 집계 후 최종 status commit. 수신자 1명씩 개별 발송(프라이버시 + per-recipient 추적). 발신자 정보 표에는 사용자가 선택한 단일 발신 조직(`sender_organization_id`)만 노출 — 조직 미선택 시 공란. 발신 모듈: `app/email/message_builder` 에 본문 빌드 위임, `app/email/sender.send_with_retry` 에 재시도·이력 위임.
 - `app/email/sender.py` — `send_with_retry(transport, message, session, max_retry_count)`. 1차 시도 + 최대 `max_retry_count`회 재시도, 2초 flat backoff. `EmailSendRun` row 생성·`attempt_count` 증가·`error_message` 업데이트·`session.commit()` 직접 수행.
 - `app/email/constants.py` — `SystemSetting` 키 상수(`email.transport.type`, `email.m365.*` 5개, `email.from_display_name`, `email.max_retry_count`, `app.public_base_url`) + 기본값 상수 + `ALLOWED_EMAIL_TRANSPORT_TYPES` frozenset. `RELATED_KIND_FORWARD="forward"` / `RELATED_KIND_TEST_SEND="test_send"` 는 `EmailSendRun.related_kind` 컬럼 값 도메인 상수. `SETTING_KEY_APP_PUBLIC_BASE_URL` 은 메일 본문 URL prefix — email.* 네임스페이스 밖이지만 이메일 본문 전용 용도라 동일 모듈에 배치.
 
@@ -310,7 +310,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - **`app.public_base_url` SystemSetting 으로 메일 본문 URL 관리**: 메일 본문에 공고 상세 URL(`{base_url}/announcements/{id}`)을 삽입할 때, 운영 환경마다 다른 서버 주소(예: `http://team-server.lan:8000`)를 `SystemSetting["app.public_base_url"]`로 관리. row 없으면 `http://localhost:8000` fallback (seed migration 없음). 관리자 이메일 설정 페이지 「시스템 접근 주소」 필드에서 변경 가능(00111). 입력 값은 http:// 또는 https:// 스킴 필수 — Pydantic validator 가 PUT 요청 시 422 로 거부.
 - **포워딩 트랜잭션 3단계**: (1) `EmailForwardLog` 선(先) commit으로 "발송 시도 기록" 확보 → (2) 수신자별 `send_with_retry` 루프(각각 session.commit) → (3) 집계 후 최종 status/completed_at commit. `send_with_retry`가 호출자 session을 직접 commit하므로 미커밋 변경을 최소화하는 3단계 구조.
 - **포워딩 canonical 단위, 발송은 최신 announcement 1건 기준**: 모달이 canonical_id를 받아 is_current=True·최신 버전 announcement를 선택해 메일 본문(제목·기관·마감일·링크)을 구성. 동일 과제의 여러 소스·버전 중 "대표 1건"을 자동 선택.
-- **메일 본문에 발신자 정보 표 삽입**: 수신자가 누가 보냈는지 알 수 있도록 사용자 ID(필수)·조직명 전체(없으면 공란, 여러 개면 콤마 구분)·이메일(없으면 공란) 3행 표를 공고 메타 박스 바로 아래에 삽입. `sender_organization` 단수 파라미터를 `sender_organizations: list` 복수로 교체해 사용자의 모든 소속 조직을 노출.
+- **메일 본문에 발신자 정보 표 삽입**: 수신자가 누가 보냈는지 알 수 있도록 사용자 ID(필수)·발신 조직명(없으면 공란)·이메일(없으면 공란) 3행 표를 공고 메타 박스 바로 아래에 삽입. 발신 조직은 사용자가 선택한 단일 조직만 표시 (조직 미선택 시 공란). `message_builder` 는 `sender_organizations: list[Organization]` 시그니처를 유지하며, 호출자(`forwarding.py`)가 `[sender_organization]` 단건 또는 `[]` 를 전달.
 - **목록 페이지 전달 버튼**: `/announcement` 목록 테이블에 "전달" 컬럼을 추가하고 ✉️ 버튼을 각 행에 노출. 로그인 + canonical_id 있을 때만 활성화 — 클릭 시 상세 페이지의 '메일로 보내기' 모달(`forward-open-btn` 이벤트)을 동일하게 열어 목록에서 바로 포워딩 가능. 비로그인 또는 canonical 없음이면 `disabled` 상태로 표시. colspan 비로그인 7→8, 로그인 8→9 로 증가.
 
 ### UI / UX
@@ -323,6 +323,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
+- [00113] 포워딩 발신자 표 단일 조직 표시 + 무소속 안내 문구 수정 — `forwarding.py` 가 모든 소속 조직 대신 선택된 조직 1건만 발신자 표에 노출하도록 변경, 무소속 안내 메시지 \"개인 자격으로 발송됩니다\" → \"조직 정보 없이 발송됩니다\" 로 수정 — 2026-05-18
 - [00112] 포워딩 메일 발신자 정보 표 삽입 + 목록 전달 버튼 추가 — `message_builder.py` `sender_organizations: list` 로 시그니처 변경, 메타 박스 아래 3행 발신자 표(ID·조직명·이메일) 삽입; `/announcement` 목록에 "전달" 컬럼 + ✉️ 버튼(로그인+canonical 시 활성) — 2026-05-18
 - [00111] 공고 포워딩 메일 '공고 상세보기' 링크 Base URL 설정 기능 추가 — 관리자 이메일 설정 페이지에 「시스템 접근 주소」 필드 추가, `/api/admin/email/settings` GET/PUT 에 `app.public_base_url` 포함, http/https 스킴 Pydantic 검증 — 2026-05-18
 - [00110] M365 OAuth SMTP STARTTLS 후 EHLO 재전송 버그 수정 — `smtplib.starttls()` 는 EHLO 를 자동 재전송하지 않아 M365 가 `503 5.5.2 Send hello first` 를 반환하는 문제를 `smtp.ehlo()` 명시적 호출 추가로 해결 — 2026-05-15
@@ -333,4 +334,3 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - [00101] 공지사항/건의사항 게시판 링크를 사이트 헤더 최상단으로 이동 — `base.html` 네비게이션 순서 조정, `style.css` 보더·여백 CSS 수정으로 정부과제 수집 섹션보다 위에 배치 — 2026-05-12
 - [00100] 공고 목록 진행상태 pill 컨테이너 세로 배치 — `.pg-wrap` flex-direction을 row→column으로 변경, 관심/검토/진행/종료 배지가 각 1줄씩 표시 — 2026-05-11
 - [00099] 목록 expand 사유 다중행 표시 CSS 수정 — progress.css expand 영역에 `white-space: pre-wrap; overflow-wrap: anywhere` 추가, 관심/검토/진행/종료 모든 상태에 동일 적용 — 2026-05-11
-- [00098] 진행상태 종료 mutex 확장 + 목록 셀 pill UI 개선 — 진행·종료 통합 선점 제약 적용, ProgressSummary.done_org 추가, 셀 표시를 pill 4종(관심=노란·검토=연두·진행=파랑·종료=회색)으로 교체 + 진행/종료 시 팀명 표시 — 2026-05-11
