@@ -77,7 +77,7 @@ FastAPI + Jinja2 (`templates/`) + 로컬 정적 리소스 (`static/`, 외부 CDN
 - `app/email/forwarding.py` — `forward_announcement(canonical_id, request, session, transport, max_retry)` + 조회 헬퍼. 트랜잭션 3단계: ① `EmailForwardLog` 선(先) commit → ② 수신자별 `send_with_retry` 루프 → ③ success/failure 집계 후 최종 status commit. 수신자 1명씩 개별 발송(프라이버시 + per-recipient 추적). 발신자 정보 표에는 사용자가 선택한 단일 발신 조직(`sender_organization_id`)만 노출 — 조직 미선택 시 공란. 발신 모듈: `app/email/message_builder` 에 본문 빌드 위임, `app/email/sender.send_with_retry` 에 재시도·이력 위임.
 - `app/email/sender.py` — `send_with_retry(transport, message, session, max_retry_count)`. 1차 시도 + 최대 `max_retry_count`회 재시도, 2초 flat backoff. `EmailSendRun` row 생성·`attempt_count` 증가·`error_message` 업데이트·`session.commit()` 직접 수행.
 - `app/email/constants.py` — `SystemSetting` 키 상수(`email.transport.type`, `email.m365.*` 5개, `email.from_display_name`, `email.max_retry_count`, `email.send_enabled`, `app.public_base_url`) + 기본값 상수 + `ALLOWED_EMAIL_TRANSPORT_TYPES` frozenset. `RELATED_KIND_FORWARD="forward"` / `RELATED_KIND_TEST_SEND="test_send"` 는 `EmailSendRun.related_kind` 컬럼 값 도메인 상수. `SETTING_KEY_APP_PUBLIC_BASE_URL` 은 메일 본문 URL prefix — email.* 네임스페이스 밖이지만 이메일 본문 전용 용도라 동일 모듈에 배치.
-- `app/email/gate.py` — `is_email_sending_enabled(session) -> bool`. `email.send_enabled` SystemSetting 을 읽어 메일 전송 기능 활성화 여부를 반환한다. row 없거나 빈 값이면 `DEFAULT_EMAIL_SEND_ENABLED(=False)` 로 fallback — 최초 기동 시 의도적 off 보장. `EmailSendingDisabledError` 예외를 노출해 라우터가 503 으로 변환. 포워딩(`forwarding.py`)·테스트 발송(`admin_email.py`)이 이 모듈을 통해 발송 전 게이트 확인.
+- `app/email/gate.py` — `is_email_sending_enabled(session) -> bool`. `email.send_enabled` SystemSetting 을 읽어 메일 전송 기능 활성화 여부를 반환한다. row 없거나 빈 값이면 `DEFAULT_EMAIL_SEND_ENABLED(=False)` 로 fallback — 최초 기동 시 의도적 off 보장. `EmailSendingDisabledError` 예외를 노출해 라우터가 503 으로 변환. 포워딩(`forwarding.py`)이 이 모듈을 통해 발송 전 게이트 확인. 테스트 발송(`admin_email.py POST /admin/email/test-send`)은 게이트에서 제외 — 메일 설정 검증·디버깅 목적이므로 `send_enabled` 토글과 무관하게 항상 동작.
 
 ### IRIS 목록 API 구조
 
@@ -181,6 +181,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
   - `tests/test_canonical.py` — canonical 키 계산(키 포맷·cross-source 유지·false-positive 분리·fuzzy fallback parametrize).
   - `tests/e2e/` — Playwright 기반. 포트 8000(운영) 충돌 방지로 8001 격리 서버. `test_dashboard_e2e.py`, `test_admin_organizations_e2e.py`, `test_admin_suggestion_delete_e2e.py`. 호스트에 chromium 의존 라이브러리·Playwright 브라우저 캐시가 없으면 `conftest.py` 가 `pytest.skip`. `e2e-tests/` TypeScript Playwright 테스트도 병행.
   - conftest 패턴: 인메모리 SQLite + 가짜 User fixture. settings 류 통합 테스트는 TestClient + 별도 `db_verify` 세션으로 commit 결과를 재조회하는 패턴.
+- **disabled 버튼 툴팁**: 일부 브라우저에서 `disabled` 속성이 있는 버튼에는 `title` tooltip 이 표시되지 않는다. 비활성 버튼에 hover 안내 문구가 필요한 경우 `<span class="forward-btn-disabled-wrap" title="...">` 로 감싸고 `cursor: not-allowed` CSS 를 적용하는 패턴을 사용한다 (목록·상세 페이지의 메일 발송 버튼 참고).
 - **커밋 메시지**: `[{task_id}][tg:{requester}] {subtask_id}: {요약}` 형식.
 - **장기 문서 컨벤션 — 현재 상태 중심**: `PROJECT_NOTES.md` 와 `README.USER.md` 는 모두 **현재 상태 중심**으로 유지한다. task ID 인용·시간순 append·"최근 변경 이력" 류 일지 섹션 금지 — 장기적으로 의미 있는 결정·컨벤션·아키텍처 변화만 본문 해당 섹션에 병합한다. `README.USER.md` 는 기능/상황별 단위(시작하기·스크래퍼 실행·DB 관리·트러블슈팅 등)로 구조화하고, 운영자에게 의미 없는 task 출처 메타는 제거한다. 일회성 verification·audit 산출물은 `docs/` 에 영속 저장하지 않고 PR 설명·커밋 메시지로 대체.
 - **데이터 / 비밀**: `.env` 와 `sources.yaml` 은 커밋 금지 (`.gitignore`). `.env.example`·`sources.yaml.template` 만 관리. `sources.yaml` 초기 생성은 `sh ./bootstrap_sources.sh`. 두 템플릿 파일은 **기능별 번호 섹션**으로 구성하고 `README.USER.md` 의 초기 설치 흐름과 순서를 맞춘다 — task 출처·히스토리성 주석은 제거하고 실제 사용자 관점에서 필요한 정보만 유지한다.
@@ -325,7 +326,8 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
-- [00115] 메일 전송 기능 활성화 토글 + 발송 게이트 추가 — `email.send_enabled` SystemSetting(기본 off) + `app/email/gate.py` 게이트 신설, 포워딩·테스트 발송 경로에 일괄 적용; 관리자 이메일 탭에 「메일 발송 설정」 섹션 + 활성화 토글 UI 추가 — 2026-05-18
+- [00116] 메일 발송 비활성화 시 disabled 버튼 툴팁 추가 + 테스트 발송 게이트 제외 — `send_enabled=False` 시 목록·상세 페이지 발송 버튼을 `<span title="...">` 으로 감싸 브라우저 호환 툴팁 표시; 테스트 발송 엔드포인트(`POST /admin/email/test-send`)는 `is_email_sending_enabled` 게이트에서 제외 — 2026-05-18
+- [00115] 메일 전송 기능 활성화 토글 + 발송 게이트 추가 — `email.send_enabled` SystemSetting(기본 off) + `app/email/gate.py` 게이트 신설, 포워딩 경로에 적용; 관리자 이메일 탭에 「메일 발송 설정」 섹션 + 활성화 토글 UI 추가 — 2026-05-18
 - [00113] 포워딩 발신자 표 단일 조직 표시 + 무소속 안내 문구 수정 — `forwarding.py` 가 모든 소속 조직 대신 선택된 조직 1건만 발신자 표에 노출하도록 변경, 무소속 안내 메시지 \"개인 자격으로 발송됩니다\" → \"조직 정보 없이 발송됩니다\" 로 수정 — 2026-05-18
 - [00112] 포워딩 메일 발신자 정보 표 삽입 + 목록 전달 버튼 추가 — `message_builder.py` `sender_organizations: list` 로 시그니처 변경, 메타 박스 아래 3행 발신자 표(ID·조직명·이메일) 삽입; `/announcement` 목록에 "전달" 컬럼 + ✉️ 버튼(로그인+canonical 시 활성) — 2026-05-18
 - [00111] 공고 포워딩 메일 '공고 상세보기' 링크 Base URL 설정 기능 추가 — 관리자 이메일 설정 페이지에 「시스템 접근 주소」 필드 추가, `/api/admin/email/settings` GET/PUT 에 `app.public_base_url` 포함, http/https 스킴 Pydantic 검증 — 2026-05-18
@@ -335,4 +337,3 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - [00105] `email-validator` 의존성 누락 수정 — pydantic `EmailStr` 사용 시 필수인 `email-validator>=2.0,<3.0` 패키지가 00104에서 빠져 기동 오류 발생, pyproject.toml 에 추가하여 복구 — 2026-05-14
 - [00104] 메일 발송 인프라 + 관리자 UI 구현 (Phase A-1) — `app/email/` 패키지(Transport ABC·M365 OAuth SMTP·재시도 sender·factory), `email_send_runs` Alembic migration, admin_email API 4종, 관리자 이메일 탭 Frontend (설정 form·테스트 발송·발송 이력) — 2026-05-13
 - [00101] 공지사항/건의사항 게시판 링크를 사이트 헤더 최상단으로 이동 — `base.html` 네비게이션 순서 조정, `style.css` 보더·여백 CSS 수정으로 정부과제 수집 섹션보다 위에 배치 — 2026-05-12
-- [00100] 공고 목록 진행상태 pill 컨테이너 세로 배치 — `.pg-wrap` flex-direction을 row→column으로 변경, 관심/검토/진행/종료 배지가 각 1줄씩 표시 — 2026-05-11
