@@ -410,3 +410,51 @@ def test_non_admin_403(client: TestClient) -> None:
     assert response.status_code == 403, (
         f"GET /send-runs non-admin 응답 코드 {response.status_code}"
     )
+
+
+# ──────────────────────────────────────────────────────────────
+# 8. test_test_send_not_blocked_when_send_disabled
+# ──────────────────────────────────────────────────────────────
+
+
+def test_test_send_not_blocked_when_send_disabled(
+    admin_client: TestClient,
+) -> None:
+    """send_enabled=False 상태에서도 POST /test-send 가 503 을 반환하지 않는다.
+
+    task 00116: 테스트 발송은 메일 전송 기능 활성화 토글과 무관하게 항상 동작해야 한다.
+    send_enabled 기본값(False) 상태에서 호출 시 503 대신 200 (발송 성공) 이어야 한다.
+    transport 실제 발송은 mock 으로 우회한다 (테스트 환경에서 M365 자격증명 없음).
+    """
+    from unittest.mock import MagicMock, patch
+
+    # send_enabled 는 기본값(False) — 별도 설정 없이 그대로 진행.
+    fake_run = MagicMock()
+    fake_run.id = 999
+    fake_run.attempt_count = 1
+
+    with patch(
+        "app.web.routes.admin_email.build_transport_from_settings"
+    ) as mock_transport_factory, patch(
+        "app.web.routes.admin_email.send_with_retry", return_value=fake_run
+    ):
+        mock_transport_factory.return_value = MagicMock()
+
+        response = admin_client.post(
+            "/api/admin/email/test-send",
+            json={
+                "recipient": "test@example.com",
+                "subject": "테스트 발송",
+                "body": "본문",
+            },
+        )
+
+    assert response.status_code != 503, (
+        "send_enabled=False 상태에서도 /test-send 가 503 을 반환해서는 안 됩니다."
+    )
+    assert response.status_code == 200, (
+        f"transport mock 성공 시 200 이어야 함; got {response.status_code}: {response.text}"
+    )
+    data = response.json()
+    assert data["success"] is True
+    assert data["send_run_id"] == 999

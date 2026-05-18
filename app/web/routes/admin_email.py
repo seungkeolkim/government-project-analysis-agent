@@ -480,21 +480,6 @@ def post_email_test_send(
     )
 
     with session_scope() as session:
-        # 0. 메일 전송 기능 활성화 확인 — off 이면 503 으로 즉시 차단.
-        #    EmailSendRun row 가 INSERT 되기 전에 확인해 이력이 남지 않도록 한다.
-        if not is_email_sending_enabled(session):
-            logger.warning(
-                "테스트 발송 거부 — 메일 전송 기능 비활성화: user_id={}",
-                current_user.id,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=(
-                    "메일 전송 기능이 비활성화되어 있습니다. "
-                    "시스템 관리 > 메일 발송 탭에서 활성화해 주세요."
-                ),
-            )
-
         # 1. max_retry_count 읽기 (SystemSetting + fallback)
         max_retry_count = _read_max_retry_count(session)
 
