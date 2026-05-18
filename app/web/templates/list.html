@@ -281,7 +281,7 @@
                     ) }}
                     {% else %}-{% endif %}
                 </td>
-                {# task 00112 — 전달 셀: 로그인+canonical 있으면 활성 ✉️, 그 외 disabled. #}
+                {# task 00112/00115 — 전달 셀: 로그인+canonical+메일활성화 시 활성 ✉️, 그 외 disabled. #}
                 <td class="col-forward">
                     <button type="button"
                             class="forward-open-btn col-forward__btn"
@@ -291,7 +291,12 @@
                             data-announcement-agency="{{ gr.representative.agency or '' }}"
                             data-announcement-status="{{ gr.representative.status.value }}"
                             data-announcement-deadline="{% if gr.representative.deadline_at %}{{ gr.representative.deadline_at | kst_date }}{% endif %}"
+                            {% if email_send_enabled %}
                             title="메일로 전달"
+                            {% else %}
+                            disabled
+                            title="메일 발송 기능이 비활성화되어 있습니다"
+                            {% endif %}
                             {% else %}
                             disabled
                             title="로그인 후 사용 가능"
@@ -401,7 +406,7 @@
                     ) }}
                     {% else %}-{% endif %}
                 </td>
-                {# task 00112 — 전달 셀: 로그인+canonical 있으면 활성 ✉️, 그 외 disabled. #}
+                {# task 00112/00115 — 전달 셀: 로그인+canonical+메일활성화 시 활성 ✉️, 그 외 disabled. #}
                 <td class="col-forward">
                     <button type="button"
                             class="forward-open-btn col-forward__btn"
@@ -411,7 +416,12 @@
                             data-announcement-agency="{{ ann.agency or '' }}"
                             data-announcement-status="{{ ann.status.value }}"
                             data-announcement-deadline="{% if ann.deadline_at %}{{ ann.deadline_at | kst_date }}{% endif %}"
+                            {% if email_send_enabled %}
                             title="메일로 전달"
+                            {% else %}
+                            disabled
+                            title="메일 발송 기능이 비활성화되어 있습니다"
+                            {% endif %}
                             {% else %}
                             disabled
                             title="로그인 후 사용 가능"

@@ -125,6 +125,7 @@
             return;
         }
 
+        var sendEnabledCheckbox = document.getElementById('email-send-enabled');
         var tenantIdInput = document.getElementById('email-tenant-id');
         var clientIdInput = document.getElementById('email-client-id');
         var clientSecretInput = document.getElementById('email-client-secret');
@@ -137,6 +138,13 @@
 
         // ── 초기 로드 ─────────────────────────────────────────
         loadSettings();
+
+        // ── 메일 전송 기능 활성화 토글 — change 즉시 PUT /settings ──
+        if (sendEnabledCheckbox) {
+            sendEnabledCheckbox.addEventListener('change', function () {
+                saveSendEnabled(sendEnabledCheckbox.checked);
+            });
+        }
 
         // ── [변경] 토글 ──────────────────────────────────────
         clientSecretToggle.addEventListener('click', function () {
@@ -184,6 +192,10 @@
          * @param {object} settings GET / PUT 응답 형식의 EmailSettingsOut.
          */
         function applySettingsToForm(settings) {
+            // 메일 전송 기능 활성화 토글 상태 갱신.
+            if (sendEnabledCheckbox) {
+                sendEnabledCheckbox.checked = !!(settings && settings.send_enabled);
+            }
             var m365 = (settings && settings.m365) || {};
             tenantIdInput.value = m365.tenant_id || '';
             clientIdInput.value = m365.client_id || '';
@@ -257,6 +269,7 @@
             saveButton.disabled = true;
 
             var requestBody = {
+                send_enabled: !!(sendEnabledCheckbox && sendEnabledCheckbox.checked),
                 m365: {
                     tenant_id: tenantIdInput.value.trim(),
                     client_id: clientIdInput.value.trim(),
@@ -303,6 +316,77 @@
                 })
                 .then(function () {
                     saveButton.disabled = false;
+                });
+        }
+
+        /**
+         * 메일 전송 기능 활성화 토글 변경 시 즉시 PUT /settings 로 저장한다.
+         *
+         * 전체 설정 form 값을 수집해 send_enabled 만 교체한 뒤 PUT 한다.
+         * 실패 시 토글 상태를 변경 전 값으로 되돌리고 error flash 를 표시한다.
+         *
+         * @param {boolean} newEnabledValue 저장할 새 활성화 여부.
+         */
+        function saveSendEnabled(newEnabledValue) {
+            clearFlash();
+            if (sendEnabledCheckbox) {
+                sendEnabledCheckbox.disabled = true;
+            }
+
+            var inEditMode =
+                clientSecretToggle.getAttribute('aria-pressed') === 'true';
+
+            var requestBody = {
+                send_enabled: newEnabledValue,
+                m365: {
+                    tenant_id: tenantIdInput.value.trim(),
+                    client_id: clientIdInput.value.trim(),
+                    sender_address: senderAddressInput.value.trim()
+                },
+                from_display_name: fromDisplayNameInput.value.trim(),
+                max_retry_count: parseInt(maxRetryCountInput.value, 10),
+                public_base_url: publicBaseUrlInput.value.trim()
+            };
+
+            // client_secret 은 토글 ON + 입력값이 있을 때만 포함 (기존 saveSettings 와 동일 규칙).
+            if (inEditMode && clientSecretInput.value !== '') {
+                requestBody.m365.client_secret = clientSecretInput.value;
+            }
+
+            fetch(SETTINGS_URL, {
+                method: 'PUT',
+                credentials: 'same-origin',
+                headers: {
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(requestBody)
+            })
+                .then(parseJsonResponse)
+                .then(function (result) {
+                    if (!result.resp.ok) {
+                        throw new Error(
+                            extractErrorMessage(result.resp, result.body)
+                        );
+                    }
+                    applySettingsToForm(result.body || {});
+                    var stateText = newEnabledValue ? '활성화' : '비활성화';
+                    showFlash('success', '메일 전송 기능이 ' + stateText + '되었습니다.');
+                })
+                .catch(function (error) {
+                    // PUT 실패 시 토글을 이전 상태로 복원.
+                    if (sendEnabledCheckbox) {
+                        sendEnabledCheckbox.checked = !newEnabledValue;
+                    }
+                    showFlash(
+                        'error',
+                        '메일 발송 설정 저장 실패: ' + (error.message || error)
+                    );
+                })
+                .then(function () {
+                    if (sendEnabledCheckbox) {
+                        sendEnabledCheckbox.disabled = false;
+                    }
                 });
         }
     }
