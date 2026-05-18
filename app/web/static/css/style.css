@@ -1564,6 +1564,35 @@ body.is-anonymous .announcement-title-link--read {
     overflow: hidden;
 }
 
+/* task 00112 — 전달 컬럼 */
+.col-forward {
+    width: 70px;
+    text-align: center;
+}
+
+/* 전달 버튼: 아이콘만 컴팩트하게 표시 */
+.col-forward__btn {
+    background: none;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 16px;
+    padding: 2px 6px;
+    line-height: 1;
+    color: #374151;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.col-forward__btn:hover:not(:disabled) {
+    background: #f3f4f6;
+    border-color: #9ca3af;
+}
+
+.col-forward__btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
 /* 툴팁 — position: fixed 로 row/셀 overflow 클리핑 탈출 */
 .rj-tooltip {
     display: none;
