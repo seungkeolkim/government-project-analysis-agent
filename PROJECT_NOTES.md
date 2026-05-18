@@ -307,7 +307,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 ### 공고 포워딩 (`app/email/forwarding.py`, Phase A-2 Part 2)
 
 - **수신자 1명씩 개별 발송 (BCC 금지)**: 동보 메일(수신자 전체를 To/BCC 에 묶어 1회 발송) 대신 수신자마다 별도 `EmailMessage` 를 생성·발송. 프라이버시(수신자 목록 비노출) + per-recipient 발송 성공/실패 추적 + `EmailSendRun` row 개별 생성이 이유. 성능 희생이 있으나 수신자 최대 50명 상한으로 허용 범위.
-- **`app.public_base_url` SystemSetting 으로 메일 본문 URL 관리**: 메일 본문에 공고 상세 URL(`{base_url}/announcements/{id}`)을 삽입할 때, 운영 환경마다 다른 서버 주소(예: `http://team-server.lan:8000`)를 `SystemSetting["app.public_base_url"]`로 관리. row 없으면 `http://localhost:8000` fallback (seed migration 없음). 관리자 UI 설정 화면은 Part 2 범위 밖 — 현재는 DB 직접 수정으로 변경.
+- **`app.public_base_url` SystemSetting 으로 메일 본문 URL 관리**: 메일 본문에 공고 상세 URL(`{base_url}/announcements/{id}`)을 삽입할 때, 운영 환경마다 다른 서버 주소(예: `http://team-server.lan:8000`)를 `SystemSetting["app.public_base_url"]`로 관리. row 없으면 `http://localhost:8000` fallback (seed migration 없음). 관리자 이메일 설정 페이지 「시스템 접근 주소」 필드에서 변경 가능(00111). 입력 값은 http:// 또는 https:// 스킴 필수 — Pydantic validator 가 PUT 요청 시 422 로 거부.
 - **포워딩 트랜잭션 3단계**: (1) `EmailForwardLog` 선(先) commit으로 "발송 시도 기록" 확보 → (2) 수신자별 `send_with_retry` 루프(각각 session.commit) → (3) 집계 후 최종 status/completed_at commit. `send_with_retry`가 호출자 session을 직접 commit하므로 미커밋 변경을 최소화하는 3단계 구조.
 - **포워딩 canonical 단위, 발송은 최신 announcement 1건 기준**: 모달이 canonical_id를 받아 is_current=True·최신 버전 announcement를 선택해 메일 본문(제목·기관·마감일·링크)을 구성. 동일 과제의 여러 소스·버전 중 "대표 1건"을 자동 선택.
 
@@ -321,6 +321,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
+- [00111] 공고 포워딩 메일 '공고 상세보기' 링크 Base URL 설정 기능 추가 — 관리자 이메일 설정 페이지에 「시스템 접근 주소」 필드 추가, `/api/admin/email/settings` GET/PUT 에 `app.public_base_url` 포함, http/https 스킴 Pydantic 검증 — 2026-05-18
 - [00110] M365 OAuth SMTP STARTTLS 후 EHLO 재전송 버그 수정 — `smtplib.starttls()` 는 EHLO 를 자동 재전송하지 않아 M365 가 `503 5.5.2 Send hello first` 를 반환하는 문제를 `smtp.ehlo()` 명시적 호출 추가로 해결 — 2026-05-15
 - [00109] Phase A-2 Part 2 공고 포워딩 구현 — `app/email/forwarding.py` 신규(수신자별 개별 발송·트랜잭션 3단계), `message_builder.py` multipart/HTML 확장, `routes/forward.py` API 4종(POST /forward·GET /forward-logs·sends·GET /users/search), 상세 페이지 '메일로 보내기' 버튼 + 수신자 chip 입력 + 발송 이력 섹션 UI — 2026-05-14
 - [00106] Phase A-2 Part 1: `EmailForwardLog` ORM + Alembic migration + 단위 테스트 (`email_forward_logs` 테이블 신설, `EmailForwardStatus` enum) — 2026-05-14
@@ -330,4 +331,3 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - [00100] 공고 목록 진행상태 pill 컨테이너 세로 배치 — `.pg-wrap` flex-direction을 row→column으로 변경, 관심/검토/진행/종료 배지가 각 1줄씩 표시 — 2026-05-11
 - [00099] 목록 expand 사유 다중행 표시 CSS 수정 — progress.css expand 영역에 `white-space: pre-wrap; overflow-wrap: anywhere` 추가, 관심/검토/진행/종료 모든 상태에 동일 적용 — 2026-05-11
 - [00098] 진행상태 종료 mutex 확장 + 목록 셀 pill UI 개선 — 진행·종료 통합 선점 제약 적용, ProgressSummary.done_org 추가, 셀 표시를 pill 4종(관심=노란·검토=연두·진행=파랑·종료=회색)으로 교체 + 진행/종료 시 팀명 표시 — 2026-05-11
-- [00097] 공고 진행 상태(Progress) 기능 구현 — 조직 단위 관심/검토/진행/종료 4단계, 진행 선점 제약(canonical당 1조직, app-level transactional check), 조직 멤버 누구나 수정 권한, 다중 체크박스 필터 + 목록 셀/상세 인라인 섹션 UI — 2026-05-08
