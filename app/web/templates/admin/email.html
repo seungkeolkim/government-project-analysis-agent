@@ -25,6 +25,24 @@
    페이지 진입 직후에는 비어 있다. #}
 <div id="email-flash-area"></div>
 
+{# ── 섹션 0: 메일 발송 설정 ──────────────────────────────────
+   메일 전송 기능 전체 활성화 토글. 최초 기동 시 기본값 off.
+   admin_email.js 의 initSettingsSection 이 GET /settings 로 상태를 채우고,
+   change 이벤트 발생 즉시 PUT /settings 로 저장한다. #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">메일 발송 설정</h3>
+    <p class="admin-state__muted">
+        비활성화 상태에서는 포워딩, daily report 등 모든 메일 발송이 차단됩니다.
+        토글을 변경하면 즉시 저장됩니다.
+    </p>
+    <label class="admin-checkbox admin-schedule__enabled">
+        <input id="email-send-enabled"
+               type="checkbox"
+               name="send_enabled">
+        <span>메일 전송 기능 활성화</span>
+    </label>
+</section>
+
 {# ── 섹션 1: 메일 설정 ──────────────────────────────────────── #}
 <section class="admin-section">
     <h3 class="admin-section__heading">메일 설정</h3>

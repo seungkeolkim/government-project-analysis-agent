@@ -63,6 +63,7 @@ from app.email.constants import (
     SETTING_KEY_EMAIL_FROM_DISPLAY_NAME,
     SETTING_KEY_EMAIL_M365_SENDER_ADDRESS,
 )
+from app.email.gate import EmailSendingDisabledError, is_email_sending_enabled
 from app.email.message_builder import (
     build_announcement_detail_url,
     build_default_forward_subject,
@@ -199,6 +200,16 @@ def forward_announcement(
             발생한 예외는 그대로 전파된다 (이 시점엔 forward_log row 가 아직
             INSERT 되지 않았으므로 정리할 것이 없다).
     """
+    # ── 게이트: 메일 전송 기능 활성화 확인 ───────────────────────
+    # row 가 없거나 "false" 이면 EmailSendingDisabledError 를 raise 해 발송을
+    # 완전히 차단한다. EmailForwardLog row 가 INSERT 되기 전에 확인하므로
+    # 차단 시 DB 에 어떤 이력도 남지 않는다.
+    if not is_email_sending_enabled(session):
+        raise EmailSendingDisabledError(
+            "메일 전송 기능이 비활성화되어 있습니다. "
+            "시스템 관리 > 메일 발송 탭에서 활성화해 주세요."
+        )
+
     # ── 준비 1: 빈 수신자 방어 ────────────────────────────────────
     if not request.recipients:
         raise ValueError("발송 대상자가 없습니다.")

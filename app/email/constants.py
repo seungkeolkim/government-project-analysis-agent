@@ -62,6 +62,11 @@ SETTING_KEY_EMAIL_FROM_DISPLAY_NAME: str = "email.from_display_name"
 # 발송 실패 시 추가 재시도 횟수. 1차 시도는 별도 — 본 값이 2 이면 총 시도는 최대 3회.
 SETTING_KEY_EMAIL_MAX_RETRY_COUNT: str = "email.max_retry_count"
 
+# 메일 전송 기능 전체 활성화 스위치. 값 포맷: "true" / "false" (소문자 통일).
+# row 가 없거나 빈 값이면 DEFAULT_EMAIL_SEND_ENABLED (=False) 로 fallback — 최초
+# 기동 시 의도적으로 off 상태를 보장하기 위해 default 가 False 다.
+SETTING_KEY_EMAIL_SEND_ENABLED: str = "email.send_enabled"
+
 # 메일 본문에 넣는 공고 상세 페이지 URL 의 prefix (Phase A-2 Part 2 / task 00109).
 # email.* 키는 아니지만 "메일 본문 조립 전용" 용도라 같은 모듈에 둔다 — 별도 모듈
 # 신설은 over-engineering (docs/phase_a2_part2_design_note.md §7). 운영자가 외부
@@ -95,6 +100,10 @@ DEFAULT_EMAIL_FROM_DISPLAY_NAME: str = "정부사업 모니터링 봇"
 
 # 재시도 횟수 default. int 로 둔다 (저장 시 호출자가 str 화).
 DEFAULT_EMAIL_MAX_RETRY_COUNT: int = 2
+
+# 메일 전송 기능 활성화 default. 최초 기동 시 off(False) 가 의도된 동작이다.
+# 저장 포맷은 "true" / "false" (소문자) — 읽을 때 case-insensitive 비교.
+DEFAULT_EMAIL_SEND_ENABLED: bool = False
 
 # 공고 상세 URL prefix default. SystemSetting row 가 없을 때 사용한다. 운영
 # 환경에서는 관리자가 실제 외부 노출 URL 로 변경한다 (현재 admin UI 입력란은
@@ -148,6 +157,7 @@ EMAIL_SETTING_KEYS: tuple[str, ...] = (
     SETTING_KEY_EMAIL_M365_SENDER_ADDRESS,
     SETTING_KEY_EMAIL_FROM_DISPLAY_NAME,
     SETTING_KEY_EMAIL_MAX_RETRY_COUNT,
+    SETTING_KEY_EMAIL_SEND_ENABLED,
 )
 
 
@@ -162,6 +172,7 @@ EMAIL_SETTING_DEFAULTS: dict[str, object] = {
     SETTING_KEY_EMAIL_M365_SENDER_ADDRESS: DEFAULT_EMAIL_M365_SENDER_ADDRESS,
     SETTING_KEY_EMAIL_FROM_DISPLAY_NAME: DEFAULT_EMAIL_FROM_DISPLAY_NAME,
     SETTING_KEY_EMAIL_MAX_RETRY_COUNT: DEFAULT_EMAIL_MAX_RETRY_COUNT,
+    SETTING_KEY_EMAIL_SEND_ENABLED: DEFAULT_EMAIL_SEND_ENABLED,
 }
 
 
@@ -174,6 +185,7 @@ __all__ = [
     "DEFAULT_EMAIL_M365_SENDER_ADDRESS",
     "DEFAULT_EMAIL_M365_TENANT_ID",
     "DEFAULT_EMAIL_MAX_RETRY_COUNT",
+    "DEFAULT_EMAIL_SEND_ENABLED",
     "DEFAULT_EMAIL_TRANSPORT_TYPE",
     "EMAIL_SETTING_DEFAULTS",
     "EMAIL_SETTING_KEYS",
@@ -186,6 +198,7 @@ __all__ = [
     "SETTING_KEY_EMAIL_M365_SENDER_ADDRESS",
     "SETTING_KEY_EMAIL_M365_TENANT_ID",
     "SETTING_KEY_EMAIL_MAX_RETRY_COUNT",
+    "SETTING_KEY_EMAIL_SEND_ENABLED",
     "SETTING_KEY_EMAIL_TRANSPORT_TYPE",
     "TRANSPORT_TYPE_M365_OAUTH",
 ]

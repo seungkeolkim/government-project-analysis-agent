@@ -55,7 +55,8 @@ from app.db.models import (
     Organization,
     UserOrganization,
 )
-from app.email.constants import RELATED_KIND_FORWARD
+from app.backup.service import set_setting
+from app.email.constants import RELATED_KIND_FORWARD, SETTING_KEY_EMAIL_SEND_ENABLED
 from app.email.transport.base import EmailTransport
 from app.sources.constants import SOURCE_TYPE_IRIS
 from app.timezone import now_utc
@@ -104,6 +105,18 @@ def logged_in_client(client: TestClient, db_session: Session) -> TestClient:
     db_session.commit()
     _login(client, "fwd_user", "Fwd_pass_1!")
     return client
+
+
+@pytest.fixture(autouse=True)
+def _enable_email_sending(db_session: Session) -> None:
+    """본 파일의 모든 테스트에서 메일 전송 게이트를 on 으로 설정한다.
+
+    task 00115-1 에서 도입된 ``email.send_enabled`` 게이트의 default 가
+    False 이므로, 포워딩 라우터 기능 자체를 검증하는 이 파일의 테스트들은
+    게이트를 미리 켜 두어야 한다.
+    """
+    set_setting(db_session, SETTING_KEY_EMAIL_SEND_ENABLED, "true")
+    db_session.commit()
 
 
 class _FakeRouteTransport(EmailTransport):

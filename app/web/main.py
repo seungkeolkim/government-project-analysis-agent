@@ -30,6 +30,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import current_user_optional
+from app.email.gate import is_email_sending_enabled
 from app.auth.routes import router as auth_router
 from app.config import Settings, get_settings
 from app.db.init_db import init_db
@@ -644,6 +645,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     # Phase 3b — group_mode 에서는 expand/별 없음; undefined 방지.
                     "siblings_map": {},
                     "favorite_entry_map": {},
+                    # task 00115 — 메일 전송 기능 활성화 여부 (forward 버튼 disabled 분기).
+                    "email_send_enabled": is_email_sending_enabled(session),
                 },
             )
         else:
@@ -771,6 +774,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     "siblings_map": siblings_map,
                     # Phase 3b — 별 아이콘 초기 상태 (로그인 시만).
                     "favorite_entry_map": favorite_entry_map,
+                    # task 00115 — 메일 전송 기능 활성화 여부 (forward 버튼 disabled 분기).
+                    "email_send_enabled": is_email_sending_enabled(session),
                 },
             )
 
@@ -912,6 +917,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 "siblings": _siblings,
                 # Phase 3b — 별 아이콘 초기 상태 (로그인 시만).
                 "fav_entry_id": _fav_entry_id,
+                # task 00115 — 메일 전송 기능 활성화 여부 (메일로 보내기 버튼 disabled 분기).
+                "email_send_enabled": is_email_sending_enabled(session),
             },
         )
 

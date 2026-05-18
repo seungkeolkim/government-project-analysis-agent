@@ -50,7 +50,8 @@ from app.db.models import (
     User,
     UserOrganization,
 )
-from app.email.constants import RELATED_KIND_FORWARD
+from app.backup.service import set_setting
+from app.email.constants import RELATED_KIND_FORWARD, SETTING_KEY_EMAIL_SEND_ENABLED
 from app.email.forwarding import ForwardRequest, forward_announcement
 from app.email.message_builder import (
     build_default_forward_subject,
@@ -96,6 +97,18 @@ def _no_real_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     혹시라도 sleep 이 발생해 테스트가 느려지지 않도록 자동 적용한다.
     """
     monkeypatch.setattr("app.email.sender.time.sleep", lambda _seconds: None)
+
+
+@pytest.fixture(autouse=True)
+def _enable_email_sending(db_session: Session) -> None:
+    """본 파일의 모든 테스트에서 메일 전송 게이트를 on 으로 설정한다.
+
+    task 00115-1 에서 도입된 ``email.send_enabled`` 게이트의 default 가
+    False 이므로, 포워딩 기능 자체를 검증하는 이 파일의 테스트들은 게이트를
+    미리 켜 두어야 한다.
+    """
+    set_setting(db_session, SETTING_KEY_EMAIL_SEND_ENABLED, "true")
+    db_session.commit()
 
 
 # ──────────────────────────────────────────────────────────────
