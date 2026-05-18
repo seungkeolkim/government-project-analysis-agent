@@ -53,7 +53,6 @@ from app.db.models import (
     EmailSendRun,
     Organization,
     User,
-    UserOrganization,
 )
 from app.email.constants import (
     DEFAULT_APP_PUBLIC_BASE_URL,
@@ -214,17 +213,6 @@ def forward_announcement(
             f"발송자 사용자를 찾을 수 없습니다: sender_user_id={request.sender_user_id}"
         )
 
-    # 발송자의 모든 소속 조직을 로드한다 — 메일 본문 발신자 정보 표에 전체 목록을
-    # 표시하기 위해 단일 선택 org 가 아닌 사용자 전체 소속 목록이 필요하다.
-    sender_organizations: list[Organization] = list(
-        session.execute(
-            select(Organization)
-            .join(UserOrganization, Organization.id == UserOrganization.organization_id)
-            .where(UserOrganization.user_id == request.sender_user_id)
-            .order_by(Organization.id)
-        ).scalars().all()
-    )
-
     # ── 준비 3: 발신 조직 검증 + 로드 ─────────────────────────────
     sender_organization: Organization | None = None
     if request.sender_organization_id is not None:
@@ -245,6 +233,9 @@ def forward_announcement(
                 "발신 조직을 찾을 수 없습니다: "
                 f"sender_organization_id={request.sender_organization_id}"
             )
+
+    # 발신자 정보 표는 사용자가 선택한 단일 발신 조직만 노출한다 (task 00113)
+    sender_organizations: list[Organization] = [sender_organization] if sender_organization else []
 
     # ── 준비 4: canonical → 메일 컨텐츠로 쓸 announcement 1건 확정 ──
     canonical_project = session.get(
