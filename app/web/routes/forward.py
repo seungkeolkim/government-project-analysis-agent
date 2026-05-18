@@ -56,6 +56,7 @@ from app.email.forwarding import (
     get_forward_log_with_send_runs,
     list_forward_logs_for_canonical,
 )
+from app.email.gate import EmailSendingDisabledError
 from app.email.transport.factory import build_transport_from_settings
 from app.organizations.service import get_user_organization_ids
 
@@ -459,6 +460,17 @@ def forward_canonical_route(
                 transport=transport,
                 max_retry_count=max_retry_count,
             )
+        except EmailSendingDisabledError as exc:
+            # 메일 전송 기능이 비활성화된 상태 — 503 으로 사용자에게 안내한다.
+            logger.warning(
+                "포워딩 거부 — 메일 전송 기능 비활성화: user_id={} canonical_id={}",
+                current_user.id,
+                canonical_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
         except LookupError as exc:
             # canonical 없음 / 그 canonical 에 현재 유효한 announcement 없음.
             logger.warning(

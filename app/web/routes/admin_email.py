@@ -42,6 +42,7 @@ from app.email.constants import (
     DEFAULT_EMAIL_M365_SENDER_ADDRESS,
     DEFAULT_EMAIL_M365_TENANT_ID,
     DEFAULT_EMAIL_MAX_RETRY_COUNT,
+    DEFAULT_EMAIL_SEND_ENABLED,
     DEFAULT_EMAIL_TRANSPORT_TYPE,
     RELATED_KIND_TEST_SEND,
     SETTING_KEY_APP_PUBLIC_BASE_URL,
@@ -51,8 +52,10 @@ from app.email.constants import (
     SETTING_KEY_EMAIL_M365_SENDER_ADDRESS,
     SETTING_KEY_EMAIL_M365_TENANT_ID,
     SETTING_KEY_EMAIL_MAX_RETRY_COUNT,
+    SETTING_KEY_EMAIL_SEND_ENABLED,
     SETTING_KEY_EMAIL_TRANSPORT_TYPE,
 )
+from app.email.gate import is_email_sending_enabled
 from app.email.message_builder import build_plain_text_message
 from app.email.sender import send_with_retry
 from app.email.transport.factory import build_transport_from_settings
@@ -101,6 +104,7 @@ class M365SettingsOut(BaseModel):
 class EmailSettingsOut(BaseModel):
     """GET /settings 및 PUT /settings 응답의 최상위 형식."""
 
+    send_enabled: bool
     transport_type: str
     m365: M365SettingsOut
     from_display_name: str
@@ -128,8 +132,10 @@ class EmailSettingsIn(BaseModel):
     ``min 0 max 5`` 와 정합.
     ``public_base_url`` 은 http:// 또는 https:// 스킴을 포함한 전체 URL 이어야
     한다 (예: http://172.23.10.19:8000/). 스킴 불일치 시 422 로 거부.
+    ``send_enabled`` 는 메일 전송 기능 전체 활성화 스위치로 기본값은 False.
     """
 
+    send_enabled: bool = False
     m365: M365SettingsIn
     from_display_name: str
     max_retry_count: int = Field(ge=0, le=5)
@@ -236,11 +242,12 @@ def _read_max_retry_count(session) -> int:
 
 
 def _build_settings_response(session) -> EmailSettingsOut:
-    """SystemSetting 7 개 값을 읽어 GET 응답 형식으로 직렬화한다.
+    """SystemSetting 8 개 값을 읽어 GET 응답 형식으로 직렬화한다.
 
     ``client_secret`` 은 mask 처리되며, 다른 값은 fallback (빈 row → DEFAULT)
     을 거쳐 그대로 노출된다.
     """
+    send_enabled = is_email_sending_enabled(session)
     transport_type = (
         get_setting(session, SETTING_KEY_EMAIL_TRANSPORT_TYPE)
         or DEFAULT_EMAIL_TRANSPORT_TYPE
@@ -273,6 +280,7 @@ def _build_settings_response(session) -> EmailSettingsOut:
     )
 
     return EmailSettingsOut(
+        send_enabled=send_enabled,
         transport_type=transport_type,
         m365=M365SettingsOut(
             tenant_id=tenant_id,
@@ -381,6 +389,12 @@ def put_email_settings(
     )
 
     with session_scope() as session:
+        # 메일 전송 기능 활성화 스위치. bool → "true" / "false" (소문자 통일).
+        set_setting(
+            session,
+            SETTING_KEY_EMAIL_SEND_ENABLED,
+            "true" if body.send_enabled else "false",
+        )
         # M365 자격증명 3 개 + sender_address 저장.
         set_setting(
             session, SETTING_KEY_EMAIL_M365_TENANT_ID, body.m365.tenant_id
@@ -466,6 +480,21 @@ def post_email_test_send(
     )
 
     with session_scope() as session:
+        # 0. 메일 전송 기능 활성화 확인 — off 이면 503 으로 즉시 차단.
+        #    EmailSendRun row 가 INSERT 되기 전에 확인해 이력이 남지 않도록 한다.
+        if not is_email_sending_enabled(session):
+            logger.warning(
+                "테스트 발송 거부 — 메일 전송 기능 비활성화: user_id={}",
+                current_user.id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "메일 전송 기능이 비활성화되어 있습니다. "
+                    "시스템 관리 > 메일 발송 탭에서 활성화해 주세요."
+                ),
+            )
+
         # 1. max_retry_count 읽기 (SystemSetting + fallback)
         max_retry_count = _read_max_retry_count(session)
 
