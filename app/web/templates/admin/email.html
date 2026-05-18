@@ -125,6 +125,20 @@
                    autocomplete="off">
         </label>
 
+        {# 시스템 접근 주소 — 메일 포워딩 '공고 상세보기' 링크의 Base URL.
+           http/https 스킴 포함 전체 URL (예: http://172.23.10.19:8000/).
+           다른 사용자들이 메일에서 링크를 클릭했을 때 접근 가능한 주소를 입력한다. #}
+        <label class="admin-schedule__text">
+            <span>시스템 접근 주소 (공고 링크 Base URL)</span>
+            <input id="email-public-base-url"
+                   name="public_base_url"
+                   type="text"
+                   class="admin-schedule__input"
+                   placeholder="http://172.23.10.19:8000"
+                   autocomplete="off"
+                   spellcheck="false">
+        </label>
+
         <button id="email-settings-save"
                 type="submit"
                 class="admin-button admin-button--primary">저장</button>
