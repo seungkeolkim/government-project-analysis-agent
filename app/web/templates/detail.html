@@ -56,12 +56,17 @@
        비로그인 또는 메일 전송 기능 비활성화 시 disabled + 케이스별 tooltip.
        forward.js 가 data-* 를 읽어 모달을 열고 제목 prefill / 미리보기를 구성한다. #}
     {% if canonical_id %}
+    {# send_enabled=False 시 disabled 버튼에 title tooltip 이 표시되도록 span 으로 감싼다. #}
+    {% if not email_send_enabled and current_user %}
+    <span class="forward-btn-disabled-wrap"
+          title="시스템의 메일 전송 기능이 활성화되지 않았습니다.">
+    {% endif %}
     <button type="button"
             class="forward-open-btn"
             {% if not current_user %}
             disabled title="로그인 후 사용 가능"
             {% elif not email_send_enabled %}
-            disabled title="메일 발송 기능이 비활성화되어 있습니다"
+            disabled
             {% endif %}
             data-canonical-id="{{ canonical_id }}"
             data-announcement-title="{{ announcement.title }}"
@@ -70,6 +75,9 @@
             data-announcement-deadline="{% if announcement.deadline_at %}{{ announcement.deadline_at | kst_date }}{% endif %}">
         &#9993; 메일로 보내기
     </button>
+    {% if not email_send_enabled and current_user %}
+    </span>
+    {% endif %}
     {% endif %}
     {# task 00085 — canonical 매칭이 있으면 큰 배지 + 카운터를 표시 (비로그인 동일 노출). #}
     {% if canonical_id %}
