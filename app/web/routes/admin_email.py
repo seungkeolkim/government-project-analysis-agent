@@ -27,7 +27,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from loguru import logger
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import select
 
 from app.auth.dependencies import admin_user_required, ensure_same_origin
@@ -35,6 +35,7 @@ from app.backup.service import get_setting, set_setting
 from app.db.models import EmailSendRun, EmailSendRunStatus, User
 from app.db.session import session_scope
 from app.email.constants import (
+    DEFAULT_APP_PUBLIC_BASE_URL,
     DEFAULT_EMAIL_FROM_DISPLAY_NAME,
     DEFAULT_EMAIL_M365_CLIENT_ID,
     DEFAULT_EMAIL_M365_CLIENT_SECRET,
@@ -43,6 +44,7 @@ from app.email.constants import (
     DEFAULT_EMAIL_MAX_RETRY_COUNT,
     DEFAULT_EMAIL_TRANSPORT_TYPE,
     RELATED_KIND_TEST_SEND,
+    SETTING_KEY_APP_PUBLIC_BASE_URL,
     SETTING_KEY_EMAIL_FROM_DISPLAY_NAME,
     SETTING_KEY_EMAIL_M365_CLIENT_ID,
     SETTING_KEY_EMAIL_M365_CLIENT_SECRET,
@@ -103,6 +105,7 @@ class EmailSettingsOut(BaseModel):
     m365: M365SettingsOut
     from_display_name: str
     max_retry_count: int
+    public_base_url: str
 
 
 class M365SettingsIn(BaseModel):
@@ -123,11 +126,29 @@ class EmailSettingsIn(BaseModel):
 
     ``max_retry_count`` 의 허용 범위는 첨부 phase_a1_prompt.md form spec 의
     ``min 0 max 5`` 와 정합.
+    ``public_base_url`` 은 http:// 또는 https:// 스킴을 포함한 전체 URL 이어야
+    한다 (예: http://172.23.10.19:8000/). 스킴 불일치 시 422 로 거부.
     """
 
     m365: M365SettingsIn
     from_display_name: str
     max_retry_count: int = Field(ge=0, le=5)
+    public_base_url: str
+
+    @field_validator("public_base_url")
+    @classmethod
+    def validate_public_base_url_scheme(cls, v: str) -> str:
+        """공고 상세 URL prefix 의 스킴을 검증한다.
+
+        http:// 또는 https:// 로 시작해야 한다. 그 외 스킴(ftp, 상대경로 등)은
+        메일 수신자가 링크를 클릭해도 열리지 않거나 보안 위협이 될 수 있어 거부.
+        """
+        stripped = v.strip()
+        if not stripped.startswith(("http://", "https://")):
+            raise ValueError(
+                "시스템 접근 주소는 http:// 또는 https:// 로 시작해야 합니다."
+            )
+        return stripped
 
 
 class TestSendIn(BaseModel):
@@ -246,6 +267,10 @@ def _build_settings_response(session) -> EmailSettingsOut:
         or DEFAULT_EMAIL_FROM_DISPLAY_NAME
     )
     max_retry_count = _read_max_retry_count(session)
+    public_base_url = (
+        get_setting(session, SETTING_KEY_APP_PUBLIC_BASE_URL)
+        or DEFAULT_APP_PUBLIC_BASE_URL
+    )
 
     return EmailSettingsOut(
         transport_type=transport_type,
@@ -257,6 +282,7 @@ def _build_settings_response(session) -> EmailSettingsOut:
         ),
         from_display_name=from_display_name,
         max_retry_count=max_retry_count,
+        public_base_url=public_base_url,
     )
 
 
@@ -346,11 +372,12 @@ def put_email_settings(
     """
     logger.info(
         "PUT /api/admin/email/settings 진입: user_id={} from_display_name={!r} "
-        "max_retry_count={} sender_address={!r}",
+        "max_retry_count={} sender_address={!r} public_base_url={!r}",
         current_user.id,
         body.from_display_name,
         body.max_retry_count,
         body.m365.sender_address,
+        body.public_base_url,
     )
 
     with session_scope() as session:
@@ -385,6 +412,13 @@ def put_email_settings(
             session,
             SETTING_KEY_EMAIL_MAX_RETRY_COUNT,
             str(body.max_retry_count),
+        )
+        # 공고 상세 링크 생성 시 사용할 시스템 접근 주소 (http/https 포함 전체 URL).
+        # Pydantic validator 가 스킴 검증을 이미 통과했으므로 그대로 저장.
+        set_setting(
+            session,
+            SETTING_KEY_APP_PUBLIC_BASE_URL,
+            body.public_base_url,
         )
 
         # 즉시 commit 해서 변경된 값으로 응답 직렬화 — session_scope 는 yield

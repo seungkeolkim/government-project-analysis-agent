@@ -132,6 +132,7 @@
         var senderAddressInput = document.getElementById('email-sender-address');
         var fromDisplayNameInput = document.getElementById('email-from-display-name');
         var maxRetryCountInput = document.getElementById('email-max-retry-count');
+        var publicBaseUrlInput = document.getElementById('email-public-base-url');
         var saveButton = document.getElementById('email-settings-save');
 
         // ── 초기 로드 ─────────────────────────────────────────
@@ -204,6 +205,8 @@
             var maxRetryValue = settings.max_retry_count;
             maxRetryCountInput.value =
                 maxRetryValue != null ? String(maxRetryValue) : '2';
+            // public_base_url — 메일 포워딩 공고 링크의 Base URL.
+            publicBaseUrlInput.value = settings.public_base_url || '';
         }
 
         /**
@@ -260,7 +263,8 @@
                     sender_address: senderAddressInput.value.trim()
                 },
                 from_display_name: fromDisplayNameInput.value.trim(),
-                max_retry_count: parseInt(maxRetryCountInput.value, 10)
+                max_retry_count: parseInt(maxRetryCountInput.value, 10),
+                public_base_url: publicBaseUrlInput.value.trim()
             };
 
             // client_secret 토글 ON + 비어있지 않을 때만 body 에 포함.
