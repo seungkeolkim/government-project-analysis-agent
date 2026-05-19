@@ -330,7 +330,13 @@ def test_post_forward_success_200_and_schema(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """정상 발송 시 200 과 {forward_log_id, status, success_count, failure_count} 응답.
+    """정상 발송 시 200 + 즉시 in_progress 응답, BackgroundTasks 후 polling 으로 최종 상태 확인.
+
+    task 00120 비동기화 이후 POST 응답은 status='in_progress' / counts=0 으로
+    즉시 반환되며, FastAPI ``TestClient`` 는 응답 직후 동기적으로
+    BackgroundTasks 를 실행하므로, 응답이 돌아온 시점에는 발송 루프도 이미
+    완료된 상태다. 따라서 후속 GET /forward-logs/{forward_log_id} 로 최종
+    status / counts 를 검증한다.
 
     실제 msal/smtplib 로 내려가지 않도록 ``build_transport_from_settings`` 를
     항상 성공하는 ``_FakeRouteTransport`` 로 monkeypatch 한다. ``send_with_retry``
@@ -364,9 +370,23 @@ def test_post_forward_success_200_and_schema(
         "failure_count",
     }
     assert isinstance(data["forward_log_id"], int)
-    assert data["status"] == "success"
-    assert data["success_count"] == 2
+    # POST 응답은 즉시 in_progress / counts=0 으로 반환된다 (비동기화 이후).
+    assert data["status"] == "in_progress"
+    assert data["success_count"] == 0
     assert data["failure_count"] == 0
+
+    # TestClient 는 응답 직후 BackgroundTasks 를 동기 실행하므로, 후속 GET
+    # 호출에서는 발송 루프가 끝난 상태가 보여야 한다.
+    forward_log_id = data["forward_log_id"]
+    final_response = logged_in_client.get(
+        f"/api/canonical/{project.id}/forward-logs/{forward_log_id}"
+    )
+    assert final_response.status_code == 200, final_response.text
+    final_data = final_response.json()
+    assert final_data["status"] == "success"
+    assert final_data["success_count"] == 2
+    assert final_data["failure_count"] == 0
+    assert final_data["completed_at"] is not None
 
 
 # ──────────────────────────────────────────────────────────────
@@ -592,3 +612,176 @@ def test_get_users_search_success_and_schema(
     assert alice_row["email"] == "searchable_alice@example.com"
     assert len(alice_row["organizations"]) == 1
     assert alice_row["organizations"][0]["name"] == "검색 결과 조직"
+
+
+# ──────────────────────────────────────────────────────────────
+# 12. GET /forward-logs/{forward_log_id} (단건, polling 용) — task 00120
+# ──────────────────────────────────────────────────────────────
+
+
+def test_get_single_forward_log_unknown_canonical_404(
+    client: TestClient,
+) -> None:
+    """존재하지 않는 canonical_id 로 단건 조회 → 404.
+
+    ``_ensure_canonical_exists`` 가 forward_log 조회보다 먼저 실행되므로,
+    canonical 이 없으면 forward_log_id 와 무관하게 404 를 반환한다.
+    """
+    response = client.get("/api/canonical/999999/forward-logs/1")
+    assert response.status_code == 404, response.text
+
+
+def test_get_single_forward_log_unknown_id_404(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    """canonical 은 있지만 forward_log_id 가 존재하지 않으면 → 404."""
+    project = _make_canonical_with_announcement(
+        db_session, key_suffix="single-404-id"
+    )
+    db_session.commit()
+
+    response = client.get(
+        f"/api/canonical/{project.id}/forward-logs/999999"
+    )
+    assert response.status_code == 404, response.text
+
+
+def test_get_single_forward_log_canonical_mismatch_404(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    """forward_log 가 다른 canonical 에 속해 있으면 → 404.
+
+    project_owner 에 forward_log 를 만들고, project_other 의 URL 로 조회하면
+    path 의 canonical_id 와 forward_log 의 ``canonical_project_id`` 가
+    불일치하므로 404 가 반환되어야 한다 (``/sends`` endpoint 와 동일 정책).
+    """
+    project_owner = _make_canonical_with_announcement(
+        db_session, key_suffix="owner-canonical"
+    )
+    project_other = _make_canonical_with_announcement(
+        db_session, key_suffix="other-canonical"
+    )
+    forward_log = EmailForwardLog(
+        canonical_project_id=project_owner.id,
+        subject="mismatch 대상 제목",
+        has_additional_message=False,
+        recipient_addresses=["alice@example.com"],
+        recipient_count=1,
+        status=EmailForwardStatus.SUCCESS,
+        success_count=1,
+        failure_count=0,
+        created_at=now_utc(),
+        completed_at=now_utc(),
+    )
+    db_session.add(forward_log)
+    db_session.commit()
+    forward_log_id = forward_log.id
+
+    response = client.get(
+        f"/api/canonical/{project_other.id}/forward-logs/{forward_log_id}"
+    )
+    assert response.status_code == 404, response.text
+
+
+def test_get_single_forward_log_completed_200_and_schema(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    """완료된(``completed_at`` 채워진) forward_log 단건 조회 → 200 + 스키마.
+
+    검증 포인트:
+        - 200 응답.
+        - 응답 dict 가 GET /forward-logs (목록) 의 row 와 동일한 키 집합을 가진다.
+        - ``recipient_addresses`` 는 제외된다 (개별 수신자 노출은 /sends).
+        - status 는 enum 값(예: 'success') 그대로 노출된다.
+    """
+    project = _make_canonical_with_announcement(
+        db_session, key_suffix="single-completed"
+    )
+    forward_log = EmailForwardLog(
+        canonical_project_id=project.id,
+        subject="완료된 발송 제목",
+        has_additional_message=False,
+        recipient_addresses=["alice@example.com", "bob@example.com"],
+        recipient_count=2,
+        status=EmailForwardStatus.SUCCESS,
+        success_count=2,
+        failure_count=0,
+        created_at=now_utc(),
+        completed_at=now_utc(),
+    )
+    db_session.add(forward_log)
+    db_session.commit()
+    forward_log_id = forward_log.id
+
+    response = client.get(
+        f"/api/canonical/{project.id}/forward-logs/{forward_log_id}"
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    expected_keys = {
+        "id",
+        "sender",
+        "sender_organization",
+        "subject",
+        "recipient_count",
+        "has_additional_message",
+        "status",
+        "success_count",
+        "failure_count",
+        "created_at",
+        "completed_at",
+    }
+    assert set(data.keys()) == expected_keys
+    # 개별 수신자 주소는 단건 응답에서도 제외 (목록 응답과 동일 정책).
+    assert "recipient_addresses" not in data
+    assert data["id"] == forward_log_id
+    assert data["status"] == "success"
+    assert data["success_count"] == 2
+    assert data["failure_count"] == 0
+    assert data["completed_at"] is not None
+
+
+def test_get_single_forward_log_completed_at_null_returns_in_progress(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    """``completed_at IS NULL`` 인 row 의 status 는 응답에서 'in_progress' 로 노출된다.
+
+    DB 의 ``email_forward_status`` enum 에는 'in_progress' 가 없고,
+    placeholder 로 FAILED 가 들어 있더라도 ``completed_at`` 이 NULL 이면
+    응답 직렬화에서 'in_progress' 로 덮어쓴다 (task 00120). 본 변환은
+    DB schema 를 건드리지 않는다.
+    """
+    project = _make_canonical_with_announcement(
+        db_session, key_suffix="single-inprogress"
+    )
+    forward_log = EmailForwardLog(
+        canonical_project_id=project.id,
+        subject="진행 중 발송 제목",
+        has_additional_message=False,
+        recipient_addresses=["alice@example.com"],
+        recipient_count=1,
+        # 발송 루프 시작 직후 placeholder — completed_at 은 NULL.
+        status=EmailForwardStatus.FAILED,
+        success_count=0,
+        failure_count=0,
+        created_at=now_utc(),
+        completed_at=None,
+    )
+    db_session.add(forward_log)
+    db_session.commit()
+    forward_log_id = forward_log.id
+
+    response = client.get(
+        f"/api/canonical/{project.id}/forward-logs/{forward_log_id}"
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    # placeholder enum 값('failed') 이 아니라 가상 값 'in_progress' 가 노출.
+    assert data["status"] == "in_progress"
+    assert data["completed_at"] is None
+    assert data["success_count"] == 0
+    assert data["failure_count"] == 0

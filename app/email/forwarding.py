@@ -130,75 +130,89 @@ class ForwardResult:
     failure_count: int
 
 
-def forward_announcement(
+@dataclass
+class ForwardPreparation:
+    """``forward_announcement_prepare`` 의 반환값 — 준비 단계 결과 묶음.
+
+    task 00120 비동기화 도입을 위해 ``forward_announcement`` 가
+    "준비 + forward_log INSERT/commit" (=prepare) 와 "수신자별 발송 루프 +
+    점진 commit + 최종 status commit" (=run) 의 두 단계로 분할되면서 두 단계
+    사이를 잇는 DTO 다. 라우터는 prepare 까지를 동기로 수행해 forward_log_id
+    를 즉시 응답으로 돌려준 뒤, run 은 FastAPI ``BackgroundTasks`` 에 위임해
+    별도 세션에서 실행한다.
+
+    Attributes:
+        forward_log_id: prepare 단계에서 INSERT/commit 된 EmailForwardLog 의 PK.
+        sender_user_id: send_with_retry 의 ``requested_by_user_id`` 로 전달될
+            발송 트리거 사용자 PK. EmailSendRun row 의 추적 컬럼이다.
+        recipients: 발송할 수신자 이메일 주소 목록. 모든 수신자에게 동일한
+            본문이 발송된다 (개인화 없음).
+        subject: 메일 제목. 빈 입력은 prepare 단계에서
+            ``build_default_forward_subject`` 로 이미 채워져 있다.
+        sender_address: From 헤더 주소 (M365 sender_address).
+        sender_display_name: From 헤더 표시명.
+        text_body: text/plain 본문 (모든 수신자 동일).
+        html_body: text/html 본문 (모든 수신자 동일).
+    """
+
+    forward_log_id: int
+    sender_user_id: int
+    recipients: list[str]
+    subject: str
+    sender_address: str
+    sender_display_name: str
+    text_body: str
+    html_body: str
+
+
+def forward_announcement_prepare(
     request: ForwardRequest,
     *,
     session: Session,
-    transport: EmailTransport,
-    max_retry_count: int,
-) -> ForwardResult:
-    """공고 1건을 N명의 수신자에게 포워딩하고 EmailForwardLog 이력을 남긴다.
+) -> ForwardPreparation:
+    """포워딩 액션의 "준비 + forward_log 선 commit" 까지를 동기로 수행한다.
 
-    전체 흐름은 design note §6 의 3단계 commit 경계를 그대로 따른다.
+    task 00120 비동기화에서 ``forward_announcement`` 가 prepare + run 두 단계로
+    분할되면서 prepare 만 따로 호출할 수 있도록 추출한 함수다. 라우터는 본
+    함수까지를 동기로 수행해 forward_log_id 를 즉시 응답으로 돌려준 뒤, 발송
+    루프(``forward_announcement_run``) 는 FastAPI ``BackgroundTasks`` 에 위임한다.
 
-    준비 단계 (forward_log INSERT 이전 — 실패 시 orphan row 없이 예외만 전파):
-        1. ``request.recipients`` 가 비어 있으면 ``ValueError``.
-        2. ``sender_user_id`` 로 발송자 User 를 로드 (없으면 ``LookupError``).
-        3. ``sender_organization_id`` 가 ``None`` 이 아니면, 그 조직이 발송자
-           소속인지 검증한다 — 아니면 ``PermissionError`` (라우터가 선검증해도
-           service 도 방어적으로 한 번 더 확인). 소속이면 Organization 로드.
-        4. ``canonical_project_id`` → ``is_current=True`` Announcement 1건을
-           ``_pick_announcement_for_canonical`` 로 확정 (없으면 ``LookupError``).
-        5. ``subject`` 가 비어 있으면 ``build_default_forward_subject`` 로 생성.
-        6. SystemSetting 에서 공고 상세 URL prefix / 발신 주소 / From 표시명을
-           읽어 ``detail_url`` 과 발신자 헤더 값을 확정한다.
-        7. text/plain · text/html 본문을 1회 빌드한다 (모든 수신자 동일 본문 —
-           수신자별 개인화 없음).
+    검증 / 준비 단계 (forward_log INSERT 이전 — 실패 시 orphan row 없이 예외만 전파):
+        - 메일 전송 기능 게이트 (``is_email_sending_enabled``).
+        - ``request.recipients`` 가 비어 있으면 ``ValueError``.
+        - ``sender_user_id`` 로 발송자 User 를 로드 (없으면 ``LookupError``).
+        - ``sender_organization_id`` 가 ``None`` 이 아니면 발송자 소속 조직인지
+          방어적으로 검증 (``PermissionError`` / ``LookupError``).
+        - ``canonical_project_id`` 존재 + ``is_current=True`` Announcement 1건 확정.
+        - ``subject`` 가 비어 있으면 default 제목 자동 생성.
+        - SystemSetting 으로 detail_url / 발신자 헤더 확정.
+        - 본문 1회 빌드 (모든 수신자 동일).
 
-    단계 1 — forward_log 선 commit:
-        8. EmailForwardLog row 를 INSERT 한다. ``status`` 는 임시값
-           ``EmailForwardStatus.FAILED`` (모델에 default 없음 — 명시 필수),
-           ``success_count`` / ``failure_count`` 는 0, ``created_at`` 은
-           ``now_utc()``. 그 뒤 ``session.commit()`` 으로 ``forward_log.id`` 를
-           확보한다.
-
-    단계 2 — 수신자별 발송 루프:
-        9. 수신자 N명을 1명씩 돌며 ``build_multipart_message`` → ``send_with_retry``
-           를 호출한다. ``send_with_retry`` 가 모든 시도 실패 시 예외를 raise
-           하므로, 수신자별로 ``try/except`` 로 잡아 ``failure_count`` 를 올리고
-           다음 수신자로 계속한다 (개별 실패를 전파하지 않는다). 성공이면
-           ``success_count`` 를 올린다.
-
-    단계 3 — 결과 update commit:
-        10. 집계 결과로 ``status`` 를 결정한다 — 전부 성공 ``SUCCESS`` / 전부
-            실패 ``FAILED`` / 혼재 ``PARTIAL``. ``success_count`` /
-            ``failure_count`` / ``completed_at = now_utc()`` 를 forward_log 에
-            반영하고 ``session.commit()`` 한 뒤 ``ForwardResult`` 를 반환한다.
+    forward_log INSERT/commit:
+        - status 는 임시값 ``EmailForwardStatus.FAILED`` (모델에 default 없음),
+          ``success_count`` / ``failure_count`` 는 0, ``completed_at`` 은 NULL.
+        - 응답 측 직렬화에서 ``completed_at IS NULL`` 인 row 는 "in_progress"
+          로 표시되므로 placeholder status 가 사용자에게 노출되지 않는다.
+        - ``session.commit()`` 으로 ``forward_log.id`` 를 확보한다.
 
     Args:
         request: 포워딩 액션 1회의 입력값 (``ForwardRequest``).
-        session: SQLAlchemy ORM Session. 본 함수가 내부에서 INSERT/UPDATE 후
-            ``commit()`` 을 직접 호출한다 — 라우터는 본 호출이 자기 session 을
-            commit 한다는 점을 인지하고 호출해야 한다. ``send_with_retry`` 도
-            동일 session 을 commit 한다.
-        transport: 발송 실행을 위임할 ``EmailTransport`` 구현체. 라우터가
-            ``build_transport_from_settings`` 로 미리 만들어 주입한다.
-        max_retry_count: ``send_with_retry`` 에 그대로 넘길 재시도 횟수. 라우터가
-            SystemSetting ``email.max_retry_count`` 를 미리 읽어 int 로 전달한다.
+        session: SQLAlchemy ORM Session. 본 함수가 INSERT 후 ``commit()`` 을
+            직접 호출한다 — 호출자는 본 호출이 자기 session 을 commit 한다는
+            점을 인지하고 호출해야 한다.
 
     Returns:
-        ``ForwardResult`` — forward_log PK + 최종 status + 성공/실패 카운트.
+        ``ForwardPreparation`` — forward_log_id + 발송 루프 실행에 필요한 모든
+        값(수신자 목록 / 제목 / 발신자 헤더 / 본문) 을 묶은 DTO.
 
     Raises:
+        EmailSendingDisabledError: 메일 전송 기능이 비활성화 상태일 때.
         ValueError: ``recipients`` 가 빈 리스트일 때.
-        LookupError: ``sender_user_id`` 에 해당하는 User 가 없거나,
-            ``canonical_project_id`` 가 존재하지 않거나, 그 canonical 에
-            ``is_current=True`` Announcement 가 1건도 없을 때.
-        PermissionError: ``sender_organization_id`` 가 ``None`` 이 아닌데
-            발송자(sender_user)의 소속 조직이 아닐 때.
-        Exception: 발송 루프 시작 전 SystemSetting 읽기 / 본문 빌드 단계에서
-            발생한 예외는 그대로 전파된다 (이 시점엔 forward_log row 가 아직
-            INSERT 되지 않았으므로 정리할 것이 없다).
+        LookupError: ``sender_user_id`` / ``canonical_project_id`` /
+            ``sender_organization_id`` 가 존재하지 않거나, canonical 에 현재
+            유효한 announcement 가 없을 때.
+        PermissionError: ``sender_organization_id`` 가 발송자 본인의 소속
+            조직이 아닐 때.
     """
     # ── 게이트: 메일 전송 기능 활성화 확인 ───────────────────────
     # row 가 없거나 "false" 이면 EmailSendingDisabledError 를 raise 해 발송을
@@ -246,7 +260,9 @@ def forward_announcement(
             )
 
     # 발신자 정보 표는 사용자가 선택한 단일 발신 조직만 노출한다 (task 00113)
-    sender_organizations: list[Organization] = [sender_organization] if sender_organization else []
+    sender_organizations: list[Organization] = (
+        [sender_organization] if sender_organization else []
+    )
 
     # ── 준비 4: canonical → 메일 컨텐츠로 쓸 announcement 1건 확정 ──
     canonical_project = session.get(
@@ -304,16 +320,18 @@ def forward_announcement(
 
     # ── 단계 1: forward_log 선 commit ─────────────────────────────
     has_additional_message = bool((request.additional_message or "").strip())
+    recipients = [str(recipient) for recipient in request.recipients]
     forward_log = EmailForwardLog(
         canonical_project_id=request.canonical_project_id,
         sender_user_id=request.sender_user_id,
         sender_organization_id=request.sender_organization_id,
         subject=subject,
         has_additional_message=has_additional_message,
-        recipient_addresses=list(request.recipients),
-        recipient_count=len(request.recipients),
-        # status 는 임시값 — 단계 3 에서 실제 결과로 덮어쓴다. 모델에 default
-        # 가 없어 명시가 필수다.
+        recipient_addresses=list(recipients),
+        recipient_count=len(recipients),
+        # status 는 임시값 — run 단계에서 실제 결과로 덮어쓴다. 모델에 default
+        # 가 없어 명시가 필수다. 응답 직렬화는 completed_at IS NULL 인 row 의
+        # status 를 "in_progress" 로 변환해 사용자에게 노출한다.
         status=EmailForwardStatus.FAILED,
         success_count=0,
         failure_count=0,
@@ -324,36 +342,102 @@ def forward_announcement(
     # 시도가 있었다" 는 사실이 DB 에 남도록 즉시 commit 한다.
     session.commit()
     logger.info(
-        "공고 포워딩 시작: forward_log_id={} canonical_project_id={} "
+        "공고 포워딩 준비 완료: forward_log_id={} canonical_project_id={} "
         "recipient_count={} sender_user_id={}",
         forward_log.id,
         request.canonical_project_id,
-        len(request.recipients),
+        len(recipients),
         request.sender_user_id,
     )
 
-    # ── 단계 2: 수신자별 발송 루프 (1명씩) ────────────────────────
+    return ForwardPreparation(
+        forward_log_id=forward_log.id,
+        sender_user_id=request.sender_user_id,
+        recipients=recipients,
+        subject=subject,
+        sender_address=sender_address,
+        sender_display_name=sender_display_name,
+        text_body=text_body,
+        html_body=html_body,
+    )
+
+
+def forward_announcement_run(
+    preparation: ForwardPreparation,
+    *,
+    session: Session,
+    transport: EmailTransport,
+    max_retry_count: int,
+) -> ForwardResult:
+    """forward_log 가 commit 된 상태에서 수신자별 발송 루프 + 점진 commit + 최종 commit.
+
+    task 00120 비동기화에서 분리된 두 번째 단계. 라우터의 응답이 이미 나간 뒤
+    ``BackgroundTasks`` 가 새 ``session_scope()`` 를 열어 본 함수를 호출하므로,
+    본 함수는 ``preparation.forward_log_id`` 로 forward_log 를 다시 로드해
+    수신자별 발송을 수행한다. wrapper(``forward_announcement``)는 prepare 와
+    동일 session 으로 즉시 호출하므로, identity map 에 의해 prepare 가 만든
+    같은 row 를 받는다.
+
+    동작:
+        1. ``forward_log_id`` 로 EmailForwardLog 로드 (없으면 ``LookupError``).
+        2. 수신자별 ``build_multipart_message`` → ``send_with_retry`` 호출.
+           각 수신자 처리 직후 ``forward_log.success_count`` /
+           ``failure_count`` 를 갱신하고 ``session.commit()`` 으로 점진 반영
+           (사용자가 polling 으로 진행 상황을 볼 수 있게 한다).
+        3. 모든 수신자 처리 후 ``_decide_forward_status`` 로 최종 status 를
+           결정하고 ``completed_at = now_utc()`` 와 함께 한 번 더 commit.
+
+    Args:
+        preparation: prepare 단계에서 만들어진 ``ForwardPreparation``.
+        session: SQLAlchemy ORM Session. 점진 commit / 최종 commit 모두 본
+            session 에 대해 수행한다. ``send_with_retry`` 도 동일 session 을
+            commit 한다.
+        transport: 발송 실행을 위임할 ``EmailTransport`` 구현체.
+        max_retry_count: ``send_with_retry`` 에 그대로 넘길 재시도 횟수.
+
+    Returns:
+        ``ForwardResult`` — forward_log PK + 최종 status + 성공/실패 카운트.
+
+    Raises:
+        LookupError: ``preparation.forward_log_id`` 에 해당하는 EmailForwardLog
+            가 없을 때 (정상 흐름에서는 발생하지 않으며, 트랜잭션 중단 등
+            비정상 경로 방어용).
+    """
+    forward_log = session.get(EmailForwardLog, preparation.forward_log_id)
+    if forward_log is None:
+        raise LookupError(
+            "발송 이력 row 를 찾을 수 없습니다: "
+            f"forward_log_id={preparation.forward_log_id}"
+        )
+
+    logger.info(
+        "공고 포워딩 발송 루프 시작: forward_log_id={} recipient_count={}",
+        preparation.forward_log_id,
+        len(preparation.recipients),
+    )
+
+    # ── 단계 2: 수신자별 발송 루프 (1명씩, 매 수신자 직후 점진 commit) ──
     success_count = 0
     failure_count = 0
-    for recipient in request.recipients:
+    for recipient in preparation.recipients:
         message = build_multipart_message(
-            sender_address=sender_address,
-            sender_display_name=sender_display_name,
+            sender_address=preparation.sender_address,
+            sender_display_name=preparation.sender_display_name,
             recipient=recipient,
-            subject=subject,
-            text_body=text_body,
-            html_body=html_body,
+            subject=preparation.subject,
+            text_body=preparation.text_body,
+            html_body=preparation.html_body,
         )
         try:
-            # send_with_retry 가 내부에서 session 을 commit 한다. 단계 1 에서
-            # 이미 commit 했으므로 이 시점 미커밋 변경분은 없어 안전하다.
+            # send_with_retry 가 내부에서 session 을 commit 한다. forward_log
+            # 의 미커밋 변경분은 직전 점진 commit 으로 비어 있어 안전하다.
             send_with_retry(
                 transport,
                 message,
                 max_retry_count=max_retry_count,
                 related_kind=RELATED_KIND_FORWARD,
-                related_id=forward_log.id,
-                requested_by_user_id=request.sender_user_id,
+                related_id=preparation.forward_log_id,
+                requested_by_user_id=preparation.sender_user_id,
                 session=session,
             )
         except Exception as exc:
@@ -364,17 +448,25 @@ def forward_announcement(
             logger.warning(
                 "공고 포워딩 개별 발송 실패: forward_log_id={} recipient={!r} "
                 "error={}: {}",
-                forward_log.id,
+                preparation.forward_log_id,
                 recipient,
                 type(exc).__name__,
                 exc,
             )
-            continue
-        success_count += 1
+        else:
+            success_count += 1
 
-    # ── 단계 3: 결과 update commit ────────────────────────────────
-    status = _decide_forward_status(success_count, failure_count)
-    forward_log.status = status
+        # 점진 commit — 매 수신자 처리 직후 카운트를 forward_log 에 반영해
+        # polling 응답이 진행 상황을 즉시 보여줄 수 있게 한다. send_with_retry
+        # 가 직전에 자기 트랜잭션을 commit 했으므로 본 시점에 미커밋 변경분은
+        # forward_log 의 두 컬럼뿐이다.
+        forward_log.success_count = success_count
+        forward_log.failure_count = failure_count
+        session.commit()
+
+    # ── 단계 3: 결과 update commit (status + completed_at 확정) ────
+    final_status = _decide_forward_status(success_count, failure_count)
+    forward_log.status = final_status
     forward_log.success_count = success_count
     forward_log.failure_count = failure_count
     forward_log.completed_at = now_utc()
@@ -382,17 +474,56 @@ def forward_announcement(
     logger.info(
         "공고 포워딩 완료: forward_log_id={} status={} success_count={} "
         "failure_count={}",
-        forward_log.id,
-        status.value,
+        preparation.forward_log_id,
+        final_status.value,
         success_count,
         failure_count,
     )
 
     return ForwardResult(
-        forward_log_id=forward_log.id,
-        status=status,
+        forward_log_id=preparation.forward_log_id,
+        status=final_status,
         success_count=success_count,
         failure_count=failure_count,
+    )
+
+
+def forward_announcement(
+    request: ForwardRequest,
+    *,
+    session: Session,
+    transport: EmailTransport,
+    max_retry_count: int,
+) -> ForwardResult:
+    """공고 1건을 N명의 수신자에게 포워딩하고 EmailForwardLog 이력을 남긴다 — 동기 wrapper.
+
+    task 00120 비동기화에서 본 함수는 ``forward_announcement_prepare`` +
+    ``forward_announcement_run`` 두 단계를 같은 session 으로 순차 호출하는
+    얇은 wrapper 로 남았다. 라우터는 prepare / run 을 각각 직접 호출해
+    BackgroundTasks 위임 흐름을 만들지만, 본 wrapper 는 단위 테스트와 잠재적
+    동기 호출 사용처(통째 발송 후 결과 반환)를 위해 시그니처를 유지한다 —
+    기존 테스트(``tests/email/test_forwarding.py``)가 그대로 통과한다.
+
+    Args:
+        request: 포워딩 액션 1회의 입력값 (``ForwardRequest``).
+        session: SQLAlchemy ORM Session. prepare / run 양쪽이 본 session 을
+            commit 한다.
+        transport: 발송 실행을 위임할 ``EmailTransport`` 구현체.
+        max_retry_count: ``send_with_retry`` 에 그대로 넘길 재시도 횟수.
+
+    Returns:
+        ``ForwardResult`` — forward_log PK + 최종 status + 성공/실패 카운트.
+
+    Raises:
+        EmailSendingDisabledError / ValueError / LookupError / PermissionError:
+            prepare 단계에서 발생한 예외 그대로 전파.
+    """
+    preparation = forward_announcement_prepare(request, session=session)
+    return forward_announcement_run(
+        preparation,
+        session=session,
+        transport=transport,
+        max_retry_count=max_retry_count,
     )
 
 
@@ -577,9 +708,12 @@ def _decide_forward_status(
 
 
 __all__ = [
+    "ForwardPreparation",
     "ForwardRequest",
     "ForwardResult",
     "forward_announcement",
+    "forward_announcement_prepare",
+    "forward_announcement_run",
     "get_forward_log_with_send_runs",
     "list_forward_logs_for_canonical",
 ]
