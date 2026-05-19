@@ -2,33 +2,30 @@
 
 본 모듈은 운영자가 cron 으로 예약한 시점에 \"마지막 발송 이후 누적된 공고 변화
 (snapshot diff)\" 를 정리해 admin 명단에게 메일로 발송하는 흐름의 핵심 로직을
-담는다. 모듈은 후속 subtask 가 부분씩 채워 가며, 현재 채워진 함수 / 책임은
-다음과 같다:
+담는다. subtask 00125-3 / 00125-4 / 00125-6 단계별로 다음 함수 / 책임을 채웠다:
 
-    - 후속 단계가 공용으로 쓸 dataclass 3종 정의 (subtask 00125-3).
-    - 누적 구간 계산 함수 ``compute_aggregation_window`` (subtask 00125-3).
-    - ``AggregationWindow`` 구간 내 snapshot 들을 시간순 reduce 머지해 5종
-      카테고리별 공고 메타를 만드는 ``aggregate_snapshots`` (subtask 00125-4).
-
-``build_daily_report_*`` / ``prepare_and_send_daily_report`` /
-``collect_admin_recipient_emails`` 는 후속 subtask(00125-5 / 6) 가 같은 모듈에
-추가한다. \"스텁만 두지 말고 함수 자체를 다음 subtask 로 이월\" — subtask
-guidance 그대로.
+    - 공용 dataclass 3종 (``AggregationWindow`` / ``AnnouncementSummary`` /
+      ``AggregatedSnapshotPayload``) + 발송 입출력 dataclass 2종
+      (``DailyReportRequest`` / ``DailyReportResult``).
+    - 누적 구간 계산 ``compute_aggregation_window`` (subtask 00125-3).
+    - reduce 머지 ``aggregate_snapshots`` (subtask 00125-4).
+    - admin 수신자 수집 ``collect_admin_recipient_emails`` (subtask 00125-6).
+    - 1회의 발송 흐름 통합 ``prepare_and_send_daily_report`` (subtask 00125-6).
 
 설계 노트 참조:
     - ``docs/phase_a3_design_note.md`` §1 (시간 컬럼 = ``created_at``),
       §2 (``merge_snapshot_payload`` reduce 재사용), §3 (5종 카테고리 키 표기),
-      §4 (fallback_days=7 default), §14 (SystemSetting 키 + 저장 포맷 = ISO-8601
-      UTC).
-    - ``phase_a3_prompt.md`` §3 \"Aggregation 로직 — app/email/daily_report.py 신규\".
+      §4 (fallback_days=7 default), §5 (admin 수신자 정책), §7 (트랜잭션 3단계
+      + 게이트 + last_sent_at 정책표), §14 (SystemSetting 키 + 저장 포맷 =
+      ISO-8601 UTC).
+    - ``phase_a3_prompt.md`` §3·§5 (aggregation + 발송 서비스 의사 코드).
 
-시간 처리 컨벤션 (subtask guidance 명시):
-    - ``compute_aggregation_window`` 가 다루는 모든 ``datetime`` 은
-      **timezone-aware UTC** 이다. naive datetime 입력은 ``app.timezone.as_utc``
-      를 통해 UTC tz 부착 후 비교한다.
+시간 처리 컨벤션:
+    - 모든 ``datetime`` 은 **timezone-aware UTC**. naive 입력은
+      ``app.db.models.as_utc`` 또는 ``app.timezone.now_utc`` 경유로 정규화.
     - SystemSetting ``email.daily_report.last_sent_at`` 은 ISO-8601 문자열로
-      저장되며 ``datetime.fromisoformat`` 로 파싱한다. 파싱 실패는 \"값 없음\"
-      과 동일하게 첫 발송(``is_first_send=True``) 분기로 fallback.
+      저장 (``now_utc().isoformat()`` 형식). 파싱 실패는 \"값 없음\" 과
+      동일하게 첫 발송(``is_first_send=True``) 분기로 fallback.
 """
 
 from __future__ import annotations
@@ -36,13 +33,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import reduce
-from typing import Any
+from typing import Any, Literal
 
 from loguru import logger
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.backup.service import get_setting
-from app.db.models import Announcement, AnnouncementStatus, as_utc
+from app.backup.service import get_setting, set_setting
+from app.db.models import (
+    Announcement,
+    AnnouncementStatus,
+    EmailDailyReportRun,
+    EmailDailyReportStatus,
+    User,
+    as_utc,
+)
 from app.db.repository import (
     list_announcements_by_ids,
     list_snapshots_created_in_range,
@@ -55,10 +60,25 @@ from app.db.snapshot import (
 )
 from app.email.constants import (
     DEFAULT_APP_PUBLIC_BASE_URL,
+    DEFAULT_EMAIL_FROM_DISPLAY_NAME,
+    DEFAULT_EMAIL_M365_SENDER_ADDRESS,
+    RELATED_KIND_DAILY_REPORT,
     SETTING_KEY_APP_PUBLIC_BASE_URL,
     SETTING_KEY_DAILY_REPORT_LAST_SENT_AT,
+    SETTING_KEY_EMAIL_FROM_DISPLAY_NAME,
+    SETTING_KEY_EMAIL_M365_SENDER_ADDRESS,
 )
-from app.email.message_builder import build_announcement_detail_url
+from app.email.gate import EmailSendingDisabledError, is_email_sending_enabled
+from app.email.message_builder import (
+    build_announcement_detail_url,
+    build_daily_report_html_body,
+    build_daily_report_subject,
+    build_daily_report_text_body,
+    build_multipart_message,
+)
+from app.email.sender import send_with_retry
+from app.email.transport.base import EmailTransport
+from app.timezone import now_utc
 
 
 # ──────────────────────────────────────────────────────────────
@@ -530,10 +550,447 @@ def _build_summaries(
     return summaries
 
 
+# ──────────────────────────────────────────────────────────────
+# 발송 서비스 — DailyReportRequest / DailyReportResult / collect_admin_recipient_emails /
+# prepare_and_send_daily_report
+# ──────────────────────────────────────────────────────────────
+
+
+# trigger 도메인. EmailDailyReportRun.trigger 컬럼의 자유 String(20) 안에서
+# application 레벨로만 강제하는 값. 본 모듈 외부에 노출해 라우터 / 스케줄러가
+# 같은 상수를 import 한다.
+TRIGGER_SCHEDULED: Literal["scheduled"] = "scheduled"
+TRIGGER_MANUAL_ADMIN: Literal["manual_admin"] = "manual_admin"
+TRIGGER_MANUAL_TEST: Literal["manual_test"] = "manual_test"
+
+# last_sent_at SystemSetting 갱신 정책표 — design note §7 + prompt §5 의 표를 코드로
+# 옮긴 single source of truth.
+#
+#   trigger          | status              | 갱신?
+#   -----------------|---------------------|-------
+#   scheduled        | SUCCESS / PARTIAL   | ✅
+#   scheduled        | SKIPPED / FAILED    | ❌
+#   manual_admin     | SUCCESS / PARTIAL   | ✅
+#   manual_admin     | SKIPPED / FAILED    | ❌
+#   manual_test      | * (모든 상태)        | ❌
+#
+# 본 dict 에 명시적으로 등재되지 않은 trigger 는 안전 default 로 \"갱신 안 함\".
+_TRIGGERS_THAT_MAY_UPDATE_LAST_SENT_AT: frozenset[str] = frozenset(
+    {TRIGGER_SCHEDULED, TRIGGER_MANUAL_ADMIN}
+)
+_STATUSES_THAT_TRIGGER_LAST_SENT_AT_UPDATE: frozenset[EmailDailyReportStatus] = (
+    frozenset(
+        {EmailDailyReportStatus.SUCCESS, EmailDailyReportStatus.PARTIAL}
+    )
+)
+
+
+@dataclass
+class DailyReportRequest:
+    """Daily report 발송 1회의 입력값.
+
+    라우터 / 스케줄러 잡이 본 dataclass 를 만들어 ``prepare_and_send_daily_report``
+    에 넘긴다. ``transport`` / ``session`` / ``max_retry_count`` / ``now`` 는
+    호출자가 별도 kwarg 로 주입한다 (forwarding 패턴과 동일 — 테스트 격리).
+
+    Attributes:
+        trigger: ``'scheduled'`` / ``'manual_admin'`` / ``'manual_test'``. 발송
+            경로 식별자. last_sent_at 갱신 정책표가 이 값을 보고 분기한다.
+        recipients: 수신자 이메일 주소 목록. 빈 리스트도 허용 — admin 가 0명
+            이거나 모두 email 미설정인 환경을 방어한다 (FAILED 분기로 종료).
+        requested_by_user_id: manual 트리거 시 발송을 누른 사용자 PK. scheduled
+            트리거이면 ``None``. EmailDailyReportRun.requested_by_user_id 컬럼에
+            그대로 보관된다.
+    """
+
+    trigger: str
+    recipients: list[str]
+    requested_by_user_id: int | None
+
+
+@dataclass
+class DailyReportResult:
+    """``prepare_and_send_daily_report`` 의 반환값.
+
+    라우터가 ``{run_id, status, snapshot_count, recipient_count, success_count,
+    failure_count, error_message}`` JSON 응답에 그대로 직렬화한다 (design note §9
+    응답 스키마).
+
+    Attributes:
+        run_id: 생성된 EmailDailyReportRun row 의 PK. 발송 이력 expand 가 이 id
+            로 수신자별 EmailSendRun 을 조회한다.
+        status: 최종 ``EmailDailyReportStatus``.
+        snapshot_count: 누적 구간 내 ScrapeSnapshot row 수. SKIPPED 면 0, 그
+            외에는 ``window.snapshot_count`` 와 동일.
+        recipient_count: 발송 대상 수신자 수 (``request.recipients`` 의 길이).
+        success_count: 발송 성공 수신자 수.
+        failure_count: 발송 실패 수신자 수.
+        error_message: 사전 단계 실패 사유 또는 마지막 발송 시도의 에러 메시지.
+            SUCCESS / SKIPPED 케이스에서는 ``None``.
+    """
+
+    run_id: int
+    status: EmailDailyReportStatus
+    snapshot_count: int
+    recipient_count: int
+    success_count: int
+    failure_count: int
+    error_message: str | None
+
+
+def collect_admin_recipient_emails(session: Session) -> list[str]:
+    """``is_admin=True`` + email 정상 + ``email_subscribed=True`` 인 admin email 목록.
+
+    design note §5 결정:
+        - ``email IS NOT NULL`` AND ``email != ''`` — 발송 가능한 주소만.
+        - ``email_subscribed = True`` — settings 라우트의 사용자 옵트아웃 의지
+          존중 (admin 이라도 본인이 토글 OFF 했으면 제외).
+        - 중복 제거 + ASCII case-insensitive 정렬로 결정적 순서 반환 — 운영
+          이력 / 디버깅 시 같은 환경이면 같은 순서.
+
+    Args:
+        session: 읽기 전용 ORM 세션. 본 함수는 commit / flush 하지 않는다.
+
+    Returns:
+        발송 대상 admin email 주소 list. 후보가 0명이면 빈 list (호출자가 그
+        분기를 책임진다 — 본 함수는 silent skip).
+    """
+    statement = select(User.email).where(
+        User.is_admin.is_(True),
+        User.email.is_not(None),
+        User.email != "",
+        User.email_subscribed.is_(True),
+    )
+    raw_emails = session.execute(statement).scalars().all()
+    # set 으로 중복 제거 후 정렬 — admin 이 같은 email 을 공유하는 비정상
+    # 케이스에도 한 번만 발송된다.
+    unique_emails = {email.strip() for email in raw_emails if email and email.strip()}
+    return sorted(unique_emails, key=lambda value: value.lower())
+
+
+def prepare_and_send_daily_report(
+    request: DailyReportRequest,
+    *,
+    session: Session,
+    transport: EmailTransport,
+    max_retry_count: int,
+    now: datetime | None = None,
+) -> DailyReportResult:
+    """Daily report 1회의 전체 흐름을 통합 실행한다.
+
+    트랜잭션 구조 (design note §7 / phase_a3_prompt.md §5 — forwarding 의
+    prepare/run 3단계 미러):
+
+        1. ``EmailDailyReportRun`` row INSERT (status=IN_PROGRESS) + commit
+           — \"발송 시도가 있었다\" 사실을 즉시 영속화. 발송 루프 중 crash 가
+           나도 이 row 가 이력에 남는다.
+        2. 게이트 / 구간 계산 / aggregate / 본문 빌드.
+           - ``is_email_sending_enabled`` 가 False 면 row.status=FAILED commit +
+             ``EmailSendingDisabledError`` raise (라우터가 503 변환).
+           - ``compute_aggregation_window`` 가 None 이면 row.status=SKIPPED
+             commit + 빠른 종료 (snapshot_count=0).
+        3. 수신자별 1통씩 ``build_multipart_message`` → ``send_with_retry`` 호출.
+           각 호출이 EmailSendRun row 1개를 commit 한다 (related_kind=
+           'daily_report', related_id=run_id). 성공/실패 카운트만 본 함수가
+           집계한다.
+        4. 모든 수신자 처리 후 ``run.status`` / ``success_count`` /
+           ``failure_count`` / ``completed_at`` / (옵션) ``error_message`` 갱신
+           commit.
+        5. last_sent_at 갱신은 commit 후 **별도 step** 으로 분리:
+           - ``trigger in {scheduled, manual_admin}`` AND
+             ``status in {SUCCESS, PARTIAL}`` 일 때만 SystemSetting set + commit.
+           - 그 외는 모두 유지 (SKIPPED / FAILED / manual_test).
+
+    Args:
+        request: 발송 1회의 입력 (``DailyReportRequest``).
+        session: ORM 세션. 본 함수가 commit 을 여러 번 호출한다 (단계별).
+        transport: 발송 실행을 위임할 ``EmailTransport`` 구현체.
+        max_retry_count: ``send_with_retry`` 에 그대로 넘길 재시도 횟수.
+        now: 발송 시각 (UTC tz-aware). ``None`` 이면 ``now_utc()`` 호출. 테스트는
+            고정 시각을 주입해 ``last_sent_at`` 갱신 결과 비교 등을 재현한다.
+
+    Returns:
+        ``DailyReportResult`` — run_id + 최종 status + 카운터 + error_message.
+
+    Raises:
+        EmailSendingDisabledError: 게이트가 비활성 상태일 때. 호출자(라우터)가
+            잡아 HTTP 503 으로 변환한다. EmailDailyReportRun row 는 raise 직전
+            ``status=FAILED`` 로 이미 commit 되어 있다.
+    """
+    # ── 0. 시각 정규화 (테스트 격리용으로 now 주입 가능) ──────────────
+    started_at = as_utc(now) if now is not None else now_utc()
+    recipients = [str(recipient) for recipient in request.recipients]
+
+    # ── 단계 1. EmailDailyReportRun row INSERT + commit (in_progress) ─
+    # row.id 를 확보하고, 이후 어떤 분기에서 종료되더라도 \"발송 시도\" 이력은
+    # 남는다 (forwarding 의 forward_log 선 commit 패턴).
+    run = EmailDailyReportRun(
+        trigger=request.trigger,
+        status=EmailDailyReportStatus.IN_PROGRESS,
+        aggregation_from=None,
+        aggregation_to=None,
+        snapshot_count=0,
+        recipient_count=len(recipients),
+        success_count=0,
+        failure_count=0,
+        error_message=None,
+        started_at=started_at,
+        completed_at=None,
+        requested_by_user_id=request.requested_by_user_id,
+    )
+    session.add(run)
+    session.commit()
+    logger.info(
+        "Daily report 발송 시작: run_id={} trigger={!r} recipient_count={}",
+        run.id,
+        request.trigger,
+        len(recipients),
+    )
+
+    # ── 단계 2-a. 게이트 확인 ─────────────────────────────────────────
+    if not is_email_sending_enabled(session):
+        # FAILED row 를 commit 한 뒤 EmailSendingDisabledError 를 raise. 라우터
+        # 가 503 으로 변환하고, 운영자에게 게이트 활성화 방법을 안내한다.
+        error_message = (
+            "메일 전송 기능이 비활성화되어 있습니다. "
+            "시스템 관리 > 메일 발송 탭에서 활성화해 주세요."
+        )
+        run.status = EmailDailyReportStatus.FAILED
+        run.completed_at = now_utc()
+        run.error_message = error_message
+        session.commit()
+        logger.warning(
+            "Daily report 게이트 차단: run_id={} trigger={!r}",
+            run.id,
+            request.trigger,
+        )
+        raise EmailSendingDisabledError(error_message)
+
+    # ── 단계 2-b. 누적 구간 계산 → SKIPPED 분기 ──────────────────────
+    window = compute_aggregation_window(session, now=started_at)
+    if window is None:
+        # 구간 내 snapshot 0건 — 발송 자체를 skip. last_sent_at 은 유지되어
+        # 다음 잡이 같은 구간 + 신규 누적까지 처리한다 (정책표 §7).
+        run.status = EmailDailyReportStatus.SKIPPED
+        run.aggregation_from = None
+        run.aggregation_to = None
+        run.snapshot_count = 0
+        run.completed_at = now_utc()
+        session.commit()
+        logger.info(
+            "Daily report SKIPPED — 구간 내 snapshot 0건: run_id={} trigger={!r}",
+            run.id,
+            request.trigger,
+        )
+        return DailyReportResult(
+            run_id=run.id,
+            status=EmailDailyReportStatus.SKIPPED,
+            snapshot_count=0,
+            recipient_count=len(recipients),
+            success_count=0,
+            failure_count=0,
+            error_message=None,
+        )
+
+    # window 가 결정됐으니 aggregation_* 컬럼을 미리 채워 두어 후속 분기에서도
+    # 이력이 일관되게 보인다. commit 은 단계 4 에서 일괄.
+    run.aggregation_from = window.from_dt
+    run.aggregation_to = window.to_dt
+    run.snapshot_count = window.snapshot_count
+
+    # ── 단계 2-c. 빈 수신자 방어 ──────────────────────────────────────
+    # admin 가 0명이거나 모두 email 미설정인 환경에서는 발송 자체를 시도할 수
+    # 없다. SKIPPED 가 아니라 FAILED 로 표시해 운영자가 \"왜 도착 안 했는지\"
+    # 를 즉시 알아챌 수 있게 한다 (게이트 차단과 동일 수준의 사전 단계 실패).
+    if not recipients:
+        error_message = "발송 대상 수신자가 없습니다."
+        run.status = EmailDailyReportStatus.FAILED
+        run.completed_at = now_utc()
+        run.error_message = error_message
+        session.commit()
+        logger.warning(
+            "Daily report 발송 실패 — 수신자 0명: run_id={} trigger={!r}",
+            run.id,
+            request.trigger,
+        )
+        return DailyReportResult(
+            run_id=run.id,
+            status=EmailDailyReportStatus.FAILED,
+            snapshot_count=window.snapshot_count,
+            recipient_count=0,
+            success_count=0,
+            failure_count=0,
+            error_message=error_message,
+        )
+
+    # ── 단계 3. 본문 빌드 ─────────────────────────────────────────────
+    payload = aggregate_snapshots(session, window)
+    subject = build_daily_report_subject(window)
+    text_body = build_daily_report_text_body(window=window, payload=payload)
+    html_body = build_daily_report_html_body(window=window, payload=payload)
+
+    # 발신자 헤더 — forwarding 과 동일하게 SystemSetting fallback 체인 사용.
+    sender_address = (
+        get_setting(session, SETTING_KEY_EMAIL_M365_SENDER_ADDRESS)
+        or DEFAULT_EMAIL_M365_SENDER_ADDRESS
+    )
+    sender_display_name = (
+        get_setting(session, SETTING_KEY_EMAIL_FROM_DISPLAY_NAME)
+        or DEFAULT_EMAIL_FROM_DISPLAY_NAME
+    )
+
+    # ── 단계 4. 수신자별 발송 루프 ────────────────────────────────────
+    success_count = 0
+    failure_count = 0
+    last_error_message: str | None = None
+    for recipient in recipients:
+        message = build_multipart_message(
+            sender_address=sender_address,
+            sender_display_name=sender_display_name,
+            recipient=recipient,
+            subject=subject,
+            text_body=text_body,
+            html_body=html_body,
+        )
+        try:
+            send_with_retry(
+                transport,
+                message,
+                max_retry_count=max_retry_count,
+                related_kind=RELATED_KIND_DAILY_REPORT,
+                related_id=run.id,
+                requested_by_user_id=request.requested_by_user_id,
+                session=session,
+            )
+        except Exception as exc:
+            # 개별 수신자 실패는 전파하지 않는다. EmailSendRun row 는
+            # send_with_retry 가 이미 status=FAILED 로 commit 했고, 본 루프는
+            # 카운트와 마지막 에러 메시지만 보관한다 (forwarding 패턴과 동일).
+            failure_count += 1
+            last_error_message = f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                "Daily report 개별 발송 실패: run_id={} recipient={!r} "
+                "error={}: {}",
+                run.id,
+                recipient,
+                type(exc).__name__,
+                exc,
+            )
+        else:
+            success_count += 1
+
+    # ── 단계 5. 최종 status / 카운트 commit ───────────────────────────
+    final_status = _decide_daily_report_status(success_count, failure_count)
+    run.status = final_status
+    run.success_count = success_count
+    run.failure_count = failure_count
+    run.completed_at = now_utc()
+    # SUCCESS 면 error_message 는 None — 이전 시도 잔여를 클리어.
+    run.error_message = (
+        last_error_message
+        if final_status
+        in (EmailDailyReportStatus.PARTIAL, EmailDailyReportStatus.FAILED)
+        else None
+    )
+    session.commit()
+    logger.info(
+        "Daily report 발송 종료: run_id={} status={} success={} failure={}",
+        run.id,
+        final_status.value,
+        success_count,
+        failure_count,
+    )
+
+    # ── 단계 6. last_sent_at 갱신 (별도 step — 정책표 §7) ────────────
+    # commit 이 끝난 시점에 정책을 확인해 별도 commit. SKIPPED / FAILED /
+    # manual_test 에서는 갱신을 건너뛴다. 본 갱신만 따로 commit 하므로 발송
+    # 결과 영속화와 last_sent_at 정책 적용을 격리할 수 있다.
+    if _should_update_last_sent_at(request.trigger, final_status):
+        last_sent_iso = window.to_dt.isoformat()
+        set_setting(session, SETTING_KEY_DAILY_REPORT_LAST_SENT_AT, last_sent_iso)
+        session.commit()
+        logger.info(
+            "Daily report last_sent_at 갱신: run_id={} value={!r}",
+            run.id,
+            last_sent_iso,
+        )
+
+    return DailyReportResult(
+        run_id=run.id,
+        status=final_status,
+        snapshot_count=window.snapshot_count,
+        recipient_count=len(recipients),
+        success_count=success_count,
+        failure_count=failure_count,
+        error_message=run.error_message,
+    )
+
+
+def _decide_daily_report_status(
+    success_count: int,
+    failure_count: int,
+) -> EmailDailyReportStatus:
+    """발송 성공/실패 카운트로 EmailDailyReportRun 최종 status 를 결정.
+
+    규칙 (forwarding ``_decide_forward_status`` 와 동형):
+        - 실패 0건 → SUCCESS (모든 수신자 성공).
+        - 성공 0건 → FAILED (모든 수신자 실패).
+        - 그 외 (혼재) → PARTIAL.
+
+    호출자(``prepare_and_send_daily_report``) 가 빈 수신자 분기를 별도 처리
+    하므로 ``success_count + failure_count >= 1`` 이 보장된다.
+
+    Args:
+        success_count: 발송 성공 수신자 수.
+        failure_count: 발송 실패 수신자 수.
+
+    Returns:
+        ``EmailDailyReportStatus.SUCCESS`` / ``FAILED`` / ``PARTIAL`` 중 하나.
+    """
+    if failure_count == 0:
+        return EmailDailyReportStatus.SUCCESS
+    if success_count == 0:
+        return EmailDailyReportStatus.FAILED
+    return EmailDailyReportStatus.PARTIAL
+
+
+def _should_update_last_sent_at(
+    trigger: str,
+    status: EmailDailyReportStatus,
+) -> bool:
+    """last_sent_at 갱신 정책표(§7)를 한 함수로 격리한 판정 헬퍼.
+
+    표 (design note §7 / prompt §5 인용):
+        trigger          | status              | 갱신?
+        scheduled        | SUCCESS / PARTIAL   | ✅
+        scheduled        | SKIPPED / FAILED    | ❌
+        manual_admin     | SUCCESS / PARTIAL   | ✅
+        manual_admin     | SKIPPED / FAILED    | ❌
+        manual_test      | *                   | ❌
+
+    Args:
+        trigger: ``DailyReportRequest.trigger``.
+        status: 발송 루프 종료 후의 최종 status.
+
+    Returns:
+        last_sent_at 을 SystemSetting 에 갱신해야 하면 True.
+    """
+    if trigger not in _TRIGGERS_THAT_MAY_UPDATE_LAST_SENT_AT:
+        return False
+    return status in _STATUSES_THAT_TRIGGER_LAST_SENT_AT_UPDATE
+
+
 __all__ = [
     "AggregatedSnapshotPayload",
     "AggregationWindow",
     "AnnouncementSummary",
+    "DailyReportRequest",
+    "DailyReportResult",
+    "TRIGGER_MANUAL_ADMIN",
+    "TRIGGER_MANUAL_TEST",
+    "TRIGGER_SCHEDULED",
     "aggregate_snapshots",
+    "collect_admin_recipient_emails",
     "compute_aggregation_window",
+    "prepare_and_send_daily_report",
 ]
