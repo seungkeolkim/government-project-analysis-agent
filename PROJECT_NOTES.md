@@ -152,7 +152,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - **언어 / 문서**: 모든 모듈 docstring 과 주석은 **한국어**. 외부 공개용이 아니므로 격식보다 명확성 우선.
 - **타입힌트**: 모든 공개 함수에 타입 어노테이션. `from __future__ import annotations` 를 파일 상단에.
 - **설정 접근**: 직접 `os.environ` 읽지 말고 `app.config.get_settings()` 싱글턴 경유.
-- **시각 처리**: DB 의 모든 시간 컬럼은 timezone-aware UTC 저장이 컨벤션. **SQLite 백엔드는 `DateTime(timezone=True)` 의 tz 를 실제로 저장하지 못해** SELECT 결과가 naive 로 돌아오므로, 비교 직전에 양쪽을 UTC tz-aware 로 정규화하는 헬퍼 (`_as_utc`) 를 사용한다. **표시·로그·cron 은 Asia/Seoul (KST) 단일 고정**: 저장은 `now_utc()`, 표시는 `to_kst()` + `format_kst()` 또는 Jinja2 필터 (`kst_format`, `kst_date`). `datetime.utcnow()` · naive `datetime.now()` 직접 사용 금지 — `app/timezone.py` 헬퍼로만 생성. 컨테이너 `TZ` env 는 유지하되 코드는 `ZoneInfo("Asia/Seoul")` 명시로 환경변수 비의존. 외부 응답(IRIS / NTIS) 날짜는 KST 가정 후 UTC 변환 저장 (가정이 틀렸을 때는 `raw_metadata` 의 원문 텍스트로 backfill).
+- **시각 처리**: DB 의 모든 시간 컬럼은 timezone-aware UTC 저장이 컨벤션. **SQLite 백엔드는 `DateTime(timezone=True)` 의 tz 를 실제로 저장하지 못해** SELECT 결과가 naive 로 돌아오므로, 비교 직전에 양쪽을 UTC tz-aware 로 정규화하는 헬퍼 (`_as_utc`) 를 사용한다. **표시·로그·cron 은 Asia/Seoul (KST) 단일 고정**: 저장은 `now_utc()`, 표시는 `to_kst()` + `format_kst()` 또는 Jinja2 필터 (`kst_format`, `kst_date`). **시스템 표시 포맷은 `YYYY-MM-DD HH:mm:ss` 초 단위로 통일** (`DEFAULT_KST_FORMAT = "%Y-%m-%d %H:%M:%S"`). `kst_date` Jinja2 필터도 초 단위 표시 (날짜 전용 아님 — 00122). JS datetime 은 `en-CA` locale + `Asia/Seoul` timeZone 패턴으로 통일 (`toLocaleString('ko-KR')` 대체). `datetime.utcnow()` · naive `datetime.now()` 직접 사용 금지 — `app/timezone.py` 헬퍼로만 생성. 컨테이너 `TZ` env 는 유지하되 코드는 `ZoneInfo("Asia/Seoul")` 명시로 환경변수 비의존. 외부 응답(IRIS / NTIS) 날짜는 KST 가정 후 UTC 변환 저장 (가정이 틀렸을 때는 `raw_metadata` 의 원문 텍스트로 backfill).
 - **UPSERT**: 공고는 `(source_type, source_announcement_id)` 복합 키, 첨부는 `(announcement_id, original_filename)` + `sha256` 비교. 재실행 시 중복 생성 금지. 변경된 경우만 신규 row 생성(이력 보존), 상태 전이만은 in-place UPDATE.
 - **예외 격리**: 스크래퍼 파이프라인은 **공고 1건 단위** try/except. 한 공고 실패가 전체 실행을 중단시키지 않는다.
 - **웹 보안 경계**: FastAPI 외부 노출 금지 (Secure=False 쿠키, CSRF 토큰 없음 — 로컬 전용 전제). 첨부 다운로드는 반드시 `download_dir` 하위로 경로 트래버설 방어. POST 인증 라우트는 `ensure_same_origin` 의존성 (Origin/Referer 헤더 netloc 비교).
@@ -327,6 +327,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
+- [00122] 시스템 전체 datetime 표시 포맷 `YYYY-MM-DD HH:mm:ss` 초 단위로 통일 — `DEFAULT_KST_FORMAT` 변경, `kst_date` Jinja2 필터도 초 단위로 변경, JS `relevance.js` 의 `ko-KR` toLocaleString 을 `en-CA + Asia/Seoul` 패턴으로 교체 — 2026-05-19
 - [00121] 공고 목록에 모집 시작일 컬럼 추가 — 마감일 좌측에 시작일 표시; 데이터 없을 경우 '-' 처리; CSS 컬럼 너비 조정 — 2026-05-19
 - [00120] 메일 포워딩 비동기화 + 프로그레스 바 — POST /forward 즉시 반환 후 BackgroundTasks 발송, 모달에 polling 기반 실시간 N명 중 M명 완료 / 실패 K건 표시 — 2026-05-19
 - [00119] 메일 포워드 버튼 툴팁 방향 변경 (상단 → 좌측) — `[data-tooltip]::after` CSS를 `bottom/left/translateX` 기준에서 `top/right/translateY` 기준으로 변경; 우측 overflow로 인한 테이블 컬럼 expand 문제 해소 — 2026-05-19
@@ -336,5 +337,4 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - [00113] 포워딩 발신자 표 단일 조직 표시 + 무소속 안내 문구 수정 — `forwarding.py` 가 모든 소속 조직 대신 선택된 조직 1건만 발신자 표에 노출하도록 변경, 무소속 안내 메시지 \"개인 자격으로 발송됩니다\" → \"조직 정보 없이 발송됩니다\" 로 수정 — 2026-05-18
 - [00112] 포워딩 메일 발신자 정보 표 삽입 + 목록 전달 버튼 추가 — `message_builder.py` `sender_organizations: list` 로 시그니처 변경, 메타 박스 아래 3행 발신자 표(ID·조직명·이메일) 삽입; `/announcement` 목록에 "전달" 컬럼 + ✉️ 버튼(로그인+canonical 시 활성) — 2026-05-18
 - [00111] 공고 포워딩 메일 '공고 상세보기' 링크 Base URL 설정 기능 추가 — 관리자 이메일 설정 페이지에 「시스템 접근 주소」 필드 추가, `/api/admin/email/settings` GET/PUT 에 `app.public_base_url` 포함, http/https 스킴 Pydantic 검증 — 2026-05-18
-- [00110] M365 OAuth SMTP STARTTLS 후 EHLO 재전송 버그 수정 — `smtplib.starttls()` 는 EHLO 를 자동 재전송하지 않아 M365 가 `503 5.5.2 Send hello first` 를 반환하는 문제를 `smtp.ehlo()` 명시적 호출 추가로 해결 — 2026-05-15
 
