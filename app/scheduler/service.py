@@ -28,15 +28,22 @@ from app.db.session import get_engine
 from app.scheduler.constants import (
     DEFAULT_MISFIRE_GRACE_TIME_SEC,
     JOB_ID_BACKUP,
+    JOB_ID_DAILY_REPORT,
     JOB_ID_PREFIX_CRON,
     JOB_ID_PREFIX_INTERVAL,
     JOB_NAME_BACKUP_PREFIX,
     JOB_NAME_CRON_PREFIX,
+    JOB_NAME_DAILY_REPORT_PREFIX,
     JOB_NAME_INTERVAL_PREFIX,
     MAX_INTERVAL_HOURS,
     SCHEDULER_JOBS_TABLENAME,
 )
-from app.scheduler.job_runner import gc_orphan_attachments_job, scheduled_backup_job, scheduled_scrape
+from app.scheduler.job_runner import (
+    gc_orphan_attachments_job,
+    scheduled_backup_job,
+    scheduled_daily_report_job,
+    scheduled_scrape,
+)
 # task 00040-4 — APScheduler 의 글로벌/트리거 timezone 을 Asia/Seoul 로 통일.
 # ``app.timezone`` 이 KST 의 단일 진실 소스이므로 직접 ``ZoneInfo("Asia/Seoul")``
 # 을 만들지 않고 그곳의 상수를 가져온다.
@@ -198,12 +205,16 @@ def _reinterpret_existing_jobs_to_kst(scheduler: Any) -> int:
 
         if isinstance(old_trigger, CronTrigger):
             # Job.name 의 prefix 를 벗겨 원본 cron 표현식 복원.
-            # scrape 잡: "cron:0 3 * * *", backup 잡: "backup-cron:0 3 * * *"
+            # scrape 잡: "cron:0 3 * * *", backup 잡: "backup-cron:0 3 * * *",
+            # daily report 잡: "daily-report-cron:0 9 * * 1-5"
             if isinstance(job.name, str) and job.name.startswith(JOB_NAME_CRON_PREFIX):
                 cron_expression = job.name[len(JOB_NAME_CRON_PREFIX):]
             elif isinstance(job.name, str) and job.name.startswith(JOB_NAME_BACKUP_PREFIX):
                 # task 00094-2 — 백업 잡 prefix 인식
                 cron_expression = job.name[len(JOB_NAME_BACKUP_PREFIX):]
+            elif isinstance(job.name, str) and job.name.startswith(JOB_NAME_DAILY_REPORT_PREFIX):
+                # task 00125-7 — daily report 잡 prefix 인식
+                cron_expression = job.name[len(JOB_NAME_DAILY_REPORT_PREFIX):]
             else:
                 logger.warning(
                     "tz 재해석 스킵 — cron job.name 파싱 실패: job_id={} name={!r}",
@@ -357,6 +368,9 @@ def _summary_from_job(job: Any) -> ScheduleSummary:
         elif isinstance(job.name, str) and job.name.startswith(JOB_NAME_BACKUP_PREFIX):
             # task 00094-2 — 백업 잡 prefix 인식
             trigger_spec = job.name[len(JOB_NAME_BACKUP_PREFIX):]
+        elif isinstance(job.name, str) and job.name.startswith(JOB_NAME_DAILY_REPORT_PREFIX):
+            # task 00125-7 — daily report 잡 prefix 인식
+            trigger_spec = job.name[len(JOB_NAME_DAILY_REPORT_PREFIX):]
         else:
             # 폴백: cron field 직접 표현. fmt 는 'CronTrigger(...)' 형태.
             trigger_spec = repr(job.trigger)
@@ -411,13 +425,15 @@ def list_schedules() -> list[ScheduleSummary]:
 
 
 def list_general_schedules() -> list[ScheduleSummary]:
-    """백업 잡(JOB_ID_BACKUP)을 제외한 일반 스케줄 목록을 반환한다.
+    """백업 잡과 daily report 잡을 제외한 일반 스케줄 목록을 반환한다.
 
     [스케줄] 탭은 일반 수집 스케줄만 표시하고, 백업 잡은 [시스템 백업] 탭에서
-    별도 노출한다(task 00096). JOB_ID_BACKUP 기반 필터링이며 trigger_spec
-    매칭은 false-match 위험이 있으므로 사용하지 않는다.
+    별도 노출하며(task 00096) daily report 잡은 [메일 발송 설정] 의 「Daily
+    Report」 카드에서 별도 노출한다(task 00125 / Phase A-3). 고정 ID 기반
+    필터링이며 trigger_spec 매칭은 false-match 위험이 있으므로 사용하지 않는다.
     """
-    return [s for s in list_schedules() if s.job_id != JOB_ID_BACKUP]
+    excluded_job_ids = {JOB_ID_BACKUP, JOB_ID_DAILY_REPORT}
+    return [s for s in list_schedules() if s.job_id not in excluded_job_ids]
 
 
 def get_backup_schedule_summary() -> "ScheduleSummary | None":
@@ -803,6 +819,228 @@ def ensure_backup_cron_registered() -> None:
         logger.warning("백업 cron startup 자동 등록 실패 (admin 페이지에서 수동 등록 필요): {}", exc)
 
 
+# ──────────────────────────────────────────────────────────────
+# task 00125-7 (Phase A-3) — Daily Report 전용 스케줄 CRUD
+# ──────────────────────────────────────────────────────────────
+#
+# 운영 모델은 백업 잡(``register_backup_cron_schedule``) 과 동일하다 — 잡은 항상
+# **1건 고정 ID** (``JOB_ID_DAILY_REPORT='daily-report'``) 로만 존재하고,
+# SystemSetting (``email.daily_report.enabled`` / ``cron_expression``) 가 사용자
+# 토글 source of truth 다. 따라서 본 모듈에서 노출하는 함수는 4종:
+#
+#     register_daily_report_cron_schedule(cron_expression, *, enabled)
+#         → enabled=False / cron 빈 값 → 잡 제거 + None 반환
+#         → 잡 없음 → add_job
+#         → 잡 있음 → reschedule_job + modify_job(name)
+#     remove_daily_report_cron_schedule()  — 잡 없어도 no-op
+#     get_daily_report_schedule_summary() → ScheduleSummary | None
+#     ensure_daily_report_cron_registered() — startup 자동 복원 (백업과 동일 라인)
+
+
+def register_daily_report_cron_schedule(
+    cron_expression: str | None = None,
+    *,
+    enabled: bool | None = None,
+) -> Optional[ScheduleSummary]:
+    """Daily report cron 잡을 등록·갱신·제거한다 (단일 진입점).
+
+    ``JOB_ID_DAILY_REPORT`` 로 고정 ID 를 사용해 daily report 잡은 **항상 1건**만
+    존재한다. 동작 매트릭스 (디자인 노트 §8 — 4 케이스 검증):
+
+    | 입력                                       | 동작                                              |
+    |--------------------------------------------|---------------------------------------------------|
+    | ``enabled=False`` 또는 cron 빈 값          | 기존 잡이 있으면 ``remove_job`` + None 반환       |
+    | 잡 없음 + enabled=True + cron 정상         | ``add_job``                                       |
+    | 잡 있음 + enabled=True + cron 정상         | ``reschedule_job`` + ``modify_job(name=...)``     |
+
+    Args:
+        cron_expression: 5-필드 cron (분 시 일 월 요일). 예) ``"0 9 * * 1-5"``.
+            ``Asia/Seoul`` 기준으로 파싱된다. ``None`` 이면 SystemSetting
+            ``email.daily_report.cron_expression`` 에서 직접 로드한다.
+            빈 문자열로 평가되면 비활성화 분기로 처리한다.
+        enabled: ``True`` 면 등록·갱신, ``False`` 면 제거. ``None`` 이면
+            SystemSetting ``email.daily_report.enabled`` 에서 직접 로드한다.
+
+    Returns:
+        등록·갱신된 잡의 ``ScheduleSummary``. 제거되었거나 등록되지 않으면 None.
+
+    Raises:
+        ScheduleValidationError: cron 표현식이 잘못된 경우 (enabled=True 일 때만).
+    """
+    # ── 1. None 입력은 SystemSetting 에서 로드 ──────────────────────────
+    # 디자인 노트 §8 가 명시: \"인자 None 이면 SystemSetting 에서 직접 로드\".
+    # startup 자동 복원(``ensure_daily_report_cron_registered``) 이 본 함수에
+    # 인자 없이 의존하므로 본 로직이 중복되지 않도록 한 곳에서만 처리한다.
+    if cron_expression is None or enabled is None:
+        # lazy import — 순환 import 방지 (app.email.constants → app.scheduler 의존
+        # 가능성 차단). scheduled_daily_report_job 안의 lazy import 패턴과 동일.
+        from app.backup.service import get_setting
+        from app.db.session import session_scope
+        from app.email.constants import (
+            DEFAULT_DAILY_REPORT_CRON,
+            DEFAULT_DAILY_REPORT_ENABLED,
+            SETTING_KEY_DAILY_REPORT_CRON,
+            SETTING_KEY_DAILY_REPORT_ENABLED,
+        )
+
+        with session_scope() as session:
+            if cron_expression is None:
+                cron_expression = (
+                    get_setting(session, SETTING_KEY_DAILY_REPORT_CRON)
+                    or DEFAULT_DAILY_REPORT_CRON
+                )
+            if enabled is None:
+                raw_enabled = get_setting(session, SETTING_KEY_DAILY_REPORT_ENABLED)
+                # 저장 포맷 "true" / "false" (소문자) — case-insensitive 비교.
+                if raw_enabled is None or raw_enabled.strip() == "":
+                    enabled = DEFAULT_DAILY_REPORT_ENABLED
+                else:
+                    enabled = raw_enabled.strip().lower() == "true"
+
+    cron_expression = (cron_expression or "").strip()
+
+    # ── 2. 비활성화 분기 — 기존 잡이 있으면 제거 ────────────────────────
+    if not enabled or not cron_expression:
+        scheduler = _require_running_scheduler()
+        existing = scheduler.get_job(JOB_ID_DAILY_REPORT)
+        if existing is not None:
+            scheduler.remove_job(JOB_ID_DAILY_REPORT)
+            logger.info(
+                "Daily report cron 제거 (비활성화): job_id={} prev_expr_name={!r}",
+                JOB_ID_DAILY_REPORT,
+                existing.name,
+            )
+        else:
+            logger.debug(
+                "Daily report cron 비활성화 요청: 잡이 없으므로 no-op (job_id={})",
+                JOB_ID_DAILY_REPORT,
+            )
+        return None
+
+    # ── 3. 활성화 분기 — cron 표현식 파싱 + add or reschedule ───────────
+    from apscheduler.triggers.cron import CronTrigger
+
+    try:
+        # cron 표현식은 KST 기준으로 파싱한다 (task 00040-4 의 KST 컨벤션).
+        # BackgroundScheduler.timezone 이 이미 KST 라 trigger 도 명시적으로 KST.
+        trigger = CronTrigger.from_crontab(cron_expression, timezone=KST)
+    except Exception as exc:
+        raise ScheduleValidationError(
+            f"Daily report cron 표현식 파싱 실패: {exc}"
+        ) from exc
+
+    scheduler = _require_running_scheduler()
+    existing = scheduler.get_job(JOB_ID_DAILY_REPORT)
+
+    job_name = f"{JOB_NAME_DAILY_REPORT_PREFIX}{cron_expression}"
+    if existing is not None:
+        # trigger 갱신 — next_run_time 도 함께 재계산 (백업 잡 패턴과 동일).
+        scheduler.reschedule_job(JOB_ID_DAILY_REPORT, trigger=trigger)
+        # name 도 새 cron 표현식으로 갱신해 list_schedules 의 trigger_spec 복원이
+        # 최신 값이 되도록 한다.
+        scheduler.modify_job(JOB_ID_DAILY_REPORT, name=job_name)
+        updated = scheduler.get_job(JOB_ID_DAILY_REPORT)
+        logger.info(
+            "Daily report cron 갱신: job_id={} expr={!r} next_run_time={}",
+            JOB_ID_DAILY_REPORT,
+            cron_expression,
+            getattr(updated, "next_run_time", None),
+        )
+    else:
+        scheduler.add_job(
+            scheduled_daily_report_job,
+            trigger=trigger,
+            # pickle 안정성을 위해 args 는 빈 list. 잡 함수가 SystemSetting 에서
+            # 발송 시점에 직접 설정을 읽는다 (백업 잡과 동일 정책).
+            args=[],
+            id=JOB_ID_DAILY_REPORT,
+            name=job_name,
+            replace_existing=True,
+        )
+        updated = scheduler.get_job(JOB_ID_DAILY_REPORT)
+        logger.info(
+            "Daily report cron 등록: job_id={} expr={!r} next_run_time={}",
+            JOB_ID_DAILY_REPORT,
+            cron_expression,
+            getattr(updated, "next_run_time", None),
+        )
+
+    return _summary_from_job(updated)
+
+
+def remove_daily_report_cron_schedule() -> None:
+    """Daily report cron 잡을 제거한다. 잡이 없어도 에러 없이 no-op."""
+    scheduler = _require_running_scheduler()
+    existing = scheduler.get_job(JOB_ID_DAILY_REPORT)
+    if existing is None:
+        logger.debug(
+            "Daily report cron 제거 요청: 잡이 이미 없음 (no-op, job_id={})",
+            JOB_ID_DAILY_REPORT,
+        )
+        return
+    scheduler.remove_job(JOB_ID_DAILY_REPORT)
+    logger.info("Daily report cron 제거: job_id={}", JOB_ID_DAILY_REPORT)
+
+
+def get_daily_report_schedule_summary() -> Optional[ScheduleSummary]:
+    """APScheduler 에 등록된 daily report 잡의 ``ScheduleSummary`` 를 반환한다.
+
+    daily report 잡이 존재하지 않거나 스케줄러가 미기동 상태면 None. Admin API
+    의 ``GET /api/admin/email/daily-report/settings`` 응답에서 ``next_run_at`` 를
+    채울 때 본 함수의 ``ScheduleSummary.next_run_time`` 을 그대로 사용한다.
+    """
+    for summary in list_schedules():
+        if summary.job_id == JOB_ID_DAILY_REPORT:
+            return summary
+    return None
+
+
+def ensure_daily_report_cron_registered() -> None:
+    """startup 시 daily report cron 잡을 SystemSetting 기반으로 복원한다.
+
+    ``create_app()`` 에서 ``ensure_backup_cron_registered()`` 바로 다음 라인에
+    호출된다 (디자인 노트 §8 startup 복원). 스케줄러가 아직 running 이 아닌
+    경우 조용히 no-op 처리한다.
+
+    동작:
+        - ``email.daily_report.enabled`` 가 ``True`` 면
+          ``register_daily_report_cron_schedule(cron, enabled=True)`` 로 등록·갱신.
+          (이미 jobstore 에서 자동 복원된 잡이 있으면 reschedule 흐름을 타고 cron
+          표현식이 SystemSetting 값으로 동기화된다.)
+        - ``email.daily_report.enabled`` 가 ``False`` 면
+          ``register_daily_report_cron_schedule(enabled=False)`` 로 통일 — jobstore
+          에 남아 있던 복원분도 함께 제거된다 (디자인 노트 §8 결정).
+    """
+    with _scheduler_lock:
+        scheduler = _scheduler
+    if scheduler is None or not getattr(scheduler, "running", False):
+        logger.debug("ensure_daily_report_cron_registered: 스케줄러 미기동 — 스킵")
+        return
+
+    try:
+        # 인자 None 으로 호출하면 본 함수가 SystemSetting 에서 직접 로드해
+        # add/remove 분기를 결정한다 (백업의 ensure 패턴 미러).
+        summary = register_daily_report_cron_schedule()
+    except ScheduleValidationError as exc:
+        # 저장된 cron 이 잘못된 경우 — 운영자가 admin 페이지에서 수정해야 함.
+        logger.warning(
+            "Daily report cron startup 자동 등록 실패 (admin 페이지에서 수동 수정 필요): {}",
+            exc,
+        )
+        return
+
+    if summary is None:
+        logger.info(
+            "Daily report cron startup 복원: enabled=False — 잡 미등록 상태로 시작",
+        )
+    else:
+        logger.info(
+            "Daily report cron startup 복원: enabled=True spec={!r} next_run_time={}",
+            summary.trigger_spec,
+            summary.next_run_time,
+        )
+
+
 __all__ = [
     "GC_ORPHAN_DEFAULT_CRON",
     "JOB_ID_PREFIX_GC_ORPHAN",
@@ -814,10 +1052,14 @@ __all__ = [
     "add_interval_schedule",
     "delete_schedule",
     "ensure_backup_cron_registered",
+    "ensure_daily_report_cron_registered",
+    "get_daily_report_schedule_summary",
     "is_scheduler_running",
     "list_schedules",
     "register_backup_cron_schedule",
+    "register_daily_report_cron_schedule",
     "remove_backup_cron_schedule",
+    "remove_daily_report_cron_schedule",
     "start",
     "stop",
     "toggle_schedule",

@@ -40,14 +40,25 @@ JOB_ID_BACKUP: Final[str] = "backup-db"
 # _reinterpret_existing_jobs_to_kst 가 이 prefix 로 cron 표현식을 복원한다.
 JOB_NAME_BACKUP_PREFIX: Final[str] = "backup-cron:"
 
+# ── Daily Report 잡 식별자 (task 00125-7 / Phase A-3) ──────────────────────────
+# Daily report 잡도 백업과 마찬가지로 항상 1건만 존재한다. SystemSetting
+# (email.daily_report.enabled / cron_expression) 이 토글 source of truth 이고,
+# 고정 ID 로 add_or_reschedule 흐름을 단순화한다.
+# (디자인 노트 §8 결정 — 백업 잡의 ``backup-db`` / ``backup-cron:`` 패턴 미러)
+JOB_ID_DAILY_REPORT: Final[str] = "daily-report"
+# job.name 에 저장할 prefix. 예) "daily-report-cron:0 9 * * 1-5"
+JOB_NAME_DAILY_REPORT_PREFIX: Final[str] = "daily-report-cron:"
+
 
 __all__ = [
     "DEFAULT_MISFIRE_GRACE_TIME_SEC",
     "JOB_ID_BACKUP",
+    "JOB_ID_DAILY_REPORT",
     "JOB_ID_PREFIX_CRON",
     "JOB_ID_PREFIX_INTERVAL",
     "JOB_NAME_BACKUP_PREFIX",
     "JOB_NAME_CRON_PREFIX",
+    "JOB_NAME_DAILY_REPORT_PREFIX",
     "JOB_NAME_INTERVAL_PREFIX",
     "MAX_INTERVAL_HOURS",
     "SCHEDULER_JOBS_TABLENAME",
