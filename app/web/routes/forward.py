@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
 from loguru import logger
 from pydantic import BaseModel, EmailStr, Field
@@ -43,7 +43,13 @@ from app.auth.dependencies import (
     ensure_same_origin,
 )
 from app.backup.service import get_setting
-from app.db.models import EmailForwardLog, EmailSendRun, User, UserOrganization
+from app.db.models import (
+    EmailForwardLog,
+    EmailForwardStatus,
+    EmailSendRun,
+    User,
+    UserOrganization,
+)
 from app.db.repository import get_canonical_project_by_id
 from app.db.session import session_scope
 from app.email.constants import (
@@ -51,14 +57,18 @@ from app.email.constants import (
     SETTING_KEY_EMAIL_MAX_RETRY_COUNT,
 )
 from app.email.forwarding import (
+    ForwardPreparation,
     ForwardRequest,
-    forward_announcement,
+    forward_announcement_prepare,
+    forward_announcement_run,
     get_forward_log_with_send_runs,
     list_forward_logs_for_canonical,
 )
 from app.email.gate import EmailSendingDisabledError
+from app.email.transport.base import EmailTransport
 from app.email.transport.factory import build_transport_from_settings
 from app.organizations.service import get_user_organization_ids
+from app.timezone import now_utc
 
 # ──────────────────────────────────────────────────────────────
 # 상수
@@ -197,6 +207,13 @@ def _ensure_canonical_exists(session, canonical_id: int) -> None:
         )
 
 
+# 응답 직렬화에서 "발송 진행 중" 을 가리키는 가상 status 값. DB 의
+# email_forward_status enum 에는 존재하지 않으며, ``completed_at IS NULL`` 인
+# row 의 placeholder status (FAILED) 를 사용자 응답에서 본 값으로 덮어쓴다
+# (task 00120 비동기 발송 도입 후 진행 중 상태 표시용).
+FORWARD_STATUS_IN_PROGRESS: str = "in_progress"
+
+
 def _serialize_forward_log(forward_log: EmailForwardLog) -> dict[str, Any]:
     """EmailForwardLog 1 row 를 GET /forward-logs 응답용 dict 로 직렬화한다.
 
@@ -210,6 +227,12 @@ def _serialize_forward_log(forward_log: EmailForwardLog) -> dict[str, Any]:
     으로, 발송 조직 미지정/삭제 row 는 ``sender_organization`` 을 ``None`` 으로
     반환한다.
 
+    status 후처리 (task 00120):
+        포워딩이 비동기로 발송되면서 ``completed_at IS NULL`` 인 row 가 응답에
+        섞이게 된다. 이 경우 DB enum value (placeholder 'failed') 대신 가상
+        값 ``'in_progress'`` 로 덮어써 사용자에게 "진행 중" 을 노출한다.
+        DB schema (enum) 는 변경하지 않는다.
+
     Args:
         forward_log: 직렬화할 ``EmailForwardLog`` 인스턴스.
 
@@ -218,6 +241,14 @@ def _serialize_forward_log(forward_log: EmailForwardLog) -> dict[str, Any]:
     """
     sender_user = forward_log.sender_user
     sender_organization = forward_log.sender_organization
+    # completed_at IS NULL 인 row 는 발송 루프가 아직 끝나지 않은 상태 — DB
+    # enum 의 placeholder ('failed') 대신 가상 'in_progress' 를 노출한다.
+    if forward_log.completed_at is None:
+        serialized_status: str | None = FORWARD_STATUS_IN_PROGRESS
+    elif forward_log.status is not None:
+        serialized_status = forward_log.status.value
+    else:
+        serialized_status = None
     return {
         "id": forward_log.id,
         "sender": (
@@ -243,9 +274,7 @@ def _serialize_forward_log(forward_log: EmailForwardLog) -> dict[str, Any]:
         "subject": forward_log.subject,
         "recipient_count": forward_log.recipient_count,
         "has_additional_message": forward_log.has_additional_message,
-        "status": (
-            forward_log.status.value if forward_log.status is not None else None
-        ),
+        "status": serialized_status,
         "success_count": forward_log.success_count,
         "failure_count": forward_log.failure_count,
         "created_at": (
@@ -327,6 +356,71 @@ def _serialize_user_search_result(user: User) -> dict[str, Any]:
 # ──────────────────────────────────────────────────────────────
 
 
+def _run_forward_in_background(
+    preparation: ForwardPreparation,
+    transport: EmailTransport,
+    max_retry_count: int,
+) -> None:
+    """``BackgroundTasks`` 가 호출할 발송 루프 wrapper — 새 session_scope() 로 실행한다.
+
+    라우터의 request-scoped session 은 응답 후 close 되므로, 본 함수는 새
+    ``session_scope()`` 를 열어 ``forward_announcement_run`` 을 호출한다.
+    sync 함수이므로 FastAPI 가 threadpool 로 실행해 send_with_retry 의
+    ``time.sleep(2.0)`` 이 event loop 를 막지 않는다.
+
+    예외 처리 (최종 가드):
+        ``forward_announcement_run`` 내부의 개별 ``send_with_retry`` 실패는
+        루프가 흡수해 ``failure_count`` 로 집계하므로 정상 흐름에서는 본
+        함수의 try/except 까지 도달하지 않는다. 그래도 DB commit 실패 등
+        예상치 못한 예외가 나면 ``logger.exception`` + forward_log
+        ``status=FAILED`` / ``completed_at = now_utc()`` 로 마무리해
+        polling 클라이언트가 무한 대기에 빠지지 않게 한다.
+
+    Args:
+        preparation: prepare 단계에서 만들어진 ``ForwardPreparation``. 응답
+            직후에도 라우터 session 이 close 되었으므로 본 DTO 가 발송 루프에
+            필요한 모든 입력을 담고 있다.
+        transport: prepare 단계에서 만든 ``EmailTransport`` 구현체. session
+            을 참조하지 않으므로 응답 이후에도 안전하게 재사용 가능.
+        max_retry_count: ``send_with_retry`` 에 그대로 넘길 재시도 횟수.
+    """
+    try:
+        with session_scope() as session:
+            forward_announcement_run(
+                preparation,
+                session=session,
+                transport=transport,
+                max_retry_count=max_retry_count,
+            )
+    except Exception:
+        # 발송 루프 자체의 개별 send 실패는 forward_announcement_run 이
+        # 흡수하므로 여기까지 오는 것은 비정상 경로다. forward_log 가 미완료
+        # 상태로 남으면 polling 클라이언트가 무한 대기하므로 별도 session
+        # 으로 status=FAILED / completed_at 을 기록해 마무리한다.
+        logger.exception(
+            "포워딩 백그라운드 실행 실패: forward_log_id={}",
+            preparation.forward_log_id,
+        )
+        try:
+            with session_scope() as guard_session:
+                forward_log = guard_session.get(
+                    EmailForwardLog, preparation.forward_log_id
+                )
+                if (
+                    forward_log is not None
+                    and forward_log.completed_at is None
+                ):
+                    forward_log.status = EmailForwardStatus.FAILED
+                    forward_log.completed_at = now_utc()
+                    guard_session.commit()
+        except Exception:
+            # 가드마저 실패하면 더 할 수 있는 일이 없다 — 로그만 남긴다.
+            logger.exception(
+                "포워딩 최종 가드 실패: forward_log_id={}",
+                preparation.forward_log_id,
+            )
+
+
 @router.post(
     "/api/canonical/{canonical_id}/forward",
     dependencies=[Depends(ensure_same_origin)],
@@ -335,14 +429,15 @@ def _serialize_user_search_result(user: User) -> dict[str, Any]:
 def forward_canonical_route(
     canonical_id: int,
     body: ForwardSendRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(current_user_required),
 ) -> JSONResponse:
-    """공고 1건을 요청 본문의 수신자 N명에게 메일로 포워딩한다.
+    """공고 1건을 요청 본문의 수신자 N명에게 메일로 비동기 포워딩한다 (task 00120).
 
     권한: 로그인 사용자 누구나(``current_user_required``). 조직 멤버일 필요는
     없으나, ``sender_organization_id`` 를 채우려면 본인 소속 조직이어야 한다.
 
-    처리 흐름:
+    처리 흐름 (비동기화 이후):
         1. Pydantic ``ForwardSendRequest`` 가 recipients 개수(1~50),
            additional_message 길이(≤5000), subject 길이(≤200)를 1차 검증 —
            위반 시 FastAPI 가 자동으로 422 를 반환한다.
@@ -353,40 +448,38 @@ def forward_canonical_route(
            SystemSetting 의 transport.type 값이 미지원이면 422 (운영자에게
            설정 오류임을 알린다, admin_email.py 와 동일 정책).
         5. SystemSetting 에서 ``email.max_retry_count`` 를 정수로 읽는다.
-        6. ``forward_announcement`` 를 호출해 실제 발송을 수행한다. service 가
-           던지는 예외는 HTTP 상태로 변환한다 (아래 Raises 참고).
-        7. 성공 시 200 + ``{forward_log_id, status, success_count,
-           failure_count}``.
-
-    개별 수신자 발송 실패는 ``forward_announcement`` 가 루프 안에서 흡수하므로
-    본 핸들러까지 전파되지 않는다 — 그 경우에도 응답은 200 이며, status 가
-    ``partial`` 또는 ``failed`` 로 내려간다. 5xx 는 발송 루프 시작 전(준비
-    단계)에 예외가 난 경우에만 발생한다.
+        6. ``forward_announcement_prepare`` 를 동기 호출해 forward_log row
+           를 INSERT + commit 한다. 이 단계까지의 예외(canonical 없음,
+           transport 오류 등)는 4xx/5xx 로 즉시 반환된다.
+        7. ``forward_announcement_run`` 을 ``BackgroundTasks`` 에 위임한다 —
+           FastAPI 가 응답 직후 threadpool 로 발송 루프를 실행해 event loop
+           가 blocking 되지 않는다.
+        8. 즉시 200 + ``{forward_log_id, status:'in_progress', success_count:0,
+           failure_count:0}`` 로 반환한다. 클라이언트는 forward_log_id 로
+           ``GET /api/canonical/{id}/forward-logs/{forward_log_id}`` 를 폴링해
+           진행 상황을 표시한다.
 
     Args:
         canonical_id: 포워딩 대상 공고의 CanonicalProject PK (path 파라미터).
         body: 검증된 ``ForwardSendRequest`` 요청 본문.
+        background_tasks: FastAPI 가 주입하는 ``BackgroundTasks`` — 응답 후
+            발송 루프를 threadpool 로 실행한다.
         current_user: ``current_user_required`` 가 통과시킨 로그인 User —
             발송자(sender_user)로 기록된다.
 
     Returns:
-        200 + ``{forward_log_id, status, success_count, failure_count}``.
+        200 + ``{forward_log_id, status:'in_progress', success_count:0,
+        failure_count:0}``. 최종 상태는 polling endpoint 로 확인.
 
     Raises:
         HTTPException(404): ``canonical_id`` 의 CanonicalProject 가 없거나,
-            그 canonical 에 현재 유효한 Announcement 가 1건도 없을 때
-            (service 의 ``LookupError`` 변환).
+            그 canonical 에 현재 유효한 Announcement 가 1건도 없을 때.
         HTTPException(403): ``sender_organization_id`` 가 발송자 본인의 소속
             조직이 아닐 때.
         HTTPException(422): transport 설정 값이 미지원이거나, service 가
-            ``ValueError`` 를 던질 때 (빈 recipients 등 — Pydantic 이 먼저
-            걸러 거의 도달하지 않는 방어 경로).
-        HTTPException(500): 발송 루프 시작 전 준비 단계(SystemSetting 읽기 /
-            본문 빌드 등)에서 예기치 못한 예외가 발생했을 때. 응답 detail 에는
-            예외 클래스명 + 메시지만 담고, 자격증명 등 민감 정보는 포함하지
-            않는다 (forwarding service 의 준비 단계는 자격증명을 직접 다루지
-            않으며, 자격증명을 쓰는 transport.send() 는 send_with_retry 가
-            수신자별로 흡수한다).
+            ``ValueError`` 를 던질 때.
+        HTTPException(503): 메일 전송 기능 게이트가 off 일 때.
+        HTTPException(500): prepare 단계에서 예기치 못한 예외 발생.
     """
     logger.info(
         "POST /api/canonical/{}/forward 진입: user_id={} recipient_count={} "
@@ -396,6 +489,14 @@ def forward_canonical_route(
         len(body.recipients),
         body.sender_organization_id,
     )
+
+    # transport / max_retry_count / preparation 은 with 블록 안에서 산출하지만
+    # BackgroundTasks 등록은 session 이 close 된 뒤(=200 응답 후)에 실행되므로
+    # 본 변수들은 응답 이후에도 살아 있어야 한다. with 종료 후에도 closure 로
+    # 참조 가능하도록 외부 변수에 보관한다.
+    transport: EmailTransport | None = None
+    max_retry_count: int = DEFAULT_EMAIL_MAX_RETRY_COUNT
+    preparation: ForwardPreparation | None = None
 
     with session_scope() as session:
         # 1. canonical 존재 확인 — 없으면 404.
@@ -442,9 +543,11 @@ def forward_canonical_route(
         # 4. max_retry_count 읽기 (SystemSetting + fallback).
         max_retry_count = _read_max_retry_count(session)
 
-        # 5. forwarding service 호출. subject 는 None 이면 빈 문자열로 넘겨
-        #    service 가 default 제목을 자동 생성하도록 한다. recipients 는
-        #    EmailStr → str 로 정규화해 JSON 컬럼에 안전하게 저장되게 한다.
+        # 5. forward_announcement_prepare 동기 호출 — forward_log INSERT/commit
+        #    까지 마치고 forward_log_id 를 확보한다. service 가 던지는 예외는
+        #    HTTP 상태로 변환해 즉시 반환한다. 본 단계까지가 동기 4xx/5xx 의
+        #    마지막 경계 — 이후 발송 루프 안에서의 개별 실패는 forward_log
+        #    row 의 counts 에 집계될 뿐 본 핸들러까지 전파되지 않는다.
         forward_request = ForwardRequest(
             canonical_project_id=canonical_id,
             sender_user_id=current_user.id,
@@ -454,11 +557,8 @@ def forward_canonical_route(
             additional_message=body.additional_message,
         )
         try:
-            result = forward_announcement(
-                forward_request,
-                session=session,
-                transport=transport,
-                max_retry_count=max_retry_count,
+            preparation = forward_announcement_prepare(
+                forward_request, session=session
             )
         except EmailSendingDisabledError as exc:
             # 메일 전송 기능이 비활성화된 상태 — 503 으로 사용자에게 안내한다.
@@ -508,26 +608,36 @@ def forward_canonical_route(
                 detail=f"포워딩 처리 중 오류가 발생했습니다: {type(exc).__name__}: {exc}",
             ) from exc
 
-        logger.info(
-            "포워딩 완료: user_id={} canonical_id={} forward_log_id={} "
-            "status={} success_count={} failure_count={}",
-            current_user.id,
-            canonical_id,
-            result.forward_log_id,
-            result.status.value,
-            result.success_count,
-            result.failure_count,
-        )
+    # 6. 발송 루프는 BackgroundTasks 에 위임. with 블록을 벗어나 session 은
+    #    이미 close 된 상태 — _run_forward_in_background 가 새 session_scope()
+    #    을 연다. transport 는 session 을 참조하지 않아 응답 이후에도 안전.
+    assert preparation is not None
+    assert transport is not None
+    background_tasks.add_task(
+        _run_forward_in_background,
+        preparation,
+        transport,
+        max_retry_count,
+    )
 
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content={
-                "forward_log_id": result.forward_log_id,
-                "status": result.status.value,
-                "success_count": result.success_count,
-                "failure_count": result.failure_count,
-            },
-        )
+    logger.info(
+        "포워딩 응답 반환 (백그라운드 발송 등록): user_id={} canonical_id={} "
+        "forward_log_id={} recipient_count={}",
+        current_user.id,
+        canonical_id,
+        preparation.forward_log_id,
+        len(preparation.recipients),
+    )
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={
+            "forward_log_id": preparation.forward_log_id,
+            "status": FORWARD_STATUS_IN_PROGRESS,
+            "success_count": 0,
+            "failure_count": 0,
+        },
+    )
 
 
 # ──────────────────────────────────────────────────────────────
@@ -583,6 +693,84 @@ def list_forward_logs_route(
                 _serialize_forward_log(forward_log)
                 for forward_log in forward_logs
             ],
+        )
+
+
+# ──────────────────────────────────────────────────────────────
+# 3-1. GET /api/canonical/{canonical_id}/forward-logs/{forward_log_id}
+# ──────────────────────────────────────────────────────────────
+
+
+@router.get(
+    "/api/canonical/{canonical_id}/forward-logs/{forward_log_id}",
+    status_code=status.HTTP_200_OK,
+)
+def get_forward_log_route(
+    canonical_id: int,
+    forward_log_id: int,
+    current_user: User | None = Depends(current_user_optional),
+) -> JSONResponse:
+    """발송 이력 1건을 단건 조회한다 — 프론트엔드 polling 용 (task 00120).
+
+    POST /forward 가 BackgroundTasks 로 발송을 위임하므로, 프론트엔드는 응답
+    으로 받은 ``forward_log_id`` 를 1초 간격 등으로 폴링해 진행 상황을 표시
+    한다. 본 endpoint 는 그 polling 의 데이터 소스다.
+
+    응답 정책:
+        - ``_serialize_forward_log`` 를 재사용해 GET /forward-logs (목록) 와
+          동일한 dict 스키마를 반환한다 (status 후처리 포함 —
+          ``completed_at IS NULL`` 인 row 의 status 는 ``'in_progress'`` 로
+          노출된다).
+        - ``recipient_addresses`` 는 목록 응답과 동일하게 제외한다 (개별
+          수신자 노출은 ``/sends`` expand 응답으로 분리).
+        - 권한: ``current_user_optional`` — 비로그인도 동일 응답 (GET 정책
+          일관). 모달 안에서 호출되므로 로그인 필요 없음.
+
+    URL path 정합성 검사:
+        ``forward_log.canonical_project_id != canonical_id`` 인 경우 다른
+        공고의 발송 이력을 들여다보려는 요청이므로 404 로 차단한다
+        (``/sends`` endpoint 와 동일 패턴).
+
+    Args:
+        canonical_id: 발송 이력이 속한 CanonicalProject PK (path 파라미터).
+        forward_log_id: 조회 대상 EmailForwardLog PK (path 파라미터).
+        current_user: ``current_user_optional`` 결과. 응답에 영향 없음.
+
+    Returns:
+        200 + ``_serialize_forward_log`` 직렬화 결과 dict.
+
+    Raises:
+        HTTPException(404): ``canonical_id`` 의 CanonicalProject 가 없거나,
+            ``forward_log_id`` 의 EmailForwardLog 가 없거나, 그 forward_log
+            가 path 의 ``canonical_id`` 에 속하지 않을 때.
+    """
+    # current_user 는 응답에 영향을 주지 않는다 — 비로그인도 동일 응답.
+    _ = current_user
+    logger.debug(
+        "GET /api/canonical/{}/forward-logs/{} 진입",
+        canonical_id,
+        forward_log_id,
+    )
+
+    with session_scope() as session:
+        _ensure_canonical_exists(session, canonical_id)
+        forward_log = session.get(EmailForwardLog, forward_log_id)
+        if forward_log is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"발송 이력을 찾을 수 없습니다: forward_log_id={forward_log_id}",
+            )
+        # path 의 canonical_id 와 forward_log 의 소속 canonical 정합성 검사 —
+        # 불일치면 다른 공고의 이력을 들여다보려는 요청이므로 404.
+        if forward_log.canonical_project_id != canonical_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"발송 이력을 찾을 수 없습니다: forward_log_id={forward_log_id}",
+            )
+
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content=_serialize_forward_log(forward_log),
         )
 
 

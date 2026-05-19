@@ -48,6 +48,10 @@
     var sendBtn = document.getElementById('forward-send-btn');
     var spinner = document.getElementById('forward-spinner');
     var cancelBtn = document.getElementById('forward-cancel-btn');
+    // task 00120 — 발송 진행 영역 (프로그레스 바 + N명 중 M명 카운터).
+    var progressBox = document.getElementById('forward-progress');
+    var progressBar = document.getElementById('forward-progress-bar');
+    var progressText = document.getElementById('forward-progress-text');
 
     // 서버 측 제한과 일치시킨 클라이언트 검증 상수 (routes/forward.py).
     var SUBJECT_MAX_LENGTH = 200;
@@ -69,6 +73,11 @@
     // 외부 이메일 직접 입력 시 chip 으로 확정하기 위한 간단 형식 검증 정규식
     // (design note §9-l 확정값).
     var EMAIL_PATTERN = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+    // task 00120 — polling 간격 (1초). plan 의 strategy_note 와 일치.
+    var POLLING_INTERVAL_MS = 1000;
+    // task 00120 — polling 도중 HTTP 오류가 연속으로 발생해도 일시적 네트워크
+    // 끊김을 흡수하기 위한 임계치. 이 횟수를 넘으면 polling 중단 + 에러 박스.
+    var POLLING_MAX_CONSECUTIVE_FAILURES = 3;
 
     // 현재 모달이 대상으로 하는 canonical_project PK (문자열).
     var currentCanonicalId = null;
@@ -83,6 +92,15 @@
     var autocompleteRequestToken = 0;
     // 키보드(↑/↓)로 강조 중인 드롭다운 항목 index. -1 이면 강조 없음.
     var autocompleteActiveIndex = -1;
+    // task 00120 — polling 상태. 타이머 핸들 / 폴링 대상 canonical 및 forward_log
+    // id / 총 수신자 수 / 연속 실패 카운터. forward_log_id 는 응답이 도착했을 때
+    // 가장 최근 polling 인지 확인해 stale 응답으로 막대를 덮어쓰지 않는 용도로도
+    // 쓴다. 모달 닫힐 때 stopProgressPolling 으로 일괄 정리한다.
+    var progressPollingTimerId = null;
+    var progressPollingCanonicalId = null;
+    var progressPollingForwardLogId = null;
+    var progressPollingTotalRecipients = 0;
+    var progressPollingConsecutiveFailures = 0;
 
     // ──────────────────────────────────────────────────────────
     // 헬퍼
@@ -178,8 +196,8 @@
     }
 
     /**
-     * 인라인 에러 메시지와 결과 박스를 모두 초기화하고, 자동 닫기 타이머를
-     * 정리한다.
+     * 인라인 에러 메시지와 결과 박스, 발송 진행 영역을 모두 초기화하고,
+     * 자동 닫기 타이머 / polling 타이머를 정리한다 (task 00120).
      */
     function clearFeedback() {
         if (errorMsg) {
@@ -197,6 +215,211 @@
             window.clearTimeout(autoCloseTimerId);
             autoCloseTimerId = null;
         }
+        // 발송 진행 영역과 polling 타이머도 함께 정리한다.
+        stopProgressPolling();
+        hideProgress();
+    }
+
+    /**
+     * 발송 진행 영역을 숨기고 막대 / 텍스트 표시를 초기 상태로 되돌린다.
+     * polling 타이머 정리는 ``stopProgressPolling`` 에서 별도로 처리한다.
+     */
+    function hideProgress() {
+        if (progressBox) {
+            progressBox.hidden = true;
+        }
+        if (progressBar) {
+            progressBar.max = 1;
+            progressBar.value = 0;
+        }
+        if (progressText) {
+            progressText.textContent = '';
+        }
+    }
+
+    /**
+     * 진행 중인 polling 을 중단한다. 타이머 / 매칭용 식별자 / 연속 실패 카운터를
+     * 모두 초기화한다. 진행 영역의 visibility 는 별도로 ``hideProgress`` 가
+     * 담당하므로 본 함수는 건드리지 않는다 (예: 결과 박스 전환 직전에는 polling
+     * 만 멈추고 진행 영역 표시는 다른 흐름에서 처리하기 위함).
+     */
+    function stopProgressPolling() {
+        if (progressPollingTimerId !== null) {
+            window.clearInterval(progressPollingTimerId);
+            progressPollingTimerId = null;
+        }
+        progressPollingCanonicalId = null;
+        progressPollingForwardLogId = null;
+        progressPollingTotalRecipients = 0;
+        progressPollingConsecutiveFailures = 0;
+    }
+
+    /**
+     * GET /forward-logs/{id} 응답으로 받은 카운트로 막대와 카운터 텍스트를
+     * 갱신한다. 실패 0건이면 ``· 실패 0건`` 표기는 생략한다.
+     *
+     * @param {number} successCount 누적 성공 수.
+     * @param {number} failureCount 누적 실패 수.
+     * @param {number} totalRecipients 전체 수신자 수.
+     */
+    function updateProgress(successCount, failureCount, totalRecipients) {
+        if (!progressBox || !progressBar || !progressText) {
+            return;
+        }
+        var safeTotal = totalRecipients > 0 ? totalRecipients : 1;
+        var processed = successCount + failureCount;
+        if (processed > safeTotal) {
+            // 백엔드 / 클라이언트 사이 일시적 race 보호 — 막대가 100% 를 넘지
+            // 않게 잘라낸다 (텍스트는 raw 값을 그대로 보여줘 디버깅 용이).
+            progressBar.max = processed;
+        } else {
+            progressBar.max = safeTotal;
+        }
+        progressBar.value = processed;
+        var label =
+            processed +
+            '/' +
+            totalRecipients +
+            ' 전송 완료';
+        if (failureCount > 0) {
+            label += ' · 실패 ' + failureCount + '건';
+        }
+        progressText.textContent = label;
+        progressBox.hidden = false;
+    }
+
+    /**
+     * 발송 결과 polling 을 시작한다. 즉시 1회 GET 으로 막대를 초기 상태에서
+     * 갱신한 뒤, ``POLLING_INTERVAL_MS`` 간격으로 setInterval 을 건다.
+     * 종료 조건:
+     *   - 응답 status 가 'in_progress' 가 아니면(success / partial / failed)
+     *     polling 을 중단하고 결과 박스로 전환한다.
+     *   - HTTP 오류가 ``POLLING_MAX_CONSECUTIVE_FAILURES`` 회 연속이면 polling
+     *     을 중단하고 네트워크 오류로 에러 박스를 띄운다. 단발 오류는 무시.
+     *
+     * @param {number|string} canonicalId 발송 대상 canonical PK.
+     * @param {number} forwardLogId POST 응답의 forward_log_id.
+     * @param {number} totalRecipients POST 요청 시점의 수신자 수.
+     */
+    function startProgressPolling(canonicalId, forwardLogId, totalRecipients) {
+        // 이전 발송의 잔여 polling 이 있다면 정리한다 (방어).
+        stopProgressPolling();
+        progressPollingCanonicalId = canonicalId;
+        progressPollingForwardLogId = forwardLogId;
+        progressPollingTotalRecipients = totalRecipients;
+        progressPollingConsecutiveFailures = 0;
+        // 막대를 0/N 으로 즉시 표시한다 (첫 GET 응답 도착 전 placeholder).
+        updateProgress(0, 0, totalRecipients);
+        // 즉시 1회 + setInterval 반복.
+        runProgressPollingTick();
+        progressPollingTimerId = window.setInterval(
+            runProgressPollingTick,
+            POLLING_INTERVAL_MS
+        );
+    }
+
+    /**
+     * polling tick 1 회 — GET /api/canonical/{canonicalId}/forward-logs/{id}
+     * 을 호출해 카운트를 갱신하고, 종료 조건을 평가한다. 응답 도착 시점에
+     * polling 이 이미 중단된 상태(취소 / 모달 닫힘)면 무시한다.
+     */
+    function runProgressPollingTick() {
+        var canonicalId = progressPollingCanonicalId;
+        var forwardLogId = progressPollingForwardLogId;
+        var totalRecipients = progressPollingTotalRecipients;
+        // 모달이 닫혀 stopProgressPolling 이 먼저 호출됐을 수 있다 (이미 timer
+        // 가 정리됐으면 이 함수가 다시 불릴 일은 없지만 방어).
+        if (canonicalId === null || forwardLogId === null) {
+            return;
+        }
+        fetch(
+            '/api/canonical/' +
+                encodeURIComponent(canonicalId) +
+                '/forward-logs/' +
+                encodeURIComponent(forwardLogId),
+            { headers: { Accept: 'application/json' } }
+        )
+            .then(function (response) {
+                return response
+                    .json()
+                    .catch(function () {
+                        return {};
+                    })
+                    .then(function (data) {
+                        return { ok: response.ok, status: response.status, data: data };
+                    });
+            })
+            .then(function (result) {
+                // 응답이 도착했을 때 polling 이 이미 종료됐다면(취소 / 모달
+                // 닫힘) stale 응답이므로 화면을 건드리지 않는다.
+                if (progressPollingForwardLogId !== forwardLogId) {
+                    return;
+                }
+                if (!result.ok) {
+                    handleProgressPollingHttpFailure(result.status);
+                    return;
+                }
+                // 정상 응답 — 연속 실패 카운터 리셋.
+                progressPollingConsecutiveFailures = 0;
+                var data = result.data || {};
+                var successCount =
+                    typeof data.success_count === 'number' ? data.success_count : 0;
+                var failureCount =
+                    typeof data.failure_count === 'number' ? data.failure_count : 0;
+                updateProgress(successCount, failureCount, totalRecipients);
+                if (data.status === 'in_progress') {
+                    return;
+                }
+                // 종료 — polling 중단 + 결과 박스 전환.
+                stopProgressPolling();
+                hideProgress();
+                if (data.status === 'failed') {
+                    // 전부 실패 — 에러 박스. handleSendFailure 는 detail 문자열을
+                    // 우선하므로 카운트 메시지를 detail 로 직접 만들어 넘긴다.
+                    handleSendFailure(0, {
+                        detail:
+                            '발송 실패 — 성공 ' +
+                            successCount +
+                            '명, 실패 ' +
+                            failureCount +
+                            '명',
+                    });
+                } else {
+                    // success / partial — 성공 박스 + 카운트 표시 + 자동 닫기.
+                    handleSendSuccess({
+                        success_count: successCount,
+                        failure_count: failureCount,
+                    });
+                }
+            })
+            .catch(function () {
+                if (progressPollingForwardLogId !== forwardLogId) {
+                    return;
+                }
+                // fetch 자체 실패 (네트워크 단절 등) — HTTP status 0 으로 흡수한다.
+                handleProgressPollingHttpFailure(0);
+            });
+    }
+
+    /**
+     * polling 중 HTTP 오류 처리. 연속 실패가 임계치를 넘으면 polling 을 멈추고
+     * 네트워크 오류 박스로 전환한다. 단발 오류는 카운터만 증가시키고 흘려보낸다.
+     *
+     * @param {number} httpStatus 응답 HTTP 상태 (0 = fetch 자체 실패).
+     */
+    function handleProgressPollingHttpFailure(httpStatus) {
+        progressPollingConsecutiveFailures += 1;
+        if (
+            progressPollingConsecutiveFailures < POLLING_MAX_CONSECUTIVE_FAILURES
+        ) {
+            // 일시적 오류 — 다음 tick 에서 다시 시도한다.
+            return;
+        }
+        stopProgressPolling();
+        hideProgress();
+        handleSendFailure(httpStatus, {
+            detail: '네트워크 오류 — 발송 결과 확인 실패',
+        });
     }
 
     /**
@@ -1003,11 +1226,29 @@
                     });
             })
             .then(function (result) {
-                if (result.ok) {
-                    handleSendSuccess(result.data);
-                } else {
+                if (!result.ok) {
                     handleSendFailure(result.status, result.data);
+                    return;
                 }
+                var data = result.data || {};
+                if (data.status === 'in_progress') {
+                    // task 00120 — 발송 루프는 BackgroundTasks 로 비동기 실행
+                    // 중. 모달 잠금을 유지한 채 polling 으로 진행 상황을 표시
+                    // 한다. forward_log_id 가 빠진 비정상 응답은 방어적으로
+                    // legacy 동기 흐름(handleSendSuccess)으로 떨어뜨린다.
+                    if (typeof data.forward_log_id !== 'number') {
+                        handleSendSuccess(data);
+                        return;
+                    }
+                    startProgressPolling(
+                        currentCanonicalId,
+                        data.forward_log_id,
+                        recipients.length
+                    );
+                    return;
+                }
+                // legacy / 즉시 완료 응답 — 동기 흐름과 동일하게 처리.
+                handleSendSuccess(data);
             })
             .catch(function () {
                 setModalLocked(false);
@@ -1037,14 +1278,16 @@
         }
     });
 
-    // 모달이 닫힐 때 — 자동 닫기 타이머 정리 + 잠금 상태 원복.
-    // 입력 내용은 다음 openForwardModal 호출이 다시 초기화하므로 여기서는
-    // 별도로 비우지 않는다.
+    // 모달이 닫힐 때 — 자동 닫기 타이머 / polling 타이머 정리 + 발송 진행
+    // 영역 숨김 + 잠금 상태 원복 (task 00120). 입력 내용은 다음
+    // openForwardModal 호출이 다시 초기화하므로 여기서는 별도로 비우지 않는다.
     modal.addEventListener('close', function () {
         if (autoCloseTimerId !== null) {
             window.clearTimeout(autoCloseTimerId);
             autoCloseTimerId = null;
         }
+        stopProgressPolling();
+        hideProgress();
         setModalLocked(false);
     });
 }());
