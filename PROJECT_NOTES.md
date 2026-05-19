@@ -326,6 +326,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
+- [00119] 메일 포워드 버튼 툴팁 방향 변경 (상단 → 좌측) — `[data-tooltip]::after` CSS를 `bottom/left/translateX` 기준에서 `top/right/translateY` 기준으로 변경; 우측 overflow로 인한 테이블 컬럼 expand 문제 해소 — 2026-05-19
 - [00118] 메일 포워드 버튼 툴팁 노출 지연 제거 — native `title` 속성의 OS/브라우저 지연 문제로 `data-tooltip` 커스텀 CSS 툴팁(0ms 즉시 표시)으로 교체; `[data-tooltip]::after` CSS 규칙 신설, `title=""` → `data-tooltip=""` 일원화 — 2026-05-19
 - [00116] 메일 발송 비활성화 시 disabled 버튼 툴팁 추가 + 테스트 발송 게이트 제외 — `send_enabled=False` 시 목록·상세 페이지 발송 버튼 래퍼에 툴팁 표시; 테스트 발송 엔드포인트(`POST /admin/email/test-send`)는 `is_email_sending_enabled` 게이트에서 제외 — 2026-05-18
 - [00115] 메일 전송 기능 활성화 토글 + 발송 게이트 추가 — `email.send_enabled` SystemSetting(기본 off) + `app/email/gate.py` 게이트 신설, 포워딩 경로에 적용; 관리자 이메일 탭에 「메일 발송 설정」 섹션 + 활성화 토글 UI 추가 — 2026-05-18
@@ -335,4 +336,3 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - [00110] M365 OAuth SMTP STARTTLS 후 EHLO 재전송 버그 수정 — `smtplib.starttls()` 는 EHLO 를 자동 재전송하지 않아 M365 가 `503 5.5.2 Send hello first` 를 반환하는 문제를 `smtp.ehlo()` 명시적 호출 추가로 해결 — 2026-05-15
 - [00109] Phase A-2 Part 2 공고 포워딩 구현 — `app/email/forwarding.py` 신규(수신자별 개별 발송·트랜잭션 3단계), `message_builder.py` multipart/HTML 확장, `routes/forward.py` API 4종(POST /forward·GET /forward-logs·sends·GET /users/search), 상세 페이지 '메일로 보내기' 버튼 + 수신자 chip 입력 + 발송 이력 섹션 UI — 2026-05-14
 - [00106] Phase A-2 Part 1: `EmailForwardLog` ORM + Alembic migration + 단위 테스트 (`email_forward_logs` 테이블 신설, `EmailForwardStatus` enum) — 2026-05-14
-- [00105] `email-validator` 의존성 누락 수정 — pydantic `EmailStr` 사용 시 필수인 `email-validator>=2.0,<3.0` 패키지가 00104에서 빠져 기동 오류 발생, pyproject.toml 에 추가하여 복구 — 2026-05-14
