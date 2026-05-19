@@ -282,7 +282,12 @@
                     {% else %}-{% endif %}
                 </td>
                 {# task 00112/00115 — 전달 셀: 로그인+canonical+메일활성화 시 활성 ✉️, 그 외 disabled. #}
+                {# task 00116 — send_enabled=False 시 span 래퍼에 title 을 달아 툴팁 표시. #}
                 <td class="col-forward">
+                    {% if current_user and cid and not email_send_enabled %}
+                    <span class="forward-btn-disabled-wrap"
+                          title="시스템의 메일 전송 기능이 활성화되지 않았습니다.">
+                    {% endif %}
                     <button type="button"
                             class="forward-open-btn col-forward__btn"
                             {% if current_user and cid %}
@@ -295,7 +300,6 @@
                             title="메일로 전달"
                             {% else %}
                             disabled
-                            title="메일 발송 기능이 비활성화되어 있습니다"
                             {% endif %}
                             {% else %}
                             disabled
@@ -303,6 +307,9 @@
                             {% endif %}>
                         &#9993;
                     </button>
+                    {% if current_user and cid and not email_send_enabled %}
+                    </span>
+                    {% endif %}
                 </td>
             </tr>
             {# task 00097-5 — 셀 클릭 expand hidden 행. canonical 매칭이 있고 detail rows 도 있을 때만 렌더. #}
@@ -407,7 +414,12 @@
                     {% else %}-{% endif %}
                 </td>
                 {# task 00112/00115 — 전달 셀: 로그인+canonical+메일활성화 시 활성 ✉️, 그 외 disabled. #}
+                {# task 00116 — send_enabled=False 시 span 래퍼에 title 을 달아 툴팁 표시. #}
                 <td class="col-forward">
+                    {% if current_user and cid and not email_send_enabled %}
+                    <span class="forward-btn-disabled-wrap"
+                          title="시스템의 메일 전송 기능이 활성화되지 않았습니다.">
+                    {% endif %}
                     <button type="button"
                             class="forward-open-btn col-forward__btn"
                             {% if current_user and cid %}
@@ -420,7 +432,6 @@
                             title="메일로 전달"
                             {% else %}
                             disabled
-                            title="메일 발송 기능이 비활성화되어 있습니다"
                             {% endif %}
                             {% else %}
                             disabled
@@ -428,6 +439,9 @@
                             {% endif %}>
                         &#9993;
                     </button>
+                    {% if current_user and cid and not email_send_enabled %}
+                    </span>
+                    {% endif %}
                 </td>
             </tr>
             {# task 00097-5 — 셀 클릭 expand hidden 행 (분리 모드). #}

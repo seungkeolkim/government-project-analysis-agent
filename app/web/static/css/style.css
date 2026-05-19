@@ -4947,6 +4947,15 @@ details[open] .user-card__org-summary::before {
     opacity: 0.5;
 }
 
+/* send_enabled=False 시 disabled 버튼 래퍼.
+   disabled 버튼은 일부 브라우저에서 native title tooltip 이 표시되지 않으므로
+   span 에 title 을 달아 마우스 호버 시 툴팁이 노출되도록 한다. */
+.forward-btn-disabled-wrap {
+    display: inline-block;
+    flex-shrink: 0;
+    cursor: not-allowed;
+}
+
 /* ---------- 발송 모달 ---------- */
 #forward-modal {
     border: 1px solid #e5e7eb;
