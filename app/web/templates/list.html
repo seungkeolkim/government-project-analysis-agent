@@ -38,8 +38,8 @@
     - favorite_entry_map:       dict[int, int]               (Phase 3b — canonical_id → entry_id. 비로그인 시 빈 dict.)
 
   컬럼 수 계산 (colspan 에 사용):
-    비로그인: 8  (제목 / 기관 / 소스 / 상태 / 마감일 / 관련성 / 진행 상태 / 전달)
-    로그인:   9  (체크박스 + 위 8개)
+    비로그인: 9  (제목 / 기관 / 소스 / 상태 / 모집 시작일 / 마감일 / 관련성 / 진행 상태 / 전달)
+    로그인:   10 (체크박스 + 위 9개)
   task 00085 결정 3 (비로그인 = 로그인 동일 노출) 로 관련성·진행 상태 컬럼은 비로그인도 표시한다.
   비로그인은 본인 영역(클릭 가능 배지·모달)만 비활성화되고 카운터·OTHERS 정보는 동일 노출.
   task 00112 — '전달' 컬럼: 비로그인/canonical 없음이면 disabled ✉️, 로그인+canonical 있으면 활성.
@@ -186,6 +186,7 @@
                 <th class="col-agency">기관</th>
                 <th class="col-source">소스</th>
                 <th class="col-status">접수 상태</th>
+                <th class="col-received">모집 시작일</th>
                 <th class="col-deadline">마감일</th>
                 {# task 00085 — 관련성 컬럼은 로그인/비로그인 모두 표시 (결정 3). #}
                 <th class="col-relevance">관련성</th>
@@ -248,6 +249,13 @@
                     <span class="status-badge status-{{ gr.representative.status.name | lower }}">
                         {{ gr.representative.status.value }}
                     </span>
+                </td>
+                <td class="col-received">
+                    {% if gr.representative.received_at %}
+                        {{ gr.representative.received_at | kst_date }}
+                    {% else %}
+                        -
+                    {% endif %}
                 </td>
                 <td class="col-deadline">
                     {% if gr.representative.deadline_at %}
@@ -317,12 +325,12 @@
                 progress_expand_id,
                 cid,
                 progress_rows_map.get(cid, []),
-                9 if current_user else 8
+                10 if current_user else 9
             ) }}
             {% endif %}
             {% else %}
             <tr>
-                <td colspan="{% if current_user %}9{% else %}8{% endif %}" class="empty-row">조건에 맞는 공고가 없습니다.</td>
+                <td colspan="{% if current_user %}10{% else %}9{% endif %}" class="empty-row">조건에 맞는 공고가 없습니다.</td>
             </tr>
             {% endfor %}
 
@@ -379,6 +387,13 @@
                     <span class="status-badge status-{{ ann.status.name | lower }}">
                         {{ ann.status.value }}
                     </span>
+                </td>
+                <td class="col-received">
+                    {% if ann.received_at %}
+                        {{ ann.received_at | kst_date }}
+                    {% else %}
+                        -
+                    {% endif %}
                 </td>
                 <td class="col-deadline">
                     {% if ann.deadline_at %}
@@ -448,13 +463,13 @@
                 progress_expand_id,
                 cid,
                 progress_rows_map.get(cid, []),
-                9 if current_user else 8
+                10 if current_user else 9
             ) }}
             {% endif %}
             {# Phase 3b — 동일과제 expand 행 (비로그인 포함). 서버 렌더, 기본 숨김. #}
             {% if group_size > 1 and ann.canonical_group_id is not none %}
             <tr id="siblings-row-{{ ann.id }}" class="siblings-expand-row" style="display:none">
-                <td colspan="{% if current_user %}9{% else %}8{% endif %}" class="siblings-expand-cell">
+                <td colspan="{% if current_user %}10{% else %}9{% endif %}" class="siblings-expand-cell">
                     <ul class="siblings-list">
                         {% for sib in siblings_map.get(ann.canonical_group_id, []) %}
                         {% if sib.id != ann.id %}
@@ -485,7 +500,7 @@
             {% endif %}
             {% else %}
             <tr>
-                <td colspan="{% if current_user %}9{% else %}8{% endif %}" class="empty-row">조건에 맞는 공고가 없습니다.</td>
+                <td colspan="{% if current_user %}10{% else %}9{% endif %}" class="empty-row">조건에 맞는 공고가 없습니다.</td>
             </tr>
             {% endfor %}
             {% endif %}
