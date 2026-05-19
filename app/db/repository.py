@@ -3075,6 +3075,7 @@ def list_favorites_with_announcements(
             - ann_agency:           주관 기관명
             - ann_source_type:      'IRIS' / 'NTIS' 등
             - ann_status:           AnnouncementStatus enum
+            - ann_received_at:      모집 시작일 (Announcement.received_at; None 가능)
             - ann_deadline_at:      마감 시각
             - canonical_project_id: 대응 CanonicalProject PK (announcement 의
                                     canonical_group_id; None 일 수 있음)
@@ -3135,6 +3136,7 @@ def list_favorites_with_announcements(
                     "ann_agency": None,
                     "ann_source_type": None,
                     "ann_status": None,
+                    "ann_received_at": None,
                     "ann_deadline_at": None,
                     "canonical_project_id": None,
                     "added_at": e.added_at,
@@ -3160,6 +3162,7 @@ def list_favorites_with_announcements(
                 "ann_agency": ann.agency,
                 "ann_source_type": ann.source_type,
                 "ann_status": ann.status,
+                "ann_received_at": ann.received_at,
                 "ann_deadline_at": ann.deadline_at,
                 "canonical_project_id": ann.canonical_group_id,
                 "added_at": e.added_at,
