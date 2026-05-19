@@ -212,6 +212,12 @@ code {
     text-align: center;
 }
 
+.list-table .col-received {
+    width: 100px;
+    white-space: nowrap;
+    text-align: center;
+}
+
 .list-table .col-deadline {
     width: 160px;
     white-space: nowrap;
