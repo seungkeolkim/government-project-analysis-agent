@@ -4965,9 +4965,10 @@ details[open] .user-card__org-summary::before {
 [data-tooltip]:not([data-tooltip=""])::after {
     content: attr(data-tooltip);
     position: absolute;
-    bottom: calc(100% + 6px);
-    left: 50%;
-    transform: translateX(-50%);
+    /* 우측 overflow 방지를 위해 버튼 좌측에 띄움 */
+    top: 50%;
+    right: calc(100% + 6px);
+    transform: translateY(-50%);
     background: rgba(0, 0, 0, 0.75);
     color: #fff;
     font-size: 0.75rem;
