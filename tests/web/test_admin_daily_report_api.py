@@ -1,0 +1,805 @@
+"""``/api/admin/email/daily-report/*`` 6 endpoint 통합 테스트 (Phase A-3 / task 00125-8).
+
+검증 시나리오 (subtask 00125-8 의 acceptance_criteria + 디자인 노트 §9):
+
+    1. 4종 endpoint 모두 비관리자 403 / 비로그인 401 (라우터 레벨 권한 보호 확인).
+    2. PUT settings — cron 표현식 잘못된 값 → 422 (Pydantic validator).
+    3. PUT settings — 정상 저장 → SystemSetting 반영 + ``register_daily_report_cron_schedule``
+       호출 검증 (mock).
+    4. POST test-send — recipient body 우선 / SystemSetting fallback / 게이트 비활성 503.
+    5. POST send-now — admin email 자동 수집 + ``recipients`` 가 전달되는지 검증 (mock).
+    6. GET runs / GET runs/{run_id}/sends — 응답 스키마 + 404 분기.
+
+fixture 패턴:
+    ``tests/web/test_admin_email_api.py`` 와 동일하게 ``test_engine`` 격리 DB +
+    ``TestClient`` + 폼 로그인. ``ensure_daily_report_cron_registered`` 는 startup
+    훅에서 호출되지만 실제 스케줄러를 띄우지 않고 monkey-patch 로 무력화한다 —
+    본 테스트의 관심사는 라우터의 HTTP 인터페이스이며, 스케줄러 동작 자체는
+    ``tests/scheduler/test_daily_report_schedule.py`` 가 별도로 가드.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from datetime import UTC, datetime
+from unittest.mock import MagicMock
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import Engine, select
+from sqlalchemy.orm import Session
+
+from app.backup.service import get_setting, set_setting
+from app.db.models import (
+    EmailDailyReportRun,
+    EmailDailyReportStatus,
+    EmailSendRun,
+    EmailSendRunStatus,
+)
+from app.email.constants import (
+    RELATED_KIND_DAILY_REPORT,
+    SETTING_KEY_DAILY_REPORT_CRON,
+    SETTING_KEY_DAILY_REPORT_ENABLED,
+    SETTING_KEY_DAILY_REPORT_TEST_RECIPIENT,
+    SETTING_KEY_EMAIL_SEND_ENABLED,
+)
+from app.email.daily_report import DailyReportResult
+
+
+# ──────────────────────────────────────────────────────────────
+# 공통 fixture / 헬퍼
+# ──────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _stub_scheduler_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """create_app() 의 스케줄러 startup 훅을 본 테스트에서 무력화한다.
+
+    본 테스트의 관심사는 HTTP 라우터 동작이며, 실제 APScheduler 가동은 별도 테스트
+    파일이 가드한다. startup 훅에서 BackgroundScheduler 가 SQLAlchemyJobStore 와
+    함께 실제로 떠 버리면, 본 테스트의 빠른 격리 흐름을 방해할 가능성이 있어
+    no-op 으로 stub 한다 (test_admin_backup.py 의 register_backup_cron_schedule
+    monkey-patch 와 동일 정책).
+    """
+    monkeypatch.setattr(
+        "app.scheduler.service.ensure_backup_cron_registered", lambda: None
+    )
+    monkeypatch.setattr(
+        "app.web.main.ensure_backup_cron_registered", lambda: None
+    )
+    monkeypatch.setattr(
+        "app.scheduler.service.ensure_daily_report_cron_registered",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "app.web.main.ensure_daily_report_cron_registered", lambda: None
+    )
+
+
+@pytest.fixture
+def client(test_engine: Engine) -> Iterator[TestClient]:
+    """격리된 DB 가 적용된 FastAPI TestClient."""
+    from app.web.main import create_app
+
+    app = create_app()
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+def _register(client: TestClient, username: str, password: str) -> None:
+    """``/auth/register`` 폼 호출. 성공 시 303 응답이어야 한다."""
+    response = client.post(
+        "/auth/register",
+        data={"username": username, "password": password},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303, f"회원가입 실패: {response.status_code}"
+
+
+def _login(client: TestClient, username: str, password: str) -> None:
+    """``/auth/login`` 폼 호출. 성공 시 303 응답이어야 한다."""
+    response = client.post(
+        "/auth/login",
+        data={"username": username, "password": password},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303, f"로그인 실패: {response.status_code}"
+
+
+@pytest.fixture
+def admin_client(client: TestClient, db_session: Session) -> TestClient:
+    """관리자 (is_admin=True, email 정상) 로 로그인된 TestClient.
+
+    GET /daily-report/settings 응답의 ``admin_emails`` 가 본 admin 1명을 포함
+    하도록 email 까지 채운다. test-send / send-now 시 ``requested_by_user_id`` 도
+    이 사용자 PK 로 기록된다.
+    """
+    from app.auth.service import create_user
+
+    create_user(
+        db_session,
+        username="dr_admin",
+        password="Admin_pass_1!",
+        email="dr_admin@example.com",
+        is_admin=True,
+    )
+    db_session.commit()
+    _login(client, "dr_admin", "Admin_pass_1!")
+    return client
+
+
+# ──────────────────────────────────────────────────────────────
+# 1. 권한 보호 — 비관리자 403 / 비로그인 401
+# ──────────────────────────────────────────────────────────────
+
+
+def test_daily_report_endpoints_require_admin_403(client: TestClient) -> None:
+    """일반 사용자가 ``/api/admin/email/daily-report/*`` 6 endpoint 모두 호출 시 403.
+
+    라우터 레벨 ``admin_user_required`` 가 공통으로 보호. 비로그인 401 은 별도
+    테스트(``test_daily_report_endpoints_require_login_401``) 로 분리.
+    """
+    _register(client, "regular_user", "Regular_pass_1!")
+    _login(client, "regular_user", "Regular_pass_1!")
+
+    # 6 endpoint 각각 호출 — 모두 403 이어야 함.
+    response = client.get(
+        "/api/admin/email/daily-report/settings", follow_redirects=False
+    )
+    assert response.status_code == 403, response.text
+
+    response = client.put(
+        "/api/admin/email/daily-report/settings",
+        json={
+            "enabled": False,
+            "cron_expression": "",
+            "test_recipient": "",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 403, response.text
+
+    response = client.post(
+        "/api/admin/email/daily-report/test-send",
+        json={"recipient": "ops@example.com"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 403, response.text
+
+    response = client.post(
+        "/api/admin/email/daily-report/send-now",
+        json={},
+        follow_redirects=False,
+    )
+    assert response.status_code == 403, response.text
+
+    response = client.get(
+        "/api/admin/email/daily-report/runs", follow_redirects=False
+    )
+    assert response.status_code == 403, response.text
+
+    response = client.get(
+        "/api/admin/email/daily-report/runs/1/sends", follow_redirects=False
+    )
+    assert response.status_code == 403, response.text
+
+
+def test_daily_report_endpoints_require_login_401(client: TestClient) -> None:
+    """비로그인 호출 시 ``/api/admin/email/daily-report/*`` 6 endpoint 모두 401.
+
+    ``current_user_required`` 가 ``admin_user_required`` 보다 먼저 걸려 401 을
+    돌려준다.
+    """
+    response = client.get(
+        "/api/admin/email/daily-report/settings", follow_redirects=False
+    )
+    assert response.status_code == 401, response.text
+
+    response = client.put(
+        "/api/admin/email/daily-report/settings",
+        json={"enabled": False, "cron_expression": "", "test_recipient": ""},
+        follow_redirects=False,
+    )
+    assert response.status_code == 401, response.text
+
+    response = client.get(
+        "/api/admin/email/daily-report/runs/9999/sends", follow_redirects=False
+    )
+    assert response.status_code == 401, response.text
+
+
+# ──────────────────────────────────────────────────────────────
+# 2. GET /daily-report/settings — 응답 스키마 + admin 명단
+# ──────────────────────────────────────────────────────────────
+
+
+def test_get_daily_report_settings_default_response(
+    admin_client: TestClient,
+) -> None:
+    """default 상태에서 GET /daily-report/settings 응답 스키마가 디자인 노트와 일치.
+
+    검증:
+        - enabled=False (default), cron_expression=DEFAULT, last_sent_at=None,
+          test_recipient="", next_run_at=None (잡 미등록), admin_emails 1건 포함.
+    """
+    response = admin_client.get("/api/admin/email/daily-report/settings")
+    assert response.status_code == 200, response.text
+
+    data = response.json()
+    assert data["enabled"] is False
+    assert data["cron_expression"] == "0 9 * * 1-5"
+    assert data["last_sent_at"] is None
+    assert data["test_recipient"] == ""
+    assert data["next_run_at"] is None
+
+    # admin_emails — admin_client fixture 가 dr_admin 1명을 만들었으므로 1건.
+    admin_emails = data["admin_emails"]
+    assert len(admin_emails) == 1
+    assert admin_emails[0]["username"] == "dr_admin"
+    assert admin_emails[0]["email"] == "dr_admin@example.com"
+    assert admin_emails[0]["email_subscribed"] is True
+    assert admin_emails[0]["eligible"] is True
+
+    assert data["admin_count_eligible"] == 1
+    assert data["admin_count_without_email"] == 0
+    assert data["admin_count_unsubscribed"] == 0
+
+
+def test_get_daily_report_settings_with_ineligible_admins(
+    admin_client: TestClient,
+    db_session: Session,
+) -> None:
+    """admin_emails 가 eligible / 미설정 / unsubscribed 3 케이스를 모두 노출.
+
+    디자인 노트 §5 분류 표가 응답 카운터에 그대로 반영되는지 검증.
+    """
+    from app.auth.service import create_user
+
+    # admin_client fixture 의 dr_admin 외에 2명 추가 — email 미설정 / 옵트아웃.
+    create_user(
+        db_session,
+        username="dr_no_email",
+        password="X_pass_1!",
+        email=None,
+        is_admin=True,
+    )
+    no_subscribe = create_user(
+        db_session,
+        username="dr_unsubscribed",
+        password="X_pass_1!",
+        email="opt_out@example.com",
+        is_admin=True,
+    )
+    no_subscribe.email_subscribed = False
+    db_session.commit()
+
+    response = admin_client.get("/api/admin/email/daily-report/settings")
+    assert response.status_code == 200, response.text
+    data = response.json()
+
+    assert data["admin_count_eligible"] == 1
+    assert data["admin_count_without_email"] == 1
+    assert data["admin_count_unsubscribed"] == 1
+    usernames = [row["username"] for row in data["admin_emails"]]
+    # 정렬은 username 알파벳순 — d/r/u 순.
+    assert usernames == ["dr_admin", "dr_no_email", "dr_unsubscribed"]
+
+
+# ──────────────────────────────────────────────────────────────
+# 3. PUT /daily-report/settings — 정상 저장 + scheduler hook 호출
+# ──────────────────────────────────────────────────────────────
+
+
+def test_put_daily_report_settings_saves_and_registers_schedule(
+    admin_client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """정상 PUT → SystemSetting 3종 반영 + register_daily_report_cron_schedule 호출.
+
+    스케줄러 호출은 monkey-patch 로 캡처해 ``(cron_expression, enabled)`` 가 그대로
+    넘어가는지 확인한다 (실제 APScheduler 가동 없이도 라우터 흐름 검증).
+    """
+    captured_calls: list[tuple[str, bool]] = []
+
+    def _fake_register(
+        cron_expression: str | None = None,
+        *,
+        enabled: bool | None = None,
+    ) -> None:
+        captured_calls.append((cron_expression or "", bool(enabled)))
+        return None
+
+    monkeypatch.setattr(
+        "app.web.routes.admin_email.register_daily_report_cron_schedule",
+        _fake_register,
+    )
+
+    response = admin_client.put(
+        "/api/admin/email/daily-report/settings",
+        json={
+            "enabled": True,
+            "cron_expression": "30 9 * * 1-5",
+            "test_recipient": "ops@example.com",
+        },
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["enabled"] is True
+    assert data["cron_expression"] == "30 9 * * 1-5"
+    assert data["test_recipient"] == "ops@example.com"
+
+    # SystemSetting DB 반영 확인.
+    db_session.expire_all()
+    assert (
+        get_setting(db_session, SETTING_KEY_DAILY_REPORT_ENABLED) == "true"
+    )
+    assert (
+        get_setting(db_session, SETTING_KEY_DAILY_REPORT_CRON)
+        == "30 9 * * 1-5"
+    )
+    assert (
+        get_setting(db_session, SETTING_KEY_DAILY_REPORT_TEST_RECIPIENT)
+        == "ops@example.com"
+    )
+
+    # scheduler hook 호출 인자 확인.
+    assert captured_calls == [("30 9 * * 1-5", True)]
+
+
+def test_put_daily_report_settings_invalid_cron_422(
+    admin_client: TestClient,
+) -> None:
+    """잘못된 cron 표현식 → 422 (Pydantic field_validator)."""
+    response = admin_client.put(
+        "/api/admin/email/daily-report/settings",
+        json={
+            "enabled": True,
+            "cron_expression": "this is not a cron",
+            "test_recipient": "",
+        },
+    )
+    assert response.status_code == 422, response.text
+
+
+def test_put_daily_report_settings_enabled_without_cron_422(
+    admin_client: TestClient,
+) -> None:
+    """``enabled=True`` 인데 cron 이 빈 값이면 422 (model_validator)."""
+    response = admin_client.put(
+        "/api/admin/email/daily-report/settings",
+        json={
+            "enabled": True,
+            "cron_expression": "",
+            "test_recipient": "",
+        },
+    )
+    assert response.status_code == 422, response.text
+
+
+def test_put_daily_report_settings_disabled_with_empty_cron_ok(
+    admin_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``enabled=False`` + cron 빈 값은 허용 (잡 제거 의도)."""
+    monkeypatch.setattr(
+        "app.web.routes.admin_email.register_daily_report_cron_schedule",
+        lambda *args, **kwargs: None,
+    )
+
+    response = admin_client.put(
+        "/api/admin/email/daily-report/settings",
+        json={
+            "enabled": False,
+            "cron_expression": "",
+            "test_recipient": "",
+        },
+    )
+    assert response.status_code == 200, response.text
+
+
+# ──────────────────────────────────────────────────────────────
+# 4. POST /daily-report/test-send — recipient 우선순위 / 게이트
+# ──────────────────────────────────────────────────────────────
+
+
+def _stub_prepare_and_send(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    captured_calls: list[dict],
+    result: DailyReportResult,
+) -> None:
+    """라우터의 ``prepare_and_send_daily_report`` 를 stub 으로 교체한다.
+
+    호출 인자(``request_dto`` 의 trigger / recipients / requested_by_user_id) 를
+    captured_calls 에 기록하고, 미리 준비된 result 를 반환한다. transport / sender
+    까지 끝까지 들어가는 흐름은 단위 테스트(tests/email/test_daily_report_send.py)
+    가 별도로 가드하므로 본 통합 테스트는 라우터 → service 경계만 검증한다.
+    """
+
+    def _fake(
+        request_dto,
+        *,
+        session,
+        transport,
+        max_retry_count,
+        now=None,
+    ) -> DailyReportResult:
+        captured_calls.append(
+            {
+                "trigger": request_dto.trigger,
+                "recipients": list(request_dto.recipients),
+                "requested_by_user_id": request_dto.requested_by_user_id,
+                "max_retry_count": max_retry_count,
+            }
+        )
+        return result
+
+    monkeypatch.setattr(
+        "app.web.routes.admin_email.prepare_and_send_daily_report",
+        _fake,
+    )
+    monkeypatch.setattr(
+        "app.web.routes.admin_email.build_transport_from_settings",
+        lambda session: MagicMock(),
+    )
+
+
+def test_post_daily_report_test_send_uses_body_recipient(
+    admin_client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """body.recipient 가 있으면 그 값으로 prepare_and_send_daily_report 가 호출된다."""
+    captured: list[dict] = []
+    _stub_prepare_and_send(
+        monkeypatch,
+        captured_calls=captured,
+        result=DailyReportResult(
+            run_id=42,
+            status=EmailDailyReportStatus.SUCCESS,
+            snapshot_count=3,
+            recipient_count=1,
+            success_count=1,
+            failure_count=0,
+            error_message=None,
+        ),
+    )
+
+    response = admin_client.post(
+        "/api/admin/email/daily-report/test-send",
+        json={"recipient": "tester@example.com"},
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data == {
+        "run_id": 42,
+        "status": "success",
+        "snapshot_count": 3,
+        "recipient_count": 1,
+        "success_count": 1,
+        "failure_count": 0,
+        "error_message": None,
+    }
+
+    # service 호출 인자 검증 — trigger=manual_test + body recipient 그대로 전달.
+    assert len(captured) == 1
+    assert captured[0]["trigger"] == "manual_test"
+    assert captured[0]["recipients"] == ["tester@example.com"]
+
+
+def test_post_daily_report_test_send_falls_back_to_stored_recipient(
+    admin_client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """body.recipient 가 빈 값이면 SystemSetting 의 test_recipient 가 사용된다."""
+    set_setting(
+        db_session,
+        SETTING_KEY_DAILY_REPORT_TEST_RECIPIENT,
+        "stored@example.com",
+    )
+    db_session.commit()
+
+    captured: list[dict] = []
+    _stub_prepare_and_send(
+        monkeypatch,
+        captured_calls=captured,
+        result=DailyReportResult(
+            run_id=7,
+            status=EmailDailyReportStatus.SUCCESS,
+            snapshot_count=0,
+            recipient_count=1,
+            success_count=1,
+            failure_count=0,
+            error_message=None,
+        ),
+    )
+
+    response = admin_client.post(
+        "/api/admin/email/daily-report/test-send",
+        json={"recipient": ""},
+    )
+    assert response.status_code == 200, response.text
+
+    assert captured[0]["recipients"] == ["stored@example.com"]
+
+
+def test_post_daily_report_test_send_missing_recipient_422(
+    admin_client: TestClient,
+    db_session: Session,
+) -> None:
+    """body.recipient + SystemSetting 둘 다 비어 있으면 422."""
+    response = admin_client.post(
+        "/api/admin/email/daily-report/test-send",
+        json={"recipient": ""},
+    )
+    assert response.status_code == 422, response.text
+
+
+def test_post_daily_report_test_send_returns_503_when_gate_disabled(
+    admin_client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """게이트 비활성 상태에서 호출 시 503 + EmailDailyReportRun 이력은 commit 된다.
+
+    실제 게이트 OFF 동작은 ``prepare_and_send_daily_report`` 가
+    ``EmailSendingDisabledError`` 를 raise 한 결과로 발생한다. 본 테스트는
+    라우터가 그 예외를 503 으로 변환하는지를 검증한다.
+    """
+    from app.email.gate import EmailSendingDisabledError
+
+    def _raise_disabled(*args, **kwargs):
+        raise EmailSendingDisabledError("메일 전송이 비활성화 상태")
+
+    monkeypatch.setattr(
+        "app.web.routes.admin_email.prepare_and_send_daily_report",
+        _raise_disabled,
+    )
+    monkeypatch.setattr(
+        "app.web.routes.admin_email.build_transport_from_settings",
+        lambda session: MagicMock(),
+    )
+
+    response = admin_client.post(
+        "/api/admin/email/daily-report/test-send",
+        json={"recipient": "tester@example.com"},
+    )
+    assert response.status_code == 503, response.text
+
+
+# ──────────────────────────────────────────────────────────────
+# 5. POST /daily-report/send-now — admin email 자동 수집
+# ──────────────────────────────────────────────────────────────
+
+
+def test_post_daily_report_send_now_collects_admin_recipients(
+    admin_client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """admin 사용자 email 이 ``recipients`` 로 자동 수집되어 service 에 전달된다.
+
+    fixture 의 dr_admin 외에 2명을 추가 — eligible 1명, opt-out 1명. 결과적으로
+    eligible 2명만 ``recipients`` 에 포함되어야 한다.
+    """
+    from app.auth.service import create_user
+
+    create_user(
+        db_session,
+        username="other_admin",
+        password="X_pass_1!",
+        email="other@example.com",
+        is_admin=True,
+    )
+    opt_out = create_user(
+        db_session,
+        username="opt_out_admin",
+        password="X_pass_1!",
+        email="silent@example.com",
+        is_admin=True,
+    )
+    opt_out.email_subscribed = False
+    db_session.commit()
+
+    captured: list[dict] = []
+    _stub_prepare_and_send(
+        monkeypatch,
+        captured_calls=captured,
+        result=DailyReportResult(
+            run_id=100,
+            status=EmailDailyReportStatus.SUCCESS,
+            snapshot_count=5,
+            recipient_count=2,
+            success_count=2,
+            failure_count=0,
+            error_message=None,
+        ),
+    )
+
+    response = admin_client.post(
+        "/api/admin/email/daily-report/send-now", json={}
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["run_id"] == 100
+    assert data["status"] == "success"
+    assert data["recipient_count"] == 2
+
+    # service 호출 인자 검증 — trigger=manual_admin + eligible 2명만 전달.
+    assert len(captured) == 1
+    assert captured[0]["trigger"] == "manual_admin"
+    assert sorted(captured[0]["recipients"]) == [
+        "dr_admin@example.com",
+        "other@example.com",
+    ]
+    # opt_out_admin (email_subscribed=False) 는 제외되어야 한다.
+    assert "silent@example.com" not in captured[0]["recipients"]
+
+
+# ──────────────────────────────────────────────────────────────
+# 6. GET /daily-report/runs — 응답 스키마 + 정렬
+# ──────────────────────────────────────────────────────────────
+
+
+def test_get_daily_report_runs_returns_recent_rows(
+    admin_client: TestClient,
+    db_session: Session,
+) -> None:
+    """EmailDailyReportRun row 들을 started_at 내림차순으로 반환 + 응답 스키마 검증."""
+    older = EmailDailyReportRun(
+        trigger="scheduled",
+        status=EmailDailyReportStatus.SUCCESS,
+        aggregation_from=datetime(2026, 5, 18, 0, 0, tzinfo=UTC),
+        aggregation_to=datetime(2026, 5, 19, 0, 0, tzinfo=UTC),
+        snapshot_count=3,
+        recipient_count=2,
+        success_count=2,
+        failure_count=0,
+        error_message=None,
+        started_at=datetime(2026, 5, 19, 0, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 5, 19, 0, 1, tzinfo=UTC),
+    )
+    newer = EmailDailyReportRun(
+        trigger="manual_admin",
+        status=EmailDailyReportStatus.PARTIAL,
+        aggregation_from=datetime(2026, 5, 19, 0, 0, tzinfo=UTC),
+        aggregation_to=datetime(2026, 5, 20, 0, 0, tzinfo=UTC),
+        snapshot_count=4,
+        recipient_count=2,
+        success_count=1,
+        failure_count=1,
+        error_message="ConnectionError: blocked",
+        started_at=datetime(2026, 5, 20, 0, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 5, 20, 0, 1, tzinfo=UTC),
+    )
+    db_session.add_all([older, newer])
+    db_session.commit()
+
+    response = admin_client.get("/api/admin/email/daily-report/runs")
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["count"] == 2
+    items = data["items"]
+    # 최신순 — newer 가 먼저.
+    assert items[0]["trigger"] == "manual_admin"
+    assert items[0]["status"] == "partial"
+    assert items[0]["snapshot_count"] == 4
+    assert items[0]["error_message"] == "ConnectionError: blocked"
+    assert items[1]["trigger"] == "scheduled"
+    assert items[1]["status"] == "success"
+    # ISO-8601 직렬화 형식 가드.
+    assert items[0]["started_at"].startswith("2026-05-20T")
+    assert items[1]["aggregation_from"].startswith("2026-05-18T")
+
+
+def test_get_daily_report_runs_limit_validation(
+    admin_client: TestClient,
+) -> None:
+    """``limit`` 범위 위반 시 422 (Pydantic Query validation)."""
+    response = admin_client.get(
+        "/api/admin/email/daily-report/runs?limit=0"
+    )
+    assert response.status_code == 422
+
+    response = admin_client.get(
+        "/api/admin/email/daily-report/runs?limit=999"
+    )
+    assert response.status_code == 422
+
+
+# ──────────────────────────────────────────────────────────────
+# 7. GET /daily-report/runs/{run_id}/sends — 응답 스키마 + 404
+# ──────────────────────────────────────────────────────────────
+
+
+def test_get_daily_report_run_sends_returns_matching_send_runs(
+    admin_client: TestClient,
+    db_session: Session,
+) -> None:
+    """related_kind='daily_report' AND related_id=run_id 매칭 row 만 반환."""
+    run = EmailDailyReportRun(
+        trigger="scheduled",
+        status=EmailDailyReportStatus.PARTIAL,
+        aggregation_from=datetime(2026, 5, 19, 0, 0, tzinfo=UTC),
+        aggregation_to=datetime(2026, 5, 20, 0, 0, tzinfo=UTC),
+        snapshot_count=2,
+        recipient_count=2,
+        success_count=1,
+        failure_count=1,
+        error_message="ConnectionError: timeout",
+        started_at=datetime(2026, 5, 20, 0, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 5, 20, 0, 1, tzinfo=UTC),
+    )
+    db_session.add(run)
+    db_session.flush()
+
+    matched_success = EmailSendRun(
+        recipient="alice@example.com",
+        subject="[정부사업 모니터링] Daily Report",
+        body_preview="...",
+        transport_type="m365_oauth",
+        status=EmailSendRunStatus.SENT,
+        error_message=None,
+        attempt_count=1,
+        related_kind=RELATED_KIND_DAILY_REPORT,
+        related_id=run.id,
+        created_at=datetime(2026, 5, 20, 0, 0, 10, tzinfo=UTC),
+        sent_at=datetime(2026, 5, 20, 0, 0, 11, tzinfo=UTC),
+    )
+    matched_failed = EmailSendRun(
+        recipient="bob@example.com",
+        subject="[정부사업 모니터링] Daily Report",
+        body_preview="...",
+        transport_type="m365_oauth",
+        status=EmailSendRunStatus.FAILED,
+        error_message="TimeoutError: too slow",
+        attempt_count=3,
+        related_kind=RELATED_KIND_DAILY_REPORT,
+        related_id=run.id,
+        created_at=datetime(2026, 5, 20, 0, 0, 20, tzinfo=UTC),
+        sent_at=None,
+    )
+    # 다른 daily report run 의 row — 본 응답에 포함되면 안 된다.
+    unrelated = EmailSendRun(
+        recipient="other@example.com",
+        subject="다른 발송",
+        body_preview="...",
+        transport_type="m365_oauth",
+        status=EmailSendRunStatus.SENT,
+        error_message=None,
+        attempt_count=1,
+        related_kind="forward",  # 다른 도메인
+        related_id=run.id,
+        created_at=datetime(2026, 5, 20, 0, 0, 30, tzinfo=UTC),
+        sent_at=datetime(2026, 5, 20, 0, 0, 31, tzinfo=UTC),
+    )
+    db_session.add_all([matched_success, matched_failed, unrelated])
+    db_session.commit()
+
+    response = admin_client.get(
+        f"/api/admin/email/daily-report/runs/{run.id}/sends"
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["count"] == 2
+    items = data["items"]
+    # created_at 오름차순.
+    assert items[0]["recipient"] == "alice@example.com"
+    assert items[0]["status"] == "sent"
+    assert items[0]["error_message"] is None
+    assert items[1]["recipient"] == "bob@example.com"
+    assert items[1]["status"] == "failed"
+    assert items[1]["error_message"] == "TimeoutError: too slow"
+    assert items[1]["attempt_count"] == 3
+
+
+def test_get_daily_report_run_sends_404_when_run_missing(
+    admin_client: TestClient,
+) -> None:
+    """존재하지 않는 run_id → 404."""
+    response = admin_client.get(
+        "/api/admin/email/daily-report/runs/99999/sends"
+    )
+    assert response.status_code == 404, response.text
