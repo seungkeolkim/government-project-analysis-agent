@@ -141,6 +141,24 @@
                role="alert"
                aria-live="polite"></p>
 
+            {# 발송 진행 영역 — task 00120: BackgroundTasks 비동기 발송이 진행되는
+               동안 polling 결과를 막대 + 카운터로 노출한다. 기본 숨김이며, POST
+               응답이 status='in_progress' 인 순간 forward.js 가 hidden=false 로
+               열고, polling 종료(성공/실패 박스 전환) 시 다시 숨긴다. #}
+            <div class="forward-modal__progress"
+                 id="forward-progress"
+                 role="status"
+                 aria-live="polite"
+                 hidden>
+                <progress id="forward-progress-bar"
+                          class="forward-modal__progress-bar"
+                          max="1"
+                          value="0"
+                          aria-label="포워딩 발송 진행 상황"></progress>
+                <span id="forward-progress-text"
+                      class="forward-modal__progress-text"></span>
+            </div>
+
             {# 발송 결과 박스 — 성공(초록) / 실패(빨강). 기본 숨김. #}
             <div class="forward-modal__result"
                  id="forward-result-box"
