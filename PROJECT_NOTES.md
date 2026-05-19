@@ -327,6 +327,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
+- [00121] 공고 목록에 모집 시작일 컬럼 추가 — 마감일 좌측에 시작일 표시; 데이터 없을 경우 '-' 처리; CSS 컬럼 너비 조정 — 2026-05-19
 - [00120] 메일 포워딩 비동기화 + 프로그레스 바 — POST /forward 즉시 반환 후 BackgroundTasks 발송, 모달에 polling 기반 실시간 N명 중 M명 완료 / 실패 K건 표시 — 2026-05-19
 - [00119] 메일 포워드 버튼 툴팁 방향 변경 (상단 → 좌측) — `[data-tooltip]::after` CSS를 `bottom/left/translateX` 기준에서 `top/right/translateY` 기준으로 변경; 우측 overflow로 인한 테이블 컬럼 expand 문제 해소 — 2026-05-19
 - [00118] 메일 포워드 버튼 툴팁 노출 지연 제거 — native `title` 속성의 OS/브라우저 지연 문제로 `data-tooltip` 커스텀 CSS 툴팁(0ms 즉시 표시)으로 교체; `[data-tooltip]::after` CSS 규칙 신설, `title=""` → `data-tooltip=""` 일원화 — 2026-05-19
@@ -336,5 +337,4 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - [00112] 포워딩 메일 발신자 정보 표 삽입 + 목록 전달 버튼 추가 — `message_builder.py` `sender_organizations: list` 로 시그니처 변경, 메타 박스 아래 3행 발신자 표(ID·조직명·이메일) 삽입; `/announcement` 목록에 "전달" 컬럼 + ✉️ 버튼(로그인+canonical 시 활성) — 2026-05-18
 - [00111] 공고 포워딩 메일 '공고 상세보기' 링크 Base URL 설정 기능 추가 — 관리자 이메일 설정 페이지에 「시스템 접근 주소」 필드 추가, `/api/admin/email/settings` GET/PUT 에 `app.public_base_url` 포함, http/https 스킴 Pydantic 검증 — 2026-05-18
 - [00110] M365 OAuth SMTP STARTTLS 후 EHLO 재전송 버그 수정 — `smtplib.starttls()` 는 EHLO 를 자동 재전송하지 않아 M365 가 `503 5.5.2 Send hello first` 를 반환하는 문제를 `smtp.ehlo()` 명시적 호출 추가로 해결 — 2026-05-15
-- [00109] Phase A-2 Part 2 공고 포워딩 구현 — `app/email/forwarding.py` 신규(수신자별 개별 발송·트랜잭션 3단계), `message_builder.py` multipart/HTML 확장, `routes/forward.py` API 4종(POST /forward·GET /forward-logs·sends·GET /users/search), 상세 페이지 '메일로 보내기' 버튼 + 수신자 chip 입력 + 발송 이력 섹션 UI — 2026-05-14
 
