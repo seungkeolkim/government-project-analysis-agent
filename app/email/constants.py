@@ -76,6 +76,37 @@ SETTING_KEY_APP_PUBLIC_BASE_URL: str = "app.public_base_url"
 
 
 # ──────────────────────────────────────────────────────────────
+# Phase A-3 (task 00125) — Daily Report SystemSetting 키
+# ──────────────────────────────────────────────────────────────
+# docs/phase_a3_design_note.md §14, phase_a3_prompt.md §"백엔드 변경 1" 인용.
+# 운영자가 "메일 발송 설정" 페이지의 「Daily Report」 카드에서 4 값을 저장/조회
+# 한다. row 가 없으면 코드 레벨 DEFAULT_DAILY_REPORT_* 로 fallback (seed migration
+# 없음 — A-1 의 채택안 A 패턴 동일).
+#
+# 저장 포맷 (디자인 노트 §14 / prompt §1):
+#     - enabled         : "true" / "false" (소문자 통일, email.send_enabled 패턴)
+#     - cron_expression : 5필드 cron 문자열, KST 기준 해석 (스케줄러가 KST tz 고정)
+#     - last_sent_at    : now_utc().isoformat() 형태 ISO-8601, NULL/빈값 = 첫 발송 전
+#     - test_recipient  : 단일 이메일 주소. NULL/빈값 가능
+
+# Daily Report 자동 발송 잡 활성화 여부 토글. 최초 기동 시 off 가 의도된 동작.
+SETTING_KEY_DAILY_REPORT_ENABLED: str = "email.daily_report.enabled"
+
+# APScheduler cron 표현식 (5필드, KST 기준). BackgroundScheduler(timezone=KST) 가
+# 이미 KST 로 설정돼 있어 cron 표현식도 KST 기준으로 해석된다 (디자인 노트 §0-6).
+SETTING_KEY_DAILY_REPORT_CRON: str = "email.daily_report.cron_expression"
+
+# 마지막 발송 성공 시각 (UTC tz-aware 의 ISO-8601 직렬화). single source of truth.
+# `compute_aggregation_window` 가 본 값을 읽어 누적 구간 from_dt 를 결정한다 —
+# EmailDailyReportRun.started_at 의 MAX 로 대체하지 않는다 (디자인 노트 §0-2).
+SETTING_KEY_DAILY_REPORT_LAST_SENT_AT: str = "email.daily_report.last_sent_at"
+
+# 「테스트 발송」 카드에서 운영자가 마지막으로 입력한 받는 사람 주소를 기억해 두는
+# 편의용 필드. UI 가 다음 진입 시 placeholder/value 로 자동 채운다.
+SETTING_KEY_DAILY_REPORT_TEST_RECIPIENT: str = "email.daily_report.test_recipient"
+
+
+# ──────────────────────────────────────────────────────────────
 # Default 값 상수 (SystemSetting row 가 없을 때 fallback 으로 사용)
 # ──────────────────────────────────────────────────────────────
 
@@ -111,6 +142,22 @@ DEFAULT_EMAIL_SEND_ENABLED: bool = False
 DEFAULT_APP_PUBLIC_BASE_URL: str = "http://localhost:8000"
 
 
+# Daily Report 활성화 default — 최초 기동 시 off 보장. PUT /admin/email/daily-report/settings
+# 에서 사용자가 명시적으로 켜야 자동 발송 잡이 등록된다.
+DEFAULT_DAILY_REPORT_ENABLED: bool = False
+
+# Daily Report cron 표현식 default — 평일 KST 09:00 (월~금). prompt §1 명시값.
+DEFAULT_DAILY_REPORT_CRON: str = "0 9 * * 1-5"
+
+# Daily Report 마지막 발송 시각 default — 빈 문자열은 "첫 발송 전" 을 의미하며,
+# compute_aggregation_window 가 이 값을 보고 fallback_days=7 분기에 들어간다.
+DEFAULT_DAILY_REPORT_LAST_SENT_AT: str = ""
+
+# Daily Report 테스트 발송 받는 사람 default — 빈 문자열. row 없거나 빈 값이면
+# UI 에서 사용자가 직접 입력해야 한다.
+DEFAULT_DAILY_REPORT_TEST_RECIPIENT: str = ""
+
+
 # ──────────────────────────────────────────────────────────────
 # 도메인 제약 상수
 # ──────────────────────────────────────────────────────────────
@@ -134,6 +181,14 @@ RELATED_KIND_TEST_SEND: str = "test_send"
 # 넘겨, 발송 이력 expand 조회 시 EmailForwardLog 와 EmailSendRun 을 잇는다.
 RELATED_KIND_FORWARD: str = "forward"
 
+# ``EmailSendRun.related_kind`` 컬럼에 채워지는 A-3 (단체 Daily Report) 값.
+# daily_report service (00125-6) 가 수신자별 ``send_with_retry`` 호출 시
+# ``related_kind=RELATED_KIND_DAILY_REPORT`` / ``related_id=EmailDailyReportRun.id``
+# 로 넘겨, 발송 이력 expand 조회 시 EmailDailyReportRun 의 수신자별 EmailSendRun
+# 을 잇는다. DB 레벨 변경 없음 (application 레벨 enum — EmailSendRun.related_kind
+# 는 plain String, CHECK constraint 미부여).
+RELATED_KIND_DAILY_REPORT: str = "daily_report"
+
 
 # ``EmailSendRun.transport_type`` 컬럼에 채워지는 A-1 범위 값. 현재
 # ``DEFAULT_EMAIL_TRANSPORT_TYPE`` 와 동일하지만, 의미상 \"SystemSetting 의 default
@@ -147,8 +202,10 @@ TRANSPORT_TYPE_M365_OAUTH: str = "m365_oauth"
 # ──────────────────────────────────────────────────────────────
 
 
-# 7개 SystemSetting 키 전체 — 관리자 페이지의 \"메일 설정\" 섹션이 한 번에 GET/PUT
+# 8개 SystemSetting 키 전체 — 관리자 페이지의 \"메일 설정\" 섹션이 한 번에 GET/PUT
 # 하는 단위. 키 추가/제거 시 본 tuple 만 갱신하면 후속 코드가 자동 반영된다.
+# Daily Report 4 키는 \"메일 설정\" 과 별개의 카드(「Daily Report」) 에서 다루므로
+# 본 tuple 에 포함하지 않고 아래 ``DAILY_REPORT_SETTING_KEYS`` 로 분리한다.
 EMAIL_SETTING_KEYS: tuple[str, ...] = (
     SETTING_KEY_EMAIL_TRANSPORT_TYPE,
     SETTING_KEY_EMAIL_M365_TENANT_ID,
@@ -176,9 +233,33 @@ EMAIL_SETTING_DEFAULTS: dict[str, object] = {
 }
 
 
+# Daily Report 4 키 + default 매핑 — 관리자 페이지의 「Daily Report」 카드가
+# 한 번에 GET/PUT 하는 단위. EMAIL_SETTING_KEYS 와 별개의 카드라 분리해 둔다.
+DAILY_REPORT_SETTING_KEYS: tuple[str, ...] = (
+    SETTING_KEY_DAILY_REPORT_ENABLED,
+    SETTING_KEY_DAILY_REPORT_CRON,
+    SETTING_KEY_DAILY_REPORT_LAST_SENT_AT,
+    SETTING_KEY_DAILY_REPORT_TEST_RECIPIENT,
+)
+
+
+DAILY_REPORT_SETTING_DEFAULTS: dict[str, object] = {
+    SETTING_KEY_DAILY_REPORT_ENABLED: DEFAULT_DAILY_REPORT_ENABLED,
+    SETTING_KEY_DAILY_REPORT_CRON: DEFAULT_DAILY_REPORT_CRON,
+    SETTING_KEY_DAILY_REPORT_LAST_SENT_AT: DEFAULT_DAILY_REPORT_LAST_SENT_AT,
+    SETTING_KEY_DAILY_REPORT_TEST_RECIPIENT: DEFAULT_DAILY_REPORT_TEST_RECIPIENT,
+}
+
+
 __all__ = [
     "ALLOWED_EMAIL_TRANSPORT_TYPES",
+    "DAILY_REPORT_SETTING_DEFAULTS",
+    "DAILY_REPORT_SETTING_KEYS",
     "DEFAULT_APP_PUBLIC_BASE_URL",
+    "DEFAULT_DAILY_REPORT_CRON",
+    "DEFAULT_DAILY_REPORT_ENABLED",
+    "DEFAULT_DAILY_REPORT_LAST_SENT_AT",
+    "DEFAULT_DAILY_REPORT_TEST_RECIPIENT",
     "DEFAULT_EMAIL_FROM_DISPLAY_NAME",
     "DEFAULT_EMAIL_M365_CLIENT_ID",
     "DEFAULT_EMAIL_M365_CLIENT_SECRET",
@@ -189,9 +270,14 @@ __all__ = [
     "DEFAULT_EMAIL_TRANSPORT_TYPE",
     "EMAIL_SETTING_DEFAULTS",
     "EMAIL_SETTING_KEYS",
+    "RELATED_KIND_DAILY_REPORT",
     "RELATED_KIND_FORWARD",
     "RELATED_KIND_TEST_SEND",
     "SETTING_KEY_APP_PUBLIC_BASE_URL",
+    "SETTING_KEY_DAILY_REPORT_CRON",
+    "SETTING_KEY_DAILY_REPORT_ENABLED",
+    "SETTING_KEY_DAILY_REPORT_LAST_SENT_AT",
+    "SETTING_KEY_DAILY_REPORT_TEST_RECIPIENT",
     "SETTING_KEY_EMAIL_FROM_DISPLAY_NAME",
     "SETTING_KEY_EMAIL_M365_CLIENT_ID",
     "SETTING_KEY_EMAIL_M365_CLIENT_SECRET",
