@@ -41,6 +41,26 @@
     J. announcement 일괄 조회는 단일 SELECT 로 처리 (N+1 회귀 가드 —
        guidance \"announcement 일괄 조회는 단일 SELECT 로 N+1 회피\").
 
+본문 빌더 (subtask 00125-5 의 acceptance_criteria + prompt §4·§검증 #6 + guidance
+\"빈 카테고리 섹션 생략 / 50건 cap / KST YYYY-MM-DD HH:mm\"):
+
+    K. ``build_daily_report_subject`` — UTC 입력 → KST 변환 후 ``YYYY-MM-DD HH:mm``
+       포맷으로 prefix 와 함께 결합.
+    L. ``build_daily_report_text_body`` — 모든 카테고리 채워진 payload → 5종
+       섹션 + 카테고리당 카운트 + 공고 1줄에 detail_url/agency/마감일 포함.
+    M. ``build_daily_report_text_body`` — 빈 카테고리는 섹션 자체 생략 (header /
+       \"(0건)\" 도 노출되지 않음). 단, 요약 줄에는 0건이 그대로 노출.
+    N. ``build_daily_report_text_body`` — ``is_first_send=True`` 면 헤더 박스에
+       \"최초 발송 — 직전 N일치 포함\" 안내 노출.
+    O. ``build_daily_report_text_body`` — 카테고리당 50건 초과 시 끝에
+       ``\"외 N건 — 대시보드에서 확인\"`` 안내가 1줄 들어가고, 본문에 노출되는 줄은
+       정확히 50개.
+    P. ``build_daily_report_html_body`` — HTML 본문에 모든 5종 섹션 + escape 처리.
+    Q. ``build_daily_report_html_body`` — 빈 카테고리는 HTML 섹션도 생략.
+    R. ``build_daily_report_html_body`` — 50건 초과 시 ``\"외 N건\"`` 안내 노출.
+    S. ``build_daily_report_html_body`` — title / agency 의 HTML 특수문자가
+       이스케이프된다.
+
 DB:
     tests/conftest.py 의 ``test_engine`` + ``db_session`` fixture 사용.
 """
@@ -1037,6 +1057,490 @@ def test_aggregate_does_not_issue_n_plus_one_announcement_selects(
         f"announcements SELECT 가 {announcement_select_count[0]} 회 발생했다 — "
         "단일 IN 쿼리(1회) 기대. N+1 회귀 가능성."
     )
+
+
+# ──────────────────────────────────────────────────────────────
+# 본문 빌더 — subject / text / html
+# ──────────────────────────────────────────────────────────────
+
+
+def _build_announcement_summary(
+    *,
+    announcement_id: int = 1,
+    title: str = "테스트 공고",
+    source_type: str = "iris",
+    agency: str | None = "기관A",
+    deadline_at: datetime | None = None,
+    detail_url: str = "https://example.com/announcements/1",
+    canonical_project_id: int | None = None,
+) -> AnnouncementSummary:
+    """본문 빌더 테스트용 ``AnnouncementSummary`` 인스턴스 빌더.
+
+    DB 를 거치지 않고 dataclass 만으로 빌더 동작을 검증한다 — 본문 빌더는
+    AggregatedSnapshotPayload 만 보고 동작하므로 ORM row 가 필요 없다.
+    """
+    return AnnouncementSummary(
+        announcement_id=announcement_id,
+        canonical_project_id=canonical_project_id,
+        title=title,
+        source_type=source_type,
+        agency=agency,
+        deadline_at=deadline_at,
+        detail_url=detail_url,
+    )
+
+
+def _build_full_payload() -> AggregatedSnapshotPayload:
+    """5종 카테고리에 각 1건씩 채워진 payload — 본문 빌더 일반 케이스용."""
+    return AggregatedSnapshotPayload(
+        new=[
+            _build_announcement_summary(
+                announcement_id=11,
+                title="신규 사업",
+                agency="새기관",
+                detail_url="https://example.com/announcements/11",
+                deadline_at=datetime(2026, 6, 1, 18, 0, tzinfo=UTC),
+            )
+        ],
+        content_changed=[
+            _build_announcement_summary(
+                announcement_id=12,
+                title="변경된 사업",
+                agency=None,
+                detail_url="https://example.com/announcements/12",
+            )
+        ],
+        transitioned_to_received_scheduled=[
+            _build_announcement_summary(
+                announcement_id=13,
+                title="접수예정 사업",
+                detail_url="https://example.com/announcements/13",
+            )
+        ],
+        transitioned_to_receiving=[
+            _build_announcement_summary(
+                announcement_id=14,
+                title="접수중 사업",
+                detail_url="https://example.com/announcements/14",
+            )
+        ],
+        transitioned_to_closed=[
+            _build_announcement_summary(
+                announcement_id=15,
+                title="마감 사업",
+                detail_url="https://example.com/announcements/15",
+            )
+        ],
+        total_count=5,
+    )
+
+
+def _window_for_body(
+    *,
+    is_first_send: bool = False,
+    fallback_days: int | None = None,
+    snapshot_count: int = 3,
+) -> AggregationWindow:
+    """본문 빌더 테스트용 고정 시각 ``AggregationWindow``.
+
+    from_dt / to_dt 는 KST 변환 검증을 쉽게 하기 위해 UTC 00:00 / 00:00 다음 날
+    같은 깔끔한 시각으로 고정한다 — KST 변환 후 09:00 으로 표시된다.
+    """
+    return AggregationWindow(
+        from_dt=datetime(2026, 5, 18, 0, 0, tzinfo=UTC),
+        to_dt=datetime(2026, 5, 19, 0, 0, tzinfo=UTC),
+        snapshot_count=snapshot_count,
+        is_first_send=is_first_send,
+        fallback_days=fallback_days,
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# K. build_daily_report_subject — KST 변환 포맷
+# ──────────────────────────────────────────────────────────────
+
+
+def test_build_subject_uses_kst_yyyy_mm_dd_hh_mm() -> None:
+    """제목 시각 표기는 KST 변환 후 ``YYYY-MM-DD HH:mm`` 포맷.
+
+    UTC 2026-05-18 00:00 → KST 2026-05-18 09:00.
+    UTC 2026-05-19 00:00 → KST 2026-05-19 09:00.
+    """
+    from app.email.message_builder import build_daily_report_subject
+
+    window = _window_for_body()
+    subject = build_daily_report_subject(window)
+
+    assert subject == (
+        "[정부사업 모니터링] Daily Report — 2026-05-18 09:00 ~ 2026-05-19 09:00"
+    )
+
+
+def test_build_subject_does_not_change_for_first_send() -> None:
+    """``is_first_send`` 가 True 여도 제목 자체는 동일하다 (안내는 본문에만).
+
+    design note §6 결정 — 제목까지 \"최초 발송\" 을 늘리지 않는다.
+    """
+    from app.email.message_builder import build_daily_report_subject
+
+    window_first = _window_for_body(is_first_send=True, fallback_days=7)
+    window_normal = _window_for_body()
+
+    assert build_daily_report_subject(window_first) == (
+        build_daily_report_subject(window_normal)
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# L. text body — 모든 카테고리 채워진 payload → 5종 섹션 + 1줄 포맷
+# ──────────────────────────────────────────────────────────────
+
+
+def test_build_text_body_includes_all_five_section_headers_and_lines() -> None:
+    """5종 카테고리가 모두 채워지면 모든 섹션 헤더 + 공고 1줄 모두 노출.
+
+    검증:
+        - 5종 섹션 헤더 각각 ``"{emoji} {label} ({N}건)"`` 형식 포함.
+        - 공고 1줄에 ``title`` / ``detail_url`` / ``agency`` / 마감일 포함.
+        - agency 가 None 이면 ``-`` 으로 표시.
+        - deadline_at 이 None 이면 마감일에 ``-`` 표시.
+    """
+    from app.email.message_builder import build_daily_report_text_body
+
+    text = build_daily_report_text_body(
+        window=_window_for_body(snapshot_count=5),
+        payload=_build_full_payload(),
+    )
+
+    # 5종 섹션 헤더 — 카테고리당 1건씩이므로 모두 ``(1건)``.
+    assert "🆕 신규 공고 (1건)" in text
+    assert "📝 내용 변경 (1건)" in text
+    assert "✅ 접수예정 전이 (1건)" in text
+    assert "▶ 접수중 전이 (1건)" in text
+    assert "🚫 마감 전이 (1건)" in text
+
+    # 공고 1줄 (신규) — title / url / agency / 마감일 모두 포함.
+    assert "- 신규 사업 (https://example.com/announcements/11)" in text
+    assert "새기관" in text
+    # 마감일 — KST 변환 (UTC 18:00 → KST 03:00 익일이지만 datetime 변환 검증).
+    # UTC 2026-06-01 18:00 → KST 2026-06-02 03:00.
+    assert "마감일 2026-06-02 03:00" in text
+
+    # agency=None 인 변경 사업 → ``-`` 로 표시.
+    assert "- 변경된 사업 (https://example.com/announcements/12) — - — 마감일 -" in text
+
+
+def test_build_text_body_summary_line_includes_all_five_zero_counts() -> None:
+    """요약 줄은 5종 모두 노출 (빈 카테고리도 ``0건`` 으로 표기).
+
+    섹션은 빈 카테고리를 생략하지만 요약 줄은 5종 모두 보여 줘야 운영자가
+    \"0건이 정상\" 인지 한눈에 파악할 수 있다.
+    """
+    from app.email.message_builder import build_daily_report_text_body
+
+    # new 만 1건, 나머지 4종은 빈 list.
+    payload = AggregatedSnapshotPayload(
+        new=[_build_announcement_summary(announcement_id=1, title="단일")],
+        content_changed=[],
+        transitioned_to_received_scheduled=[],
+        transitioned_to_receiving=[],
+        transitioned_to_closed=[],
+        total_count=1,
+    )
+    text = build_daily_report_text_body(window=_window_for_body(), payload=payload)
+
+    # 요약 줄 — 5종 모두 짧은 라벨로 노출 (변경 0건 / 접수예정 0건 / ...).
+    expected_summary = (
+        "🆕 신규 1건 · 📝 변경 0건 · ✅ 접수예정 0건 · ▶ 접수중 0건 · 🚫 마감 0건"
+    )
+    assert expected_summary in text
+
+
+# ──────────────────────────────────────────────────────────────
+# M. text body — 빈 카테고리 섹션은 생략
+# ──────────────────────────────────────────────────────────────
+
+
+def test_build_text_body_omits_empty_category_sections(_=None) -> None:
+    """빈 카테고리 4종의 섹션 헤더는 본문에 등장하지 않는다.
+
+    요약 줄에서는 ``0건`` 으로 표기되지만, 섹션 자체 (``label (0건)``) 는
+    절대 본문에 나타나지 않아야 한다 — design note §6 \"섹션 자체 생략\".
+    """
+    from app.email.message_builder import build_daily_report_text_body
+
+    payload = AggregatedSnapshotPayload(
+        new=[_build_announcement_summary(title="단일")],
+        content_changed=[],
+        transitioned_to_received_scheduled=[],
+        transitioned_to_receiving=[],
+        transitioned_to_closed=[],
+        total_count=1,
+    )
+    text = build_daily_report_text_body(window=_window_for_body(), payload=payload)
+
+    # 신규 섹션은 있다.
+    assert "🆕 신규 공고 (1건)" in text
+    # 빈 4종은 섹션 자체 미노출 — ``(0건)`` 으로도 절대 나오면 안 된다.
+    assert "내용 변경 (0건)" not in text
+    assert "접수예정 전이 (0건)" not in text
+    assert "접수중 전이 (0건)" not in text
+    assert "마감 전이 (0건)" not in text
+
+
+# ──────────────────────────────────────────────────────────────
+# N. text body — is_first_send 안내
+# ──────────────────────────────────────────────────────────────
+
+
+def test_build_text_body_includes_first_send_notice_when_window_marks_first() -> None:
+    """``is_first_send=True`` 면 헤더에 ``"최초 발송 — 직전 N일치 포함"`` 안내 노출.
+
+    fallback_days 가 본문 안내 문구에 정수로 들어간다.
+    """
+    from app.email.message_builder import build_daily_report_text_body
+
+    window = _window_for_body(is_first_send=True, fallback_days=7)
+    text = build_daily_report_text_body(
+        window=window,
+        payload=_build_full_payload(),
+    )
+
+    assert "최초 발송" in text
+    assert "직전 7일치" in text
+
+
+def test_build_text_body_omits_first_send_notice_when_normal() -> None:
+    """``is_first_send=False`` 인 일반 발송에는 \"최초 발송\" 안내가 없다."""
+    from app.email.message_builder import build_daily_report_text_body
+
+    text = build_daily_report_text_body(
+        window=_window_for_body(is_first_send=False),
+        payload=_build_full_payload(),
+    )
+    assert "최초 발송" not in text
+
+
+# ──────────────────────────────────────────────────────────────
+# O. text body — 50건 cap + 외 N건
+# ──────────────────────────────────────────────────────────────
+
+
+def test_build_text_body_caps_category_at_50_and_appends_overflow_notice() -> None:
+    """카테고리당 50건 초과 → 본문 줄 정확히 50개 + ``\"외 N건\"`` 안내 1줄.
+
+    검증:
+        - ``- {title} (url) — ...`` 패턴으로 시작하는 줄 = 정확히 50개.
+        - 51번째 줄 위치에 ``"... 외 N건 — 대시보드에서 확인"`` 1줄 등장.
+        - 섹션 헤더 카운트는 cap 적용 전 원본 건수 (``(60건)``) 그대로 노출.
+    """
+    from app.email.message_builder import build_daily_report_text_body
+
+    items = [
+        _build_announcement_summary(
+            announcement_id=100 + index,
+            title=f"공고 {index}",
+            detail_url=f"https://example.com/announcements/{100 + index}",
+        )
+        for index in range(60)
+    ]
+    payload = AggregatedSnapshotPayload(
+        new=items,
+        content_changed=[],
+        transitioned_to_received_scheduled=[],
+        transitioned_to_receiving=[],
+        transitioned_to_closed=[],
+        total_count=60,
+    )
+    text = build_daily_report_text_body(window=_window_for_body(), payload=payload)
+
+    # 섹션 헤더는 원본 60건 그대로.
+    assert "🆕 신규 공고 (60건)" in text
+    # 공고 1줄 (``- {title}`` 시작) 개수 — 정확히 50.
+    item_line_count = sum(
+        1 for line in text.splitlines() if line.startswith("- 공고 ")
+    )
+    assert item_line_count == 50
+    # 초과 안내 — 60 - 50 = 10 건.
+    assert "... 외 10건 — 대시보드에서 확인" in text
+
+
+def test_build_text_body_no_overflow_notice_when_exactly_at_cap() -> None:
+    """정확히 cap (50건) 인 케이스는 ``\"외 N건\"`` 안내가 없다.
+
+    overflow == 0 일 때 안내문이 출력되면 ``\"외 0건\"`` 같은 보기 흉한 문구가 나온다.
+    """
+    from app.email.message_builder import build_daily_report_text_body
+
+    items = [
+        _build_announcement_summary(
+            announcement_id=200 + index,
+            title=f"X{index}",
+            detail_url=f"https://example.com/x/{index}",
+        )
+        for index in range(50)
+    ]
+    payload = AggregatedSnapshotPayload(
+        new=items,
+        content_changed=[],
+        transitioned_to_received_scheduled=[],
+        transitioned_to_receiving=[],
+        transitioned_to_closed=[],
+        total_count=50,
+    )
+    text = build_daily_report_text_body(window=_window_for_body(), payload=payload)
+
+    assert "외 0건" not in text
+    assert "대시보드에서 확인" not in text
+
+
+# ──────────────────────────────────────────────────────────────
+# P. html body — 모든 5종 섹션 + 카운트
+# ──────────────────────────────────────────────────────────────
+
+
+def test_build_html_body_includes_all_five_section_headers() -> None:
+    """HTML 본문에 5종 카테고리 섹션 헤더 + 카운트가 모두 포함된다.
+
+    HTML 구조 단편:
+        - ``<h2>Daily Report</h2>`` 헤더
+        - ``"구간 (KST)"`` 메타 라벨
+        - 각 카테고리의 h3 안에 ``"{emoji} {label} ({N}건)"`` 텍스트
+        - 공고당 ``<li>`` 안에 ``href="{detail_url}"`` 의 ``<a>`` 태그
+    """
+    from app.email.message_builder import build_daily_report_html_body
+
+    html_body = build_daily_report_html_body(
+        window=_window_for_body(snapshot_count=5),
+        payload=_build_full_payload(),
+    )
+
+    assert "<h2" in html_body and "Daily Report</h2>" in html_body
+    assert "구간 (KST)" in html_body
+    assert "2026-05-18 09:00 ~ 2026-05-19 09:00" in html_body
+    # 5종 섹션 헤더 (h3 안에).
+    assert "🆕 신규 공고 (1건)" in html_body
+    assert "📝 내용 변경 (1건)" in html_body
+    assert "✅ 접수예정 전이 (1건)" in html_body
+    assert "▶ 접수중 전이 (1건)" in html_body
+    assert "🚫 마감 전이 (1건)" in html_body
+    # 공고 link href.
+    assert 'href="https://example.com/announcements/11"' in html_body
+
+
+# ──────────────────────────────────────────────────────────────
+# Q. html body — 빈 카테고리 섹션은 생략
+# ──────────────────────────────────────────────────────────────
+
+
+def test_build_html_body_omits_empty_category_sections() -> None:
+    """빈 4종 카테고리의 HTML 섹션도 본문에 등장하지 않는다.
+
+    빈 카테고리 섹션이 HTML 에서 빈 ``<div>`` 등으로 남으면 결과 HTML 이
+    난잡해진다 — 빌더는 빈 list 카테고리에 대해 빈 문자열을 합쳐 섹션 자체를
+    제거해야 한다.
+    """
+    from app.email.message_builder import build_daily_report_html_body
+
+    payload = AggregatedSnapshotPayload(
+        new=[_build_announcement_summary(title="단독")],
+        content_changed=[],
+        transitioned_to_received_scheduled=[],
+        transitioned_to_receiving=[],
+        transitioned_to_closed=[],
+        total_count=1,
+    )
+    html_body = build_daily_report_html_body(
+        window=_window_for_body(), payload=payload
+    )
+
+    assert "🆕 신규 공고 (1건)" in html_body
+    # 빈 4종 카테고리의 섹션 헤더는 절대 등장하면 안 된다.
+    assert "내용 변경 (0건)" not in html_body
+    assert "접수예정 전이 (0건)" not in html_body
+    assert "접수중 전이 (0건)" not in html_body
+    assert "마감 전이 (0건)" not in html_body
+
+
+# ──────────────────────────────────────────────────────────────
+# R. html body — 50건 cap + 외 N건 안내
+# ──────────────────────────────────────────────────────────────
+
+
+def test_build_html_body_caps_at_50_and_appends_overflow_li() -> None:
+    """HTML 본문도 50건 cap + ``\"외 N건\"`` 안내 1행 노출.
+
+    검증:
+        - ``<a href=...``  로 시작하는 공고 1줄 ``<li>`` 가 정확히 50개.
+        - ``"외 10건 — 대시보드에서 확인"`` 텍스트 포함.
+    """
+    from app.email.message_builder import build_daily_report_html_body
+
+    items = [
+        _build_announcement_summary(
+            announcement_id=300 + index,
+            title=f"HTML 공고 {index}",
+            detail_url=f"https://example.com/h/{index}",
+        )
+        for index in range(60)
+    ]
+    payload = AggregatedSnapshotPayload(
+        new=items,
+        content_changed=[],
+        transitioned_to_received_scheduled=[],
+        transitioned_to_receiving=[],
+        transitioned_to_closed=[],
+        total_count=60,
+    )
+    html_body = build_daily_report_html_body(
+        window=_window_for_body(), payload=payload
+    )
+
+    # cap 적용 — anchor href 가 정확히 50개.
+    assert html_body.count('href="https://example.com/h/') == 50
+    # 초과 안내 (60 - 50 = 10).
+    assert "외 10건 — 대시보드에서 확인" in html_body
+
+
+# ──────────────────────────────────────────────────────────────
+# S. html body — title / agency 의 HTML 특수문자 escape
+# ──────────────────────────────────────────────────────────────
+
+
+def test_build_html_body_escapes_announcement_fields() -> None:
+    """공고 제목 / 발주기관에 HTML 특수문자가 들어와도 안전하게 escape 된다.
+
+    HTML injection 방어 — ``<script>`` 가 그대로 본문에 나오면 안 되고,
+    ``&lt;script&gt;`` 로 escape 되어야 한다.
+    """
+    from app.email.message_builder import build_daily_report_html_body
+
+    payload = AggregatedSnapshotPayload(
+        new=[
+            _build_announcement_summary(
+                title="<script>alert(1)</script>",
+                agency="기관 & 부서",
+                detail_url="https://example.com/x?a=1&b=2",
+            )
+        ],
+        content_changed=[],
+        transitioned_to_received_scheduled=[],
+        transitioned_to_receiving=[],
+        transitioned_to_closed=[],
+        total_count=1,
+    )
+    html_body = build_daily_report_html_body(
+        window=_window_for_body(), payload=payload
+    )
+
+    # script 태그 원문이 직접 들어가면 안 된다.
+    assert "<script>alert(1)</script>" not in html_body
+    # 이스케이프된 형태로 등장해야 한다.
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html_body
+    # & 도 &amp; 로 이스케이프.
+    assert "기관 &amp; 부서" in html_body
+    # detail_url 의 & 도 href 에서 &amp; 로 escape (quote=True).
+    assert 'href="https://example.com/x?a=1&amp;b=2"' in html_body
 
 
 # pytest 가 모듈 단독 실행 가능하도록.
