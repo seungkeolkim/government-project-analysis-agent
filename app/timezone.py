@@ -132,9 +132,8 @@ def now_kst() -> datetime:
 # ──────────────────────────────────────────────────────────────
 
 
-# 기본 표시 포맷. 화면/로그에서 가장 자주 쓰는 분 단위 KST 표현.
-# 초 단위가 필요한 경우 호출자가 ``fmt`` 인자를 지정한다.
-DEFAULT_KST_FORMAT: str = "%Y-%m-%d %H:%M"
+# 기본 표시 포맷. 화면/로그에서 KST 초 단위 일관 표시. (task 00122)
+DEFAULT_KST_FORMAT: str = "%Y-%m-%d %H:%M:%S"
 
 
 def format_kst(value: datetime | None, fmt: str = DEFAULT_KST_FORMAT) -> str:
@@ -146,7 +145,7 @@ def format_kst(value: datetime | None, fmt: str = DEFAULT_KST_FORMAT) -> str:
 
     Args:
         value: 포맷할 ``datetime``. None 허용.
-        fmt:   ``strftime`` 포맷 문자열. 기본값은 분 단위 (``"%Y-%m-%d %H:%M"``).
+        fmt:   ``strftime`` 포맷 문자열. 기본값은 초 단위 (``"%Y-%m-%d %H:%M:%S"``).
 
     Returns:
         ``value`` 를 KST tz-aware 로 변환한 뒤 ``strftime(fmt)`` 결과. None 입력

@@ -232,6 +232,33 @@
     }
 
     /**
+     * ISO-8601 UTC datetime 문자열을 KST 표시 문자열로 변환한다.
+     *
+     * `YYYY-MM-DD HH:MM:SS` 형식으로 출력 — admin_email.js 의 formatDateTimeKst
+     * 와 동일한 패턴. en-CA locale + Asia/Seoul timeZone 으로 YYYY-MM-DD HH:MM:SS
+     * 를 보장한다. (task 00122: toLocaleString('ko-KR') 대체)
+     *
+     * @param {string|null|undefined} isoString ISO-8601 datetime 또는 falsy.
+     * @returns {string} KST 표시 문자열 또는 빈 문자열 (falsy 입력).
+     */
+    function formatDateTimeKst(isoString) {
+        if (!isoString) {
+            return '';
+        }
+        var dateValue = new Date(isoString);
+        if (isNaN(dateValue.getTime())) {
+            // 파싱 실패 — raw 그대로 노출 (방어적).
+            return String(isoString);
+        }
+        // en-CA 는 'YYYY-MM-DD, HH:MM:SS' 형식 반환 — 콤마 제거해 'YYYY-MM-DD HH:MM:SS'.
+        var formatted = dateValue.toLocaleString('en-CA', {
+            timeZone: 'Asia/Seoul',
+            hour12: false
+        });
+        return formatted.replace(',', '');
+    }
+
+    /**
      * 본인 판정 items 배열을 myListContainer 에 DOM 으로 렌더링한다.
      * XSS 방지를 위해 textContent / DOM 생성 방식을 사용한다.
      *
@@ -269,12 +296,10 @@
                 (item.verdict === '관련' ? 'related' : 'unrelated');
             verdictSpan.textContent = item.verdict;
 
-            // 작성 시점 — ISO8601 → 사용자 친화 포맷
+            // 작성 시점 — ISO8601 → KST YYYY-MM-DD HH:MM:SS
             var dateSpan = document.createElement('span');
             dateSpan.className = 'rj-modal__mine-date';
-            dateSpan.textContent = item.decided_at
-                ? new Date(item.decided_at).toLocaleString('ko-KR')
-                : '';
+            dateSpan.textContent = formatDateTimeKst(item.decided_at);
 
             // X 삭제 버튼 — 클로저로 organization_id 캡처
             var delBtn = document.createElement('button');

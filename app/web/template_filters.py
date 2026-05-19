@@ -16,9 +16,8 @@
       단일 진실은 그 모듈이며, 본 모듈은 Jinja 에 노출하는 어댑터일 뿐이다.
 
 노출 필터:
-    - ``kst_format(value, fmt=\"%Y-%m-%d %H:%M\")`` — 분 단위가 기본이지만
-      ``{{ dt | kst_format(\"%Y-%m-%d %H:%M:%S\") }}`` 처럼 fmt 인자 전달 가능.
-    - ``kst_date(value)`` — 일자 (``%Y-%m-%d``) 만 표시.
+    - ``kst_format(value, fmt=\"%Y-%m-%d %H:%M:%S\")`` — 초 단위 기본. fmt 인자 전달로 포맷 변경 가능.
+    - ``kst_date(value)`` — 초 단위 (``%Y-%m-%d %H:%M:%S``) 표시. (task 00122: 일자 전용에서 변경)
 
 None 처리:
     두 필터 모두 ``format_kst`` 의 None→"" 정책을 따른다. 템플릿에서 ``or '—'``
@@ -36,13 +35,13 @@ from app.timezone import format_kst
 
 
 def _kst_date_filter(value: datetime | None) -> str:
-    """``{{ dt | kst_date }}`` — KST 기준 일자(``YYYY-MM-DD``) 문자열.
+    """``{{ dt | kst_date }}`` — KST 기준 초 단위(``YYYY-MM-DD HH:MM:SS``) 문자열.
 
-    ``format_kst`` 를 ``%Y-%m-%d`` 포맷으로 호출하는 얇은 어댑터다. 필터로
-    노출하기 위해 별도 함수 객체가 필요해 람다 대신 명시적 def 로 둔다 —
-    Jinja 디버깅 시 traceback 에 함수 이름이 떠야 누락된 호출자를 찾기 쉽다.
+    task 00122: 모든 시간 표시를 'YYYY-MM-DD HH:mm:ss' 로 통일하면서
+    ``format_kst`` 를 ``%Y-%m-%d %H:%M:%S`` 포맷으로 호출하도록 변경.
+    필터 이름(kst_date)은 템플릿 호환을 위해 그대로 유지한다.
     """
-    return format_kst(value, "%Y-%m-%d")
+    return format_kst(value, "%Y-%m-%d %H:%M:%S")
 
 
 def register_kst_filters(templates: Jinja2Templates) -> None:

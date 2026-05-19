@@ -146,15 +146,15 @@ def test_format_kst_none_returns_empty_string() -> None:
     assert format_kst(None) == ""
 
 
-def test_format_kst_default_format_is_minute_precision() -> None:
-    """기본 포맷은 분 단위 (``%Y-%m-%d %H:%M``) 이며 KST 시각으로 표시된다.
+def test_format_kst_default_format_is_second_precision() -> None:
+    """기본 포맷은 초 단위 (``%Y-%m-%d %H:%M:%S``) 이며 KST 시각으로 표시된다.
 
-    UTC 자정 입력은 KST 09:00 으로 표시되어야 한다.
+    UTC 자정 입력은 KST 09:00:00 으로 표시되어야 한다. (task 00122: 분 단위에서 변경)
     """
     utc_input = datetime(2026, 4, 28, 0, 0, 0, tzinfo=UTC)
-    assert format_kst(utc_input) == "2026-04-28 09:00"
+    assert format_kst(utc_input) == "2026-04-28 09:00:00"
     # 기본 포맷이 모듈에 노출돼 있는지 동시 확인.
-    assert DEFAULT_KST_FORMAT == "%Y-%m-%d %H:%M"
+    assert DEFAULT_KST_FORMAT == "%Y-%m-%d %H:%M:%S"
 
 
 def test_format_kst_custom_format_is_applied_after_kst_conversion() -> None:
@@ -169,7 +169,7 @@ def test_format_kst_custom_format_is_applied_after_kst_conversion() -> None:
 def test_format_kst_naive_input_assumed_utc() -> None:
     """naive 입력은 UTC 가정 후 KST 로 변환되어 포맷된다."""
     naive_input = datetime(2026, 4, 28, 0, 0, 0)
-    assert format_kst(naive_input) == "2026-04-28 09:00"
+    assert format_kst(naive_input) == "2026-04-28 09:00:00"
 
 
 # ──────────────────────────────────────────────────────────────
