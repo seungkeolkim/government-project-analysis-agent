@@ -282,11 +282,11 @@
                     {% else %}-{% endif %}
                 </td>
                 {# task 00112/00115 — 전달 셀: 로그인+canonical+메일활성화 시 활성 ✉️, 그 외 disabled. #}
-                {# task 00116 — send_enabled=False 시 span 래퍼에 title 을 달아 툴팁 표시. #}
+                {# task 00118 — data-tooltip 커스텀 툴팁으로 교체해 hover 즉시 표시. #}
                 <td class="col-forward">
-                    {% if current_user and cid and not email_send_enabled %}
+                    {% if not (current_user and cid and email_send_enabled) %}
                     <span class="forward-btn-disabled-wrap"
-                          title="시스템의 메일 전송 기능이 활성화되지 않았습니다.">
+                          data-tooltip="{% if not (current_user and cid) %}로그인 후 사용 가능{% else %}시스템의 메일 전송 기능이 활성화되지 않았습니다.{% endif %}">
                     {% endif %}
                     <button type="button"
                             class="forward-open-btn col-forward__btn"
@@ -297,17 +297,16 @@
                             data-announcement-status="{{ gr.representative.status.value }}"
                             data-announcement-deadline="{% if gr.representative.deadline_at %}{{ gr.representative.deadline_at | kst_date }}{% endif %}"
                             {% if email_send_enabled %}
-                            title="메일로 전달"
+                            data-tooltip="메일로 전달"
                             {% else %}
                             disabled
                             {% endif %}
                             {% else %}
                             disabled
-                            title="로그인 후 사용 가능"
                             {% endif %}>
                         &#9993;
                     </button>
-                    {% if current_user and cid and not email_send_enabled %}
+                    {% if not (current_user and cid and email_send_enabled) %}
                     </span>
                     {% endif %}
                 </td>
@@ -414,11 +413,11 @@
                     {% else %}-{% endif %}
                 </td>
                 {# task 00112/00115 — 전달 셀: 로그인+canonical+메일활성화 시 활성 ✉️, 그 외 disabled. #}
-                {# task 00116 — send_enabled=False 시 span 래퍼에 title 을 달아 툴팁 표시. #}
+                {# task 00118 — data-tooltip 커스텀 툴팁으로 교체해 hover 즉시 표시. #}
                 <td class="col-forward">
-                    {% if current_user and cid and not email_send_enabled %}
+                    {% if not (current_user and cid and email_send_enabled) %}
                     <span class="forward-btn-disabled-wrap"
-                          title="시스템의 메일 전송 기능이 활성화되지 않았습니다.">
+                          data-tooltip="{% if not (current_user and cid) %}로그인 후 사용 가능{% else %}시스템의 메일 전송 기능이 활성화되지 않았습니다.{% endif %}">
                     {% endif %}
                     <button type="button"
                             class="forward-open-btn col-forward__btn"
@@ -429,17 +428,16 @@
                             data-announcement-status="{{ ann.status.value }}"
                             data-announcement-deadline="{% if ann.deadline_at %}{{ ann.deadline_at | kst_date }}{% endif %}"
                             {% if email_send_enabled %}
-                            title="메일로 전달"
+                            data-tooltip="메일로 전달"
                             {% else %}
                             disabled
                             {% endif %}
                             {% else %}
                             disabled
-                            title="로그인 후 사용 가능"
                             {% endif %}>
                         &#9993;
                     </button>
-                    {% if current_user and cid and not email_send_enabled %}
+                    {% if not (current_user and cid and email_send_enabled) %}
                     </span>
                     {% endif %}
                 </td>

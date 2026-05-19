@@ -4947,13 +4947,41 @@ details[open] .user-card__org-summary::before {
     opacity: 0.5;
 }
 
-/* send_enabled=False 시 disabled 버튼 래퍼.
-   disabled 버튼은 일부 브라우저에서 native title tooltip 이 표시되지 않으므로
-   span 에 title 을 달아 마우스 호버 시 툴팁이 노출되도록 한다. */
+/* 메일 포워드 disabled 버튼 래퍼.
+   disabled 버튼은 pointer-events 가 차단되는 브라우저가 있으므로
+   span 을 호버 타깃으로 삼고, data-tooltip 커스텀 툴팁과 함께 사용한다. */
 .forward-btn-disabled-wrap {
     display: inline-block;
     flex-shrink: 0;
     cursor: not-allowed;
+}
+
+/* 메일 포워드 버튼 커스텀 툴팁: data-tooltip 속성을 hover 즉시(0ms) 표시.
+   native title 의 OS/브라우저 지연 없이 커서를 올리는 순간 노출된다. */
+[data-tooltip]:not([data-tooltip=""]) {
+    position: relative;
+}
+
+[data-tooltip]:not([data-tooltip=""])::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.75);
+    color: #fff;
+    font-size: 0.75rem;
+    white-space: nowrap;
+    padding: 4px 8px;
+    border-radius: 4px;
+    pointer-events: none;
+    opacity: 0;
+    z-index: 9999;
+}
+
+[data-tooltip]:not([data-tooltip=""]):hover::after,
+[data-tooltip]:not([data-tooltip=""]):focus-visible::after {
+    opacity: 1;
 }
 
 /* ---------- 발송 모달 ---------- */

@@ -181,7 +181,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
   - `tests/test_canonical.py` — canonical 키 계산(키 포맷·cross-source 유지·false-positive 분리·fuzzy fallback parametrize).
   - `tests/e2e/` — Playwright 기반. 포트 8000(운영) 충돌 방지로 8001 격리 서버. `test_dashboard_e2e.py`, `test_admin_organizations_e2e.py`, `test_admin_suggestion_delete_e2e.py`. 호스트에 chromium 의존 라이브러리·Playwright 브라우저 캐시가 없으면 `conftest.py` 가 `pytest.skip`. `e2e-tests/` TypeScript Playwright 테스트도 병행.
   - conftest 패턴: 인메모리 SQLite + 가짜 User fixture. settings 류 통합 테스트는 TestClient + 별도 `db_verify` 세션으로 commit 결과를 재조회하는 패턴.
-- **disabled 버튼 툴팁**: 일부 브라우저에서 `disabled` 속성이 있는 버튼에는 `title` tooltip 이 표시되지 않는다. 비활성 버튼에 hover 안내 문구가 필요한 경우 `<span class="forward-btn-disabled-wrap" title="...">` 로 감싸고 `cursor: not-allowed` CSS 를 적용하는 패턴을 사용한다 (목록·상세 페이지의 메일 발송 버튼 참고).
+- **커스텀 툴팁 (`data-tooltip`)**: 브라우저 native `title` 속성은 OS/브라우저가 자체 지연을 부과해 즉시 노출이 불가능하다. 0ms(즉시) 노출이 필요한 경우 `data-tooltip="..."` 속성 + CSS `[data-tooltip]::after { content: attr(data-tooltip); ... }` + `:hover::after { opacity: 1; }` 조합을 사용한다. `disabled` 버튼처럼 `pointer-events` 가 차단되는 경우 `<span class="forward-btn-disabled-wrap" data-tooltip="...">` 로 감싸고 `cursor: not-allowed` CSS 를 적용한다 (목록·상세 페이지의 메일 발송 버튼 참고). `title=""` 대신 `data-tooltip` 으로 일원화 — native 툴팁은 신설 금지.
 - **커밋 메시지**: `[{task_id}][tg:{requester}] {subtask_id}: {요약}` 형식.
 - **장기 문서 컨벤션 — 현재 상태 중심**: `PROJECT_NOTES.md` 와 `README.USER.md` 는 모두 **현재 상태 중심**으로 유지한다. task ID 인용·시간순 append·"최근 변경 이력" 류 일지 섹션 금지 — 장기적으로 의미 있는 결정·컨벤션·아키텍처 변화만 본문 해당 섹션에 병합한다. `README.USER.md` 는 기능/상황별 단위(시작하기·스크래퍼 실행·DB 관리·트러블슈팅 등)로 구조화하고, 운영자에게 의미 없는 task 출처 메타는 제거한다. 일회성 verification·audit 산출물은 `docs/` 에 영속 저장하지 않고 PR 설명·커밋 메시지로 대체.
 - **데이터 / 비밀**: `.env` 와 `sources.yaml` 은 커밋 금지 (`.gitignore`). `.env.example`·`sources.yaml.template` 만 관리. `sources.yaml` 초기 생성은 `sh ./bootstrap_sources.sh`. 두 템플릿 파일은 **기능별 번호 섹션**으로 구성하고 `README.USER.md` 의 초기 설치 흐름과 순서를 맞춘다 — task 출처·히스토리성 주석은 제거하고 실제 사용자 관점에서 필요한 정보만 유지한다.
@@ -326,7 +326,8 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
-- [00116] 메일 발송 비활성화 시 disabled 버튼 툴팁 추가 + 테스트 발송 게이트 제외 — `send_enabled=False` 시 목록·상세 페이지 발송 버튼을 `<span title="...">` 으로 감싸 브라우저 호환 툴팁 표시; 테스트 발송 엔드포인트(`POST /admin/email/test-send`)는 `is_email_sending_enabled` 게이트에서 제외 — 2026-05-18
+- [00118] 메일 포워드 버튼 툴팁 노출 지연 제거 — native `title` 속성의 OS/브라우저 지연 문제로 `data-tooltip` 커스텀 CSS 툴팁(0ms 즉시 표시)으로 교체; `[data-tooltip]::after` CSS 규칙 신설, `title=""` → `data-tooltip=""` 일원화 — 2026-05-19
+- [00116] 메일 발송 비활성화 시 disabled 버튼 툴팁 추가 + 테스트 발송 게이트 제외 — `send_enabled=False` 시 목록·상세 페이지 발송 버튼 래퍼에 툴팁 표시; 테스트 발송 엔드포인트(`POST /admin/email/test-send`)는 `is_email_sending_enabled` 게이트에서 제외 — 2026-05-18
 - [00115] 메일 전송 기능 활성화 토글 + 발송 게이트 추가 — `email.send_enabled` SystemSetting(기본 off) + `app/email/gate.py` 게이트 신설, 포워딩 경로에 적용; 관리자 이메일 탭에 「메일 발송 설정」 섹션 + 활성화 토글 UI 추가 — 2026-05-18
 - [00113] 포워딩 발신자 표 단일 조직 표시 + 무소속 안내 문구 수정 — `forwarding.py` 가 모든 소속 조직 대신 선택된 조직 1건만 발신자 표에 노출하도록 변경, 무소속 안내 메시지 \"개인 자격으로 발송됩니다\" → \"조직 정보 없이 발송됩니다\" 로 수정 — 2026-05-18
 - [00112] 포워딩 메일 발신자 정보 표 삽입 + 목록 전달 버튼 추가 — `message_builder.py` `sender_organizations: list` 로 시그니처 변경, 메타 박스 아래 3행 발신자 표(ID·조직명·이메일) 삽입; `/announcement` 목록에 "전달" 컬럼 + ✉️ 버튼(로그인+canonical 시 활성) — 2026-05-18
@@ -335,5 +336,3 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - [00109] Phase A-2 Part 2 공고 포워딩 구현 — `app/email/forwarding.py` 신규(수신자별 개별 발송·트랜잭션 3단계), `message_builder.py` multipart/HTML 확장, `routes/forward.py` API 4종(POST /forward·GET /forward-logs·sends·GET /users/search), 상세 페이지 '메일로 보내기' 버튼 + 수신자 chip 입력 + 발송 이력 섹션 UI — 2026-05-14
 - [00106] Phase A-2 Part 1: `EmailForwardLog` ORM + Alembic migration + 단위 테스트 (`email_forward_logs` 테이블 신설, `EmailForwardStatus` enum) — 2026-05-14
 - [00105] `email-validator` 의존성 누락 수정 — pydantic `EmailStr` 사용 시 필수인 `email-validator>=2.0,<3.0` 패키지가 00104에서 빠져 기동 오류 발생, pyproject.toml 에 추가하여 복구 — 2026-05-14
-- [00104] 메일 발송 인프라 + 관리자 UI 구현 (Phase A-1) — `app/email/` 패키지(Transport ABC·M365 OAuth SMTP·재시도 sender·factory), `email_send_runs` Alembic migration, admin_email API 4종, 관리자 이메일 탭 Frontend (설정 form·테스트 발송·발송 이력) — 2026-05-13
-- [00101] 공지사항/건의사항 게시판 링크를 사이트 헤더 최상단으로 이동 — `base.html` 네비게이션 순서 조정, `style.css` 보더·여백 CSS 수정으로 정부과제 수집 섹션보다 위에 배치 — 2026-05-12
