@@ -577,8 +577,8 @@ def list_folder_entries(
 
     응답 items 각 원소:
         entry_id, announcement_id, ann_title, canonical_title,
-        ann_agency, ann_source_type, ann_status, ann_deadline_at,
-        canonical_project_id, added_at
+        ann_agency, ann_source_type, ann_status, ann_received_at,
+        ann_deadline_at, canonical_project_id, added_at
     """
     with session_scope() as session:
         _get_owned_folder_or_404(session, folder_id, current_user.id)
@@ -592,6 +592,8 @@ def list_folder_entries(
         def _jsonable(item: dict) -> dict:
             """응답 JSON 직렬화용으로 datetime/enum 을 문자열로 정규화한다."""
             result = dict(item)
+            if result.get("ann_received_at") is not None:
+                result["ann_received_at"] = result["ann_received_at"].isoformat()
             if result.get("ann_deadline_at") is not None:
                 result["ann_deadline_at"] = result["ann_deadline_at"].isoformat()
             if result.get("added_at") is not None:

@@ -14,12 +14,20 @@
     - relevance_summary_empty:  RelevanceSummary              (task 00085 — 미존재 default)
     - user_organization_options: list[dict]                   (task 00085 — 모달 드롭다운)
     - read_id_set:              set[int]  (task 00037 — read/unread bold 분기용)
+    - progress_summary_map:     dict[int, ProgressSummary]   (task 00124 — canonical_id → 진행 상태 요약)
+    - progress_summary_empty:   ProgressSummary              (task 00124 — 미존재 canonical default)
+    - progress_rows_map:        dict[int, list[ProgressRowDetail]]  (task 00124 — canonical_id → 셀 expand 본문)
+    - email_send_enabled:       bool                         (task 00124 — 전달 버튼 활성화 여부)
 
   레이아웃:
     - 좌 사이드바: 폴더 트리 (SSR) + 추가/이름변경/삭제 CRUD (JS)
     - 우 메인: 선택된 폴더의 즐겨찾기 항목 테이블 (SSR) + 폴더 이동/제거 버튼 (JS)
+
+  컬럼 수: 10 (제목 / 기관 / 소스 / 접수 상태 / 모집 시작일 / 마감일 / 관련성 / 진행 상태 / 전달 / 동작)
+  favorites 페이지는 항상 로그인 상태이므로 colspan 분기 없이 고정 10을 사용한다.
 #}
 {% from "_relevance_badge_macro.html" import relevance_badge %}
+{% from "_progress_cell_macro.html" import progress_cell, progress_expand_row %}
 {% extends "base.html" %}
 
 {% block page_title %}즐겨찾기{% endblock %}
@@ -155,15 +163,22 @@
                         <th class="col-title">제목</th>
                         <th class="col-agency">기관</th>
                         <th class="col-source">소스</th>
-                        <th class="col-status">상태</th>
+                        <th class="col-status">접수 상태</th>
+                        <th class="col-received">모집 시작일</th>
                         <th class="col-deadline">마감일</th>
                         <th class="col-relevance">관련성</th>
+                        {# task 00124 — list.html 과 동일하게 진행 상태 / 전달 컬럼 추가 #}
+                        <th class="col-progress">진행 상태</th>
+                        <th class="col-forward">전달</th>
                         {# task 00037 #3: 폴더 이동 / 제거 두 버튼 #}
                         <th class="col-fav-actions">동작</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for item in entries %}
+                    {# task 00124 — 진행 상태 expand 행 DOM id: entry_id 를 키로 사용해 같은 페이지 내 중복 방지 #}
+                    {% set progress_expand_id = 'progress-expand-row-fav-' ~ item.entry_id %}
+                    {% set cid = item.canonical_project_id %}
                     <tr>
                         <td class="col-title">
                             {# 별 아이콘: 즐겨찾기 페이지에선 항상 채워진 별(시각 표시 전용). data-* 없음 → favorites.js 미동작. #}
@@ -200,13 +215,20 @@
                             </span>
                             {% else %}-{% endif %}
                         </td>
+                        {# task 00124 — 모집 시작일 (list.html col-received 와 동일 표현) #}
+                        <td class="col-received">
+                            {% if item.ann_received_at %}
+                                {{ item.ann_received_at | kst_date }}
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
                         <td class="col-deadline">
                             {% if item.ann_deadline_at %}
                                 {{ item.ann_deadline_at | kst_format }}
                             {% else %}-{% endif %}
                         </td>
                         <td class="col-relevance">
-                            {% set cid = item.canonical_project_id %}
                             {% if cid %}
                             {{ relevance_badge(
                                 cid,
@@ -215,8 +237,49 @@
                             ) }}
                             {% else %}-{% endif %}
                         </td>
+                        {# task 00124 — 진행 상태 셀 (list.html 분리 표시 모드와 동일 패턴) #}
+                        <td class="col-progress">
+                            {% if cid %}
+                            {{ progress_cell(
+                                cid,
+                                progress_summary_map.get(cid, progress_summary_empty),
+                                current_user,
+                                progress_expand_id
+                            ) }}
+                            {% else %}-{% endif %}
+                        </td>
+                        {# task 00124 — 전달 셀 (list.html 과 동일 패턴).
+                           favorites 는 항상 로그인 상태이므로 current_user 분기는
+                           실질적으로 cid 유무만 영향을 준다. #}
+                        <td class="col-forward">
+                            {% if not (current_user and cid and email_send_enabled) %}
+                            <span class="forward-btn-disabled-wrap"
+                                  data-tooltip="{% if not (current_user and cid) %}로그인 후 사용 가능{% else %}시스템의 메일 전송 기능이 활성화되지 않았습니다.{% endif %}">
+                            {% endif %}
+                            <button type="button"
+                                    class="forward-open-btn col-forward__btn"
+                                    {% if current_user and cid %}
+                                    data-canonical-id="{{ cid }}"
+                                    data-announcement-title="{{ item.canonical_title or '' }}"
+                                    data-announcement-agency="{{ item.ann_agency or '' }}"
+                                    data-announcement-status="{{ item.ann_status.value if item.ann_status else '' }}"
+                                    data-announcement-deadline="{% if item.ann_deadline_at %}{{ item.ann_deadline_at | kst_date }}{% endif %}"
+                                    {% if email_send_enabled %}
+                                    data-tooltip="메일로 전달"
+                                    {% else %}
+                                    disabled
+                                    {% endif %}
+                                    {% else %}
+                                    disabled
+                                    {% endif %}>
+                                &#9993;
+                            </button>
+                            {% if not (current_user and cid and email_send_enabled) %}
+                            </span>
+                            {% endif %}
+                        </td>
                         <td class="col-fav-actions">
-                            {# task 00037 #3 — 각 row 에 \"폴더 이동\" 버튼 추가.
+                            {# task 00037 #3 — 각 row 에 "폴더 이동" 버튼 추가.
                                기존 폴더 선택 모달을 재사용한다(favorites.js 의 move 모드).
                                data-from-folder-id 는 현재 보고 있는 폴더 id — 동일 폴더로의
                                이동은 클라이언트 단에서 no-op 처리된다. #}
@@ -231,6 +294,16 @@
                                     title="즐겨찾기 제거">제거</button>
                         </td>
                     </tr>
+                    {# task 00124 — 진행 상태 셀 클릭 expand hidden 행.
+                       favorites 는 비로그인 분기가 없으므로 colspan 고정 10. #}
+                    {% if cid %}
+                    {{ progress_expand_row(
+                        progress_expand_id,
+                        cid,
+                        progress_rows_map.get(cid, []),
+                        10
+                    ) }}
+                    {% endif %}
                     {% endfor %}
                 </tbody>
             </table>
