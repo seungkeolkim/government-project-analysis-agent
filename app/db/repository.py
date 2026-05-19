@@ -4059,6 +4059,52 @@ def list_snapshots_in_range(
     return list(rows)
 
 
+def list_snapshots_created_in_range(
+    session: Session,
+    *,
+    from_exclusive: datetime,
+    to_inclusive: datetime,
+) -> list[ScrapeSnapshot]:
+    """``(from_exclusive, to_inclusive]`` UTC 시간 구간의 ScrapeSnapshot list.
+
+    Phase A-3 (task 00125 — 단체 Daily Report) 의 누적 구간 계산 / 머지가
+    사용하는 헬퍼. ``list_snapshots_in_range`` 는 ``snapshot_date`` (KST 날짜)
+    기준이라 시간 단위 비교가 안 되므로, daily report 의 ``(last_sent_at, now]``
+    시간 윈도우용으로 별도 헬퍼를 둔다.
+
+    SQL: ``WHERE created_at > :from_exclusive AND created_at <= :to_inclusive``
+         ``ORDER BY created_at ASC``
+
+    누적 머지의 정확성을 위해 ``created_at ASC`` 정렬은 필수다 — 시간순으로
+    ``merge_snapshot_payload`` 를 reduce 해야 머지 규칙(\"first from 유지 + last
+    to 갱신\" transition) 이 의도대로 작동한다.
+
+    `created_at` 채택 근거 (``docs/phase_a3_design_note.md`` §1):
+        같은 KST 날짜 row 가 머지로 갱신돼도 본 row 의 `created_at` 은 최초
+        INSERT 시각으로 고정된다. \"발송 구간 안에 새로 만들어진 snapshot 만
+        누적\" 시맨틱이 단순해 prompt 의사 코드 그대로 채택했다. 운영 데이터를
+        보고 누락이 실측되면 별도 task 로 `updated_at` 전환을 검토한다.
+
+    Args:
+        session:        호출자 세션.
+        from_exclusive: 시작 경계 (배타). UTC tz-aware datetime. 보통 daily
+                        report 의 ``SystemSetting[\"email.daily_report.last_sent_at\"]``.
+        to_inclusive:   끝 경계 (포함). UTC tz-aware datetime. 보통 발송 잡
+                        발화 시각 ``now_utc()``.
+
+    Returns:
+        ``ScrapeSnapshot`` 의 list, ``created_at`` 오름차순. 구간이 비면 빈
+        list. ``from_exclusive >= to_inclusive`` 도 그대로 빈 list.
+    """
+    rows = session.execute(
+        select(ScrapeSnapshot)
+        .where(ScrapeSnapshot.created_at > from_exclusive)
+        .where(ScrapeSnapshot.created_at <= to_inclusive)
+        .order_by(ScrapeSnapshot.created_at.asc())
+    ).scalars().all()
+    return list(rows)
+
+
 def list_snapshots_in_inclusive_range(
     session: Session,
     *,
