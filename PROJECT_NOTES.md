@@ -327,6 +327,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
+- [00123] 공고 목록 모집 시작일/마감일 컬럼 너비 확대 — 00122 datetime 포맷 통일(초 단위)로 문자열이 길어져 발생한 컬럼 침범 현상을 CSS min-width 조정으로 해소 — 2026-05-19
 - [00122] 시스템 전체 datetime 표시 포맷 `YYYY-MM-DD HH:mm:ss` 초 단위로 통일 — `DEFAULT_KST_FORMAT` 변경, `kst_date` Jinja2 필터도 초 단위로 변경, JS `relevance.js` 의 `ko-KR` toLocaleString 을 `en-CA + Asia/Seoul` 패턴으로 교체 — 2026-05-19
 - [00121] 공고 목록에 모집 시작일 컬럼 추가 — 마감일 좌측에 시작일 표시; 데이터 없을 경우 '-' 처리; CSS 컬럼 너비 조정 — 2026-05-19
 - [00120] 메일 포워딩 비동기화 + 프로그레스 바 — POST /forward 즉시 반환 후 BackgroundTasks 발송, 모달에 polling 기반 실시간 N명 중 M명 완료 / 실패 K건 표시 — 2026-05-19
@@ -336,5 +337,4 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - [00115] 메일 전송 기능 활성화 토글 + 발송 게이트 추가 — `email.send_enabled` SystemSetting(기본 off) + `app/email/gate.py` 게이트 신설, 포워딩 경로에 적용; 관리자 이메일 탭에 「메일 발송 설정」 섹션 + 활성화 토글 UI 추가 — 2026-05-18
 - [00113] 포워딩 발신자 표 단일 조직 표시 + 무소속 안내 문구 수정 — `forwarding.py` 가 모든 소속 조직 대신 선택된 조직 1건만 발신자 표에 노출하도록 변경, 무소속 안내 메시지 \"개인 자격으로 발송됩니다\" → \"조직 정보 없이 발송됩니다\" 로 수정 — 2026-05-18
 - [00112] 포워딩 메일 발신자 정보 표 삽입 + 목록 전달 버튼 추가 — `message_builder.py` `sender_organizations: list` 로 시그니처 변경, 메타 박스 아래 3행 발신자 표(ID·조직명·이메일) 삽입; `/announcement` 목록에 "전달" 컬럼 + ✉️ 버튼(로그인+canonical 시 활성) — 2026-05-18
-- [00111] 공고 포워딩 메일 '공고 상세보기' 링크 Base URL 설정 기능 추가 — 관리자 이메일 설정 페이지에 「시스템 접근 주소」 필드 추가, `/api/admin/email/settings` GET/PUT 에 `app.public_base_url` 포함, http/https 스킴 Pydantic 검증 — 2026-05-18
 
