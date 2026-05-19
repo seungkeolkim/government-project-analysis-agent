@@ -965,15 +965,26 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         # task 00085 — 즐겨찾기 페이지의 관련성 summary batch 조회.
         # favorites 페이지는 비로그인이 위 분기에서 redirect 되므로 항상 current_user 가 있다.
         # canonical_project_id 가 None 인 항목은 summary 조회 대상에서 제외된다.
-        canonical_ids = [
+        # set 으로 중복 제거 후 list 변환 (동일 canonical 이 여러 항목에 등장할 수 있음).
+        canonical_ids = list({
             it["canonical_project_id"]
             for it in items
             if it.get("canonical_project_id") is not None
-        ]
+        })
         relevance_summary_map = get_relevance_summary_by_canonical_id_map(
             session,
             user_id=current_user.id,
             canonical_project_ids=canonical_ids,
+        )
+        # task 00124 — 진행 상태 summary batch 조회 (list 페이지와 동일 패턴).
+        progress_summary_map = get_progress_summary_by_canonical_id_map(
+            session,
+            user_id=current_user.id,
+            canonical_project_ids=canonical_ids,
+        )
+        # task 00124 — 셀 expand 본문용 조직 detail rows (list 페이지와 동일 패턴).
+        progress_rows_map = get_progress_rows_by_canonical_id_map(
+            session, canonical_project_ids=canonical_ids
         )
         user_organization_options = _load_user_organization_options(
             session, current_user
@@ -1014,6 +1025,13 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 "user_organization_options": user_organization_options,
                 # task 00037 plan_review 추가요청 — read/unread bold 분기용.
                 "read_id_set": read_id_set,
+                # task 00124 — 진행 상태 요약 batch (list 페이지와 동일 패턴).
+                "progress_summary_map": progress_summary_map,
+                "progress_summary_empty": PROGRESS_SUMMARY_EMPTY,
+                # task 00124 — 셀 expand 본문 (list 페이지와 동일 패턴).
+                "progress_rows_map": progress_rows_map,
+                # task 00124 — 메일 전송 기능 활성화 여부 (forward 버튼 disabled 분기).
+                "email_send_enabled": is_email_sending_enabled(session),
             },
         )
 
