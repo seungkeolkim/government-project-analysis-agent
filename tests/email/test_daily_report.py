@@ -1,6 +1,7 @@
-"""``compute_aggregation_window`` + 공용 dataclass 단위 테스트 (task 00125-3).
+"""``compute_aggregation_window`` + ``aggregate_snapshots`` + 공용 dataclass 단위 테스트.
 
-검증 대상 (subtask 00125-3 의 acceptance_criteria + design note §1·§4·§14):
+검증 대상 (subtask 00125-3 / 00125-4 의 acceptance_criteria + design note §1·§2·
+§4·§14):
 
     1. ``last_sent_at`` SystemSetting row 없음 → ``is_first_send=True`` ,
        ``fallback_days=7`` 적용, ``from_dt = now - 7d``.
@@ -21,25 +22,50 @@
     8. dataclass 기본 정책 — ``frozen=False`` 임을 확인 (인스턴스 필드 mutate
        가능).
 
+``aggregate_snapshots`` (subtask 00125-4 의 acceptance_criteria + prompt §3):
+
+    A. 단일 snapshot payload → 5종 카테고리 직접 추출 + ``AnnouncementSummary``
+       필드 매핑 검증.
+    B. 2개 snapshot 연속 머지 → ``new`` set union (검증 6 형식의 회귀 가드).
+    C. 2개 snapshot 연속 머지 → transition \"first from 유지 + last to 갱신\"
+       (prompt §3 검증 4 의 머지 규칙).
+    D. ``from == to`` 가 발생한 정정 케이스 → 어떤 카테고리에도 포함되지 않음
+       (prompt §3 검증 5 의 머지 규칙).
+    E. 메타 누락 announcement_id → silent skip (dashboard 패턴).
+    F. ``is_current=False`` 인 history row 도 포함 (subtask guidance 명시).
+    G. ``detail_url`` 은 announcement row 의 PK 기준으로 조립 + SystemSetting
+       ``app.public_base_url`` 사용.
+    H. 빈 payload 구간 (snapshot 0건) 도 안전하게 빈 ``AggregatedSnapshotPayload``
+       반환 (defensive 가드).
+    I. ``total_count`` 는 5 리스트 길이의 합 — 중복 제거 없음.
+    J. announcement 일괄 조회는 단일 SELECT 로 처리 (N+1 회귀 가드 —
+       guidance \"announcement 일괄 조회는 단일 SELECT 로 N+1 회피\").
+
 DB:
     tests/conftest.py 의 ``test_engine`` + ``db_session`` fixture 사용.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 from app.backup.service import set_setting
-from app.db.models import ScrapeSnapshot
+from app.db.models import Announcement, AnnouncementStatus, ScrapeSnapshot
 from app.db.snapshot import normalize_payload
-from app.email.constants import SETTING_KEY_DAILY_REPORT_LAST_SENT_AT
+from app.email.constants import (
+    DEFAULT_APP_PUBLIC_BASE_URL,
+    SETTING_KEY_APP_PUBLIC_BASE_URL,
+    SETTING_KEY_DAILY_REPORT_LAST_SENT_AT,
+)
 from app.email.daily_report import (
     AggregatedSnapshotPayload,
     AggregationWindow,
     AnnouncementSummary,
+    aggregate_snapshots,
     compute_aggregation_window,
 )
 
@@ -470,6 +496,547 @@ def test_aggregated_snapshot_payload_field_names() -> None:
         "total_count",
     }
     assert field_names == expected
+
+
+# ──────────────────────────────────────────────────────────────
+# aggregate_snapshots — 누적 머지 + AnnouncementSummary 빌드
+# ──────────────────────────────────────────────────────────────
+
+
+def _insert_announcement(
+    session: Session,
+    *,
+    source_announcement_id: str,
+    title: str = "테스트 공고",
+    source_type: str = "IRIS",
+    status: AnnouncementStatus = AnnouncementStatus.RECEIVING,
+    agency: str | None = "기관A",
+    deadline_at: datetime | None = None,
+    canonical_group_id: int | None = None,
+    is_current: bool = True,
+) -> Announcement:
+    """테스트용 ``Announcement`` row 를 빠르게 INSERT 한다.
+
+    payload 가 참조하는 announcement_id 와 DB row 의 PK 가 일치해야 본문에 공고
+    메타가 들어가므로, 테스트는 본 헬퍼로 row 를 만든 뒤 반환된 ``ann.id`` 를
+    snapshot payload 에 그대로 박아 넣는다.
+
+    필수 nullable=False 컬럼만 채우고 나머지는 ORM default 에 맡긴다 (raw_metadata
+    = ``default=dict``, scraped_at / updated_at = ``default=_utcnow``).
+    """
+    announcement = Announcement(
+        source_announcement_id=source_announcement_id,
+        source_type=source_type,
+        title=title,
+        status=status,
+        agency=agency,
+        deadline_at=deadline_at,
+        canonical_group_id=canonical_group_id,
+        is_current=is_current,
+    )
+    session.add(announcement)
+    session.flush()
+    return announcement
+
+
+def _aggregation_window(
+    *,
+    from_dt: datetime,
+    to_dt: datetime,
+    snapshot_count: int = 1,
+) -> AggregationWindow:
+    """단순한 ``AggregationWindow`` 인스턴스 빌더 — 테스트 내 sugar.
+
+    ``aggregate_snapshots`` 는 window 의 ``from_dt`` / ``to_dt`` 만 SELECT 경계
+    로 사용하므로 나머지 필드는 임의값으로도 무방하다.
+    """
+    return AggregationWindow(
+        from_dt=from_dt,
+        to_dt=to_dt,
+        snapshot_count=snapshot_count,
+        is_first_send=False,
+        fallback_days=None,
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# A. 단일 snapshot payload → 5종 카테고리 직접 추출
+# ──────────────────────────────────────────────────────────────
+
+
+def test_aggregate_single_snapshot_extracts_all_five_categories(
+    db_session: Session,
+) -> None:
+    """단일 snapshot 의 5종 카테고리가 모두 ``AggregatedSnapshotPayload`` 에 1:1.
+
+    검증:
+        - 5종 카테고리 모두 채워진 payload 1건 → 각 dataclass 필드의 length 1.
+        - ``AnnouncementSummary`` 의 모든 필드가 ORM row 에서 정확히 채워진다.
+        - ``detail_url`` 은 ``SETTING_KEY_APP_PUBLIC_BASE_URL`` 또는 default 상수
+          기반으로 조립된다.
+        - ``total_count`` 는 5종 list 길이의 단순 합.
+    """
+    # 공고 5건 — 5종 카테고리에 1건씩 배치.
+    ann_new = _insert_announcement(db_session, source_announcement_id="N-1",
+                                   title="신규 공고",
+                                   status=AnnouncementStatus.SCHEDULED,
+                                   agency="기관-신규",
+                                   deadline_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
+                                   canonical_group_id=None)
+    ann_changed = _insert_announcement(db_session, source_announcement_id="C-1",
+                                       title="내용 변경 공고",
+                                       status=AnnouncementStatus.RECEIVING)
+    ann_to_scheduled = _insert_announcement(db_session, source_announcement_id="T-S",
+                                            status=AnnouncementStatus.SCHEDULED)
+    ann_to_receiving = _insert_announcement(db_session, source_announcement_id="T-R",
+                                            status=AnnouncementStatus.RECEIVING)
+    ann_to_closed = _insert_announcement(db_session, source_announcement_id="T-C",
+                                         status=AnnouncementStatus.CLOSED)
+
+    # public_base_url SystemSetting 명시 (default 가 아니라 시그널값으로 확인).
+    set_setting(
+        db_session,
+        SETTING_KEY_APP_PUBLIC_BASE_URL,
+        "https://internal.example.com",
+    )
+
+    # snapshot 1건 — 5종 카테고리 모두 채움.
+    payload = normalize_payload({
+        "new": [ann_new.id],
+        "content_changed": [ann_changed.id],
+        "transitioned_to_접수예정": [{"id": ann_to_scheduled.id, "from": "접수중"}],
+        "transitioned_to_접수중": [{"id": ann_to_receiving.id, "from": "접수예정"}],
+        "transitioned_to_마감": [{"id": ann_to_closed.id, "from": "접수중"}],
+    })
+    snapshot_at = datetime(2026, 5, 18, 12, 0, 0, tzinfo=UTC)
+    _insert_snapshot_with_created_at(
+        db_session,
+        created_at=snapshot_at,
+        snapshot_date_iso="2026-05-18",
+        payload=payload,
+    )
+    db_session.commit()
+
+    window = _aggregation_window(
+        from_dt=datetime(2026, 5, 18, 0, 0, 0, tzinfo=UTC),
+        to_dt=datetime(2026, 5, 19, 0, 0, 0, tzinfo=UTC),
+    )
+    result = aggregate_snapshots(db_session, window)
+
+    assert isinstance(result, AggregatedSnapshotPayload)
+    assert len(result.new) == 1
+    assert len(result.content_changed) == 1
+    assert len(result.transitioned_to_received_scheduled) == 1
+    assert len(result.transitioned_to_receiving) == 1
+    assert len(result.transitioned_to_closed) == 1
+    assert result.total_count == 5
+
+    # 신규 공고 summary 의 필드 매핑 정확성.
+    new_summary = result.new[0]
+    assert isinstance(new_summary, AnnouncementSummary)
+    assert new_summary.announcement_id == ann_new.id
+    assert new_summary.title == "신규 공고"
+    assert new_summary.source_type == "IRIS"
+    assert new_summary.agency == "기관-신규"
+    assert new_summary.deadline_at == datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    assert new_summary.canonical_project_id is None
+    # detail_url 은 SystemSetting public_base_url + 본 row 의 PK.
+    assert new_summary.detail_url == (
+        f"https://internal.example.com/announcements/{ann_new.id}"
+    )
+
+    # 카테고리별 announcement_id 가 의도대로 들어갔는지 확인.
+    assert result.content_changed[0].announcement_id == ann_changed.id
+    assert result.transitioned_to_received_scheduled[0].announcement_id == ann_to_scheduled.id
+    assert result.transitioned_to_receiving[0].announcement_id == ann_to_receiving.id
+    assert result.transitioned_to_closed[0].announcement_id == ann_to_closed.id
+
+
+# ──────────────────────────────────────────────────────────────
+# B. 2개 snapshot 머지 → new ID set union
+# ──────────────────────────────────────────────────────────────
+
+
+def test_aggregate_two_snapshots_unions_new_ids(db_session: Session) -> None:
+    """두 snapshot 의 ``new`` ID 가 set union 으로 머지된다 (중복 제거 + asc).
+
+    검증 6 형식의 회귀 가드 — \"신규 + 신규\" 가 누락 없이 합쳐지는지.
+    """
+    ann_a = _insert_announcement(db_session, source_announcement_id="A")
+    ann_b = _insert_announcement(db_session, source_announcement_id="B")
+    ann_c = _insert_announcement(db_session, source_announcement_id="C")
+
+    # snapshot 1 (이른 시각): new = [A, B]
+    _insert_snapshot_with_created_at(
+        db_session,
+        created_at=datetime(2026, 5, 18, 9, 0, 0, tzinfo=UTC),
+        snapshot_date_iso="2026-05-18",
+        payload={"new": [ann_a.id, ann_b.id]},
+    )
+    # snapshot 2 (늦은 시각): new = [B, C] — B 는 set union 으로 중복 제거.
+    _insert_snapshot_with_created_at(
+        db_session,
+        created_at=datetime(2026, 5, 18, 15, 0, 0, tzinfo=UTC),
+        snapshot_date_iso="2026-05-19",
+        payload={"new": [ann_b.id, ann_c.id]},
+    )
+    db_session.commit()
+
+    window = _aggregation_window(
+        from_dt=datetime(2026, 5, 18, 0, 0, 0, tzinfo=UTC),
+        to_dt=datetime(2026, 5, 19, 0, 0, 0, tzinfo=UTC),
+    )
+    result = aggregate_snapshots(db_session, window)
+
+    # 3건 (A/B/C) 정확히 — B 가 양쪽 snapshot 에 있어도 1번만.
+    assert [summary.announcement_id for summary in result.new] == sorted(
+        [ann_a.id, ann_b.id, ann_c.id]
+    )
+    assert result.total_count == 3
+
+
+# ──────────────────────────────────────────────────────────────
+# C. 2개 snapshot 머지 → transition first from 유지 + last to 갱신
+# ──────────────────────────────────────────────────────────────
+
+
+def test_aggregate_two_snapshots_transition_first_from_last_to(
+    db_session: Session,
+) -> None:
+    """접수예정→접수중→마감 머지 시 first from 유지 + last to 갱신.
+
+    prompt §3 검증 4 의 머지 규칙 — 본 함수가 ``merge_snapshot_payload`` 를
+    그대로 reduce 로 재사용함을 보장하는 회귀 가드.
+    """
+    ann = _insert_announcement(
+        db_session,
+        source_announcement_id="T",
+        status=AnnouncementStatus.CLOSED,
+    )
+
+    # snapshot 1: 접수예정 → 접수중 으로 전이.
+    _insert_snapshot_with_created_at(
+        db_session,
+        created_at=datetime(2026, 5, 18, 9, 0, 0, tzinfo=UTC),
+        snapshot_date_iso="2026-05-18",
+        payload={
+            "transitioned_to_접수중": [{"id": ann.id, "from": "접수예정"}],
+        },
+    )
+    # snapshot 2: 접수중 → 마감 으로 전이.
+    _insert_snapshot_with_created_at(
+        db_session,
+        created_at=datetime(2026, 5, 18, 18, 0, 0, tzinfo=UTC),
+        snapshot_date_iso="2026-05-19",
+        payload={
+            "transitioned_to_마감": [{"id": ann.id, "from": "접수중"}],
+        },
+    )
+    db_session.commit()
+
+    window = _aggregation_window(
+        from_dt=datetime(2026, 5, 18, 0, 0, 0, tzinfo=UTC),
+        to_dt=datetime(2026, 5, 19, 0, 0, 0, tzinfo=UTC),
+    )
+    result = aggregate_snapshots(db_session, window)
+
+    # 마감 카테고리에 1건만 — 접수중 카테고리는 비어야 함.
+    assert len(result.transitioned_to_closed) == 1
+    assert result.transitioned_to_closed[0].announcement_id == ann.id
+    assert result.transitioned_to_receiving == []
+    assert result.transitioned_to_received_scheduled == []
+    assert result.new == []
+    assert result.content_changed == []
+    assert result.total_count == 1
+
+
+# ──────────────────────────────────────────────────────────────
+# D. from == to 정정 케이스 → 어떤 카테고리에도 안 들어감
+# ──────────────────────────────────────────────────────────────
+
+
+def test_aggregate_two_snapshots_from_equals_to_removed(db_session: Session) -> None:
+    """접수중→마감→접수중 정정 시나리오 — from == to 라 모두 제거.
+
+    prompt §3 검증 5 의 머지 규칙. ``_merge_transitions`` 가 final to 가 first
+    from 과 동일하면 entry 자체를 drop 함을 회귀 보호.
+    """
+    ann = _insert_announcement(
+        db_session,
+        source_announcement_id="REVERT",
+        status=AnnouncementStatus.RECEIVING,
+    )
+
+    # snapshot 1: 접수중 → 마감 (전이 발생).
+    _insert_snapshot_with_created_at(
+        db_session,
+        created_at=datetime(2026, 5, 18, 9, 0, 0, tzinfo=UTC),
+        snapshot_date_iso="2026-05-18",
+        payload={
+            "transitioned_to_마감": [{"id": ann.id, "from": "접수중"}],
+        },
+    )
+    # snapshot 2: 마감 → 접수중 (정정).
+    _insert_snapshot_with_created_at(
+        db_session,
+        created_at=datetime(2026, 5, 18, 18, 0, 0, tzinfo=UTC),
+        snapshot_date_iso="2026-05-19",
+        payload={
+            "transitioned_to_접수중": [{"id": ann.id, "from": "마감"}],
+        },
+    )
+    db_session.commit()
+
+    window = _aggregation_window(
+        from_dt=datetime(2026, 5, 18, 0, 0, 0, tzinfo=UTC),
+        to_dt=datetime(2026, 5, 19, 0, 0, 0, tzinfo=UTC),
+    )
+    result = aggregate_snapshots(db_session, window)
+
+    # 어떤 카테고리에도 ann.id 가 들어가지 않아야 한다.
+    assert result.transitioned_to_received_scheduled == []
+    assert result.transitioned_to_receiving == []
+    assert result.transitioned_to_closed == []
+    assert result.new == []
+    assert result.content_changed == []
+    assert result.total_count == 0
+
+
+# ──────────────────────────────────────────────────────────────
+# E. 메타 누락 announcement_id → silent skip
+# ──────────────────────────────────────────────────────────────
+
+
+def test_aggregate_skips_summaries_for_missing_announcement_meta(
+    db_session: Session,
+) -> None:
+    """payload 에 있지만 DB 에 없는 announcement_id 는 결과에서 빠진다.
+
+    DB 정리 / 외부 ID 오염 등으로 일부 메타가 없는 케이스를 방어한다. 메타가
+    있는 row 만 본문에 들어가야 의미가 있어 silent skip — dashboard
+    ``_build_expand_items_for_category`` 와 동일 정책.
+    """
+    ann_present = _insert_announcement(db_session, source_announcement_id="P")
+    missing_announcement_id = 99_999  # DB 에 없는 PK.
+
+    _insert_snapshot_with_created_at(
+        db_session,
+        created_at=datetime(2026, 5, 18, 12, 0, 0, tzinfo=UTC),
+        snapshot_date_iso="2026-05-18",
+        payload={"new": [ann_present.id, missing_announcement_id]},
+    )
+    db_session.commit()
+
+    window = _aggregation_window(
+        from_dt=datetime(2026, 5, 18, 0, 0, 0, tzinfo=UTC),
+        to_dt=datetime(2026, 5, 19, 0, 0, 0, tzinfo=UTC),
+    )
+    result = aggregate_snapshots(db_session, window)
+
+    # 메타 있는 row 1건만 — 누락 id 는 결과에서 사라진다.
+    assert [summary.announcement_id for summary in result.new] == [ann_present.id]
+    assert result.total_count == 1
+
+
+# ──────────────────────────────────────────────────────────────
+# F. is_current=False history row 도 포함
+# ──────────────────────────────────────────────────────────────
+
+
+def test_aggregate_includes_history_rows_with_is_current_false(
+    db_session: Session,
+) -> None:
+    """``is_current=False`` history row 도 결과에 들어간다.
+
+    prompt §3 주의사항: \"is_current 필터하지 말고 id 로 직접 SELECT (이력 row
+    포함)\". new_version 분기로 만들어진 history row 가 daily report 본문에서
+    배제되면 \"내용 변경 전 버전\" 정보가 사라져 누락이 된다.
+    """
+    history_row = _insert_announcement(
+        db_session,
+        source_announcement_id="H",
+        title="이력 row 제목",
+        is_current=False,
+    )
+
+    _insert_snapshot_with_created_at(
+        db_session,
+        created_at=datetime(2026, 5, 18, 12, 0, 0, tzinfo=UTC),
+        snapshot_date_iso="2026-05-18",
+        payload={"content_changed": [history_row.id]},
+    )
+    db_session.commit()
+
+    window = _aggregation_window(
+        from_dt=datetime(2026, 5, 18, 0, 0, 0, tzinfo=UTC),
+        to_dt=datetime(2026, 5, 19, 0, 0, 0, tzinfo=UTC),
+    )
+    result = aggregate_snapshots(db_session, window)
+
+    assert [summary.announcement_id for summary in result.content_changed] == [
+        history_row.id
+    ]
+    assert result.content_changed[0].title == "이력 row 제목"
+
+
+# ──────────────────────────────────────────────────────────────
+# G. detail_url — public_base_url SystemSetting 없을 때 default 사용
+# ──────────────────────────────────────────────────────────────
+
+
+def test_aggregate_detail_url_falls_back_to_default_public_base_url(
+    db_session: Session,
+) -> None:
+    """``SETTING_KEY_APP_PUBLIC_BASE_URL`` row 없음 → ``DEFAULT_APP_PUBLIC_BASE_URL``
+    로 detail_url 조립.
+
+    forwarding 의 fallback 패턴과 동일 — row 가 없어도 발송이 막히지 않게.
+    """
+    ann = _insert_announcement(db_session, source_announcement_id="D")
+
+    _insert_snapshot_with_created_at(
+        db_session,
+        created_at=datetime(2026, 5, 18, 12, 0, 0, tzinfo=UTC),
+        snapshot_date_iso="2026-05-18",
+        payload={"new": [ann.id]},
+    )
+    # SETTING_KEY_APP_PUBLIC_BASE_URL 의 row 는 생성하지 않는다.
+    db_session.commit()
+
+    window = _aggregation_window(
+        from_dt=datetime(2026, 5, 18, 0, 0, 0, tzinfo=UTC),
+        to_dt=datetime(2026, 5, 19, 0, 0, 0, tzinfo=UTC),
+    )
+    result = aggregate_snapshots(db_session, window)
+
+    expected_url = f"{DEFAULT_APP_PUBLIC_BASE_URL}/announcements/{ann.id}"
+    assert result.new[0].detail_url == expected_url
+
+
+# ──────────────────────────────────────────────────────────────
+# H. 빈 구간 — defensive 가드
+# ──────────────────────────────────────────────────────────────
+
+
+def test_aggregate_returns_empty_payload_when_window_has_no_snapshots(
+    db_session: Session,
+) -> None:
+    """구간 안에 snapshot 이 0건이어도 빈 ``AggregatedSnapshotPayload`` 반환.
+
+    정상 흐름에서는 ``compute_aggregation_window`` 가 None 을 반환해 본 함수가
+    호출되지 않지만, 호출자가 잘못된 window 를 만들어 직접 호출해도 예외 없이
+    빈 payload 를 반환해야 한다.
+    """
+    window = _aggregation_window(
+        from_dt=datetime(2026, 5, 18, 0, 0, 0, tzinfo=UTC),
+        to_dt=datetime(2026, 5, 19, 0, 0, 0, tzinfo=UTC),
+    )
+    result = aggregate_snapshots(db_session, window)
+
+    assert result.new == []
+    assert result.content_changed == []
+    assert result.transitioned_to_received_scheduled == []
+    assert result.transitioned_to_receiving == []
+    assert result.transitioned_to_closed == []
+    assert result.total_count == 0
+
+
+# ──────────────────────────────────────────────────────────────
+# I. total_count — 5종 list 길이의 합 (중복 제거 없음)
+# ──────────────────────────────────────────────────────────────
+
+
+def test_aggregate_total_count_includes_duplicates_across_categories(
+    db_session: Session,
+) -> None:
+    """같은 announcement 가 \"내용 변경\" + \"전이\" 양쪽에 있으면 ``total_count``
+    는 2 로 합산된다 (중복 제거 없음 — design note §3).
+    """
+    ann = _insert_announcement(
+        db_session,
+        source_announcement_id="DUP",
+        status=AnnouncementStatus.CLOSED,
+    )
+
+    # 단일 snapshot 에서 같은 id 가 content_changed + 전이 양쪽에 등장.
+    _insert_snapshot_with_created_at(
+        db_session,
+        created_at=datetime(2026, 5, 18, 12, 0, 0, tzinfo=UTC),
+        snapshot_date_iso="2026-05-18",
+        payload={
+            "content_changed": [ann.id],
+            "transitioned_to_마감": [{"id": ann.id, "from": "접수중"}],
+        },
+    )
+    db_session.commit()
+
+    window = _aggregation_window(
+        from_dt=datetime(2026, 5, 18, 0, 0, 0, tzinfo=UTC),
+        to_dt=datetime(2026, 5, 19, 0, 0, 0, tzinfo=UTC),
+    )
+    result = aggregate_snapshots(db_session, window)
+
+    assert [s.announcement_id for s in result.content_changed] == [ann.id]
+    assert [s.announcement_id for s in result.transitioned_to_closed] == [ann.id]
+    # 같은 공고가 양쪽 카테고리에 있어도 total_count 는 2.
+    assert result.total_count == 2
+
+
+# ──────────────────────────────────────────────────────────────
+# J. N+1 회귀 가드 — announcement 일괄 조회는 단일 SELECT
+# ──────────────────────────────────────────────────────────────
+
+
+def test_aggregate_does_not_issue_n_plus_one_announcement_selects(
+    db_session: Session,
+) -> None:
+    """announcement 수가 늘어도 ``announcements`` 테이블 SELECT 는 1회뿐.
+
+    guidance \"announcement 일괄 조회는 단일 SELECT 로 N+1 회피\" 의 회귀 가드.
+    공고 row 가 1건이든 10건이든 같은 단일 IN 쿼리가 발생해야 한다.
+    """
+    announcement_ids: list[int] = []
+    for index in range(10):
+        announcement = _insert_announcement(
+            db_session,
+            source_announcement_id=f"N-{index}",
+        )
+        announcement_ids.append(announcement.id)
+
+    _insert_snapshot_with_created_at(
+        db_session,
+        created_at=datetime(2026, 5, 18, 12, 0, 0, tzinfo=UTC),
+        snapshot_date_iso="2026-05-18",
+        payload={"new": announcement_ids},
+    )
+    db_session.commit()
+
+    announcement_select_count = [0]
+
+    def _count_announcement_selects(
+        conn, cursor, statement, parameters, context, executemany
+    ):
+        """``announcements`` 테이블을 FROM 하는 SELECT 만 카운트한다."""
+        if statement and "FROM announcements" in statement:
+            announcement_select_count[0] += 1
+
+    engine = db_session.get_bind()
+    event.listen(engine, "before_cursor_execute", _count_announcement_selects)
+    try:
+        window = _aggregation_window(
+            from_dt=datetime(2026, 5, 18, 0, 0, 0, tzinfo=UTC),
+            to_dt=datetime(2026, 5, 19, 0, 0, 0, tzinfo=UTC),
+        )
+        result = aggregate_snapshots(db_session, window)
+    finally:
+        event.remove(engine, "before_cursor_execute", _count_announcement_selects)
+
+    assert len(result.new) == 10
+    # 일괄 IN 쿼리 1회만 — N+1 이면 announcement_select_count == 10 이 된다.
+    assert announcement_select_count[0] == 1, (
+        f"announcements SELECT 가 {announcement_select_count[0]} 회 발생했다 — "
+        "단일 IN 쿼리(1회) 기대. N+1 회귀 가능성."
+    )
 
 
 # pytest 가 모듈 단독 실행 가능하도록.

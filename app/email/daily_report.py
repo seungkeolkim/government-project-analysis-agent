@@ -2,21 +2,24 @@
 
 본 모듈은 운영자가 cron 으로 예약한 시점에 \"마지막 발송 이후 누적된 공고 변화
 (snapshot diff)\" 를 정리해 admin 명단에게 메일로 발송하는 흐름의 핵심 로직을
-담는다. 모듈은 후속 subtask 가 부분씩 채워 가며, 본 subtask(00125-3) 는 다음만
-담당한다:
+담는다. 모듈은 후속 subtask 가 부분씩 채워 가며, 현재 채워진 함수 / 책임은
+다음과 같다:
 
-    - 후속 단계가 공용으로 쓸 dataclass 3종 정의.
-    - 누적 구간 계산 함수 ``compute_aggregation_window``.
+    - 후속 단계가 공용으로 쓸 dataclass 3종 정의 (subtask 00125-3).
+    - 누적 구간 계산 함수 ``compute_aggregation_window`` (subtask 00125-3).
+    - ``AggregationWindow`` 구간 내 snapshot 들을 시간순 reduce 머지해 5종
+      카테고리별 공고 메타를 만드는 ``aggregate_snapshots`` (subtask 00125-4).
 
-``aggregate_snapshots`` / ``build_daily_report_*`` / ``prepare_and_send_daily_report``
-/ ``collect_admin_recipient_emails`` 는 본 subtask 의 범위가 아니라 후속 subtask
-(00125-4 / 5 / 6) 가 같은 모듈에 추가한다. \"스텁만 두지 말고 함수 자체를 다음
-subtask 로 이월\" — subtask guidance 그대로.
+``build_daily_report_*`` / ``prepare_and_send_daily_report`` /
+``collect_admin_recipient_emails`` 는 후속 subtask(00125-5 / 6) 가 같은 모듈에
+추가한다. \"스텁만 두지 말고 함수 자체를 다음 subtask 로 이월\" — subtask
+guidance 그대로.
 
 설계 노트 참조:
     - ``docs/phase_a3_design_note.md`` §1 (시간 컬럼 = ``created_at``),
-      §3 (5종 카테고리 키 표기), §4 (fallback_days=7 default), §14
-      (SystemSetting 키 + 저장 포맷 = ISO-8601 UTC).
+      §2 (``merge_snapshot_payload`` reduce 재사용), §3 (5종 카테고리 키 표기),
+      §4 (fallback_days=7 default), §14 (SystemSetting 키 + 저장 포맷 = ISO-8601
+      UTC).
     - ``phase_a3_prompt.md`` §3 \"Aggregation 로직 — app/email/daily_report.py 신규\".
 
 시간 처리 컨벤션 (subtask guidance 명시):
@@ -32,14 +35,30 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from functools import reduce
+from typing import Any
 
 from loguru import logger
 from sqlalchemy.orm import Session
 
 from app.backup.service import get_setting
-from app.db.models import as_utc
-from app.db.repository import list_snapshots_created_in_range
-from app.email.constants import SETTING_KEY_DAILY_REPORT_LAST_SENT_AT
+from app.db.models import Announcement, AnnouncementStatus, as_utc
+from app.db.repository import (
+    list_announcements_by_ids,
+    list_snapshots_created_in_range,
+)
+from app.db.snapshot import (
+    CATEGORY_CONTENT_CHANGED,
+    CATEGORY_NEW,
+    merge_snapshot_payload,
+    normalize_payload,
+)
+from app.email.constants import (
+    DEFAULT_APP_PUBLIC_BASE_URL,
+    SETTING_KEY_APP_PUBLIC_BASE_URL,
+    SETTING_KEY_DAILY_REPORT_LAST_SENT_AT,
+)
+from app.email.message_builder import build_announcement_detail_url
 
 
 # ──────────────────────────────────────────────────────────────
@@ -287,9 +306,234 @@ def compute_aggregation_window(
     )
 
 
+# ──────────────────────────────────────────────────────────────
+# 누적 머지 — 5종 카테고리별 AggregatedSnapshotPayload 빌드
+# ──────────────────────────────────────────────────────────────
+
+
+# payload 의 transition 카테고리 키(한글) → AggregatedSnapshotPayload 의 필드명
+# (영문) 매핑. design note §3 의 매핑 표를 1:1 로 옮긴 single source of truth.
+# 키 표기는 ``app.db.snapshot.TRANSITION_TO_LABELS`` 의 한글 라벨에 맞추고,
+# 필드명은 ``AnnouncementStatus`` enum 의 영문 ``name.lower()`` 컨벤션을 따라
+# 한 자리에 모아 둔다 — 새 status 가 도입되면 본 dict 만 갱신한다.
+_TRANSITION_PAYLOAD_KEY_TO_FIELD: dict[str, str] = {
+    f"transitioned_to_{AnnouncementStatus.SCHEDULED.value}": (
+        "transitioned_to_received_scheduled"
+    ),
+    f"transitioned_to_{AnnouncementStatus.RECEIVING.value}": (
+        "transitioned_to_receiving"
+    ),
+    f"transitioned_to_{AnnouncementStatus.CLOSED.value}": (
+        "transitioned_to_closed"
+    ),
+}
+
+
+def aggregate_snapshots(
+    session: Session,
+    window: AggregationWindow,
+) -> AggregatedSnapshotPayload:
+    """``window`` 구간의 ScrapeSnapshot 들을 시간순 reduce 머지해 5종 카테고리별
+    공고 메타를 만든다.
+
+    동작 순서 (prompt §3 의사 코드 + design note §2 reduce 패턴):
+        1. ``list_snapshots_created_in_range(window.from_dt, window.to_dt)`` 로
+           구간 내 snapshot list 를 ``created_at ASC`` 로 fetch.
+        2. ``reduce(merge_snapshot_payload, payloads, normalize_payload(None))``
+           — dashboard ``build_section_a`` 와 동일 패턴. 초깃값을 정규형 빈
+           dict 으로 두면 첫 step 이 ``merge(empty, first) == normalize(first)``
+           로 idempotent 하다.
+        3. 머지 결과의 5종 카테고리에서 announcement_id union 을 만든다.
+        4. ``list_announcements_by_ids`` 로 한 번의 IN 쿼리만 발생시킨다 (N+1
+           회피). ``is_current`` 필터를 적용하지 않아 변경 전 (history) row 도
+           그대로 포함된다 (prompt §3 주의사항).
+        5. 카테고리별로 ``AnnouncementSummary`` list 를 만들어
+           ``AggregatedSnapshotPayload`` 를 반환. ``total_count`` 는 5 리스트
+           길이의 합 (중복 제거 없음 — 같은 공고가 \"내용 변경\" 과 \"접수중
+           전이\" 양쪽에 있을 수 있다).
+
+    카테고리 cap (50건 등) 은 본 함수가 적용하지 않는다 — 본문 빌더(00125-5)가
+    UI 표시 단계에서 cap 을 적용한다. 본 함수는 cap 없이 full 리스트를 반환해
+    빌더가 \"외 N건\" 안내문을 계산할 수 있게 한다 (subtask guidance 명시).
+
+    Args:
+        session: ORM 세션. 본 함수는 read-only — commit / flush 하지 않는다.
+        window: ``compute_aggregation_window`` 의 반환값. 빈 구간(``snapshot_count
+            ==0``)으로 본 함수가 직접 호출되는 일은 정상 흐름에서 없지만, 호출자가
+            잘못 만든 window 가 들어와도 빈 ``AggregatedSnapshotPayload`` 를
+            반환하도록 defensive 하게 동작한다.
+
+    Returns:
+        ``AggregatedSnapshotPayload`` — 5종 카테고리별 ``AnnouncementSummary``
+        list + ``total_count``. 카테고리 안에서는 announcement_id 오름차순으로
+        정렬된다 (``normalize_payload`` 의 asc 정렬 + ``list_announcements_by_ids``
+        의 id ASC 가 그대로 전달됨).
+    """
+    # 1. 구간 내 snapshot rows — created_at ASC.
+    snapshots_in_window = list_snapshots_created_in_range(
+        session,
+        from_exclusive=window.from_dt,
+        to_inclusive=window.to_dt,
+    )
+
+    # 2. reduce 누적 머지. normalize_payload(None) 은 정규형 빈 dict — 첫 step
+    #    이 merge(empty, first) == normalize(first) 로 자연스럽게 시작된다.
+    merged_payload: dict[str, Any] = reduce(
+        merge_snapshot_payload,
+        (snapshot.payload for snapshot in snapshots_in_window),
+        normalize_payload(None),
+    )
+
+    # 3. 5종 카테고리에서 announcement_id union — 단일 IN SELECT 의 입력.
+    announcement_id_union = _collect_announcement_id_union(merged_payload)
+
+    # 4. 일괄 SELECT — is_current 필터 없이 PK 로 직접 (이력 row 포함).
+    announcement_meta_list = list_announcements_by_ids(
+        session, announcement_ids=announcement_id_union
+    )
+    announcement_meta_map: dict[int, Announcement] = {
+        ann.id: ann for ann in announcement_meta_list
+    }
+
+    # 5. detail_url 조립용 public_base_url 로드 — forwarding 패턴과 동일.
+    #    row 가 없으면 코드 fallback 상수 사용.
+    public_base_url = (
+        get_setting(session, SETTING_KEY_APP_PUBLIC_BASE_URL)
+        or DEFAULT_APP_PUBLIC_BASE_URL
+    )
+
+    # 6. plain 카테고리 (new / content_changed) — payload 의 int list 그대로 사용.
+    new_items = _build_summaries(
+        announcement_ids=(int(aid) for aid in merged_payload.get(CATEGORY_NEW, [])),
+        announcement_meta_map=announcement_meta_map,
+        public_base_url=public_base_url,
+    )
+    content_changed_items = _build_summaries(
+        announcement_ids=(
+            int(aid) for aid in merged_payload.get(CATEGORY_CONTENT_CHANGED, [])
+        ),
+        announcement_meta_map=announcement_meta_map,
+        public_base_url=public_base_url,
+    )
+
+    # 7. transition 3종 — payload 의 [{id, from}, ...] 에서 id 만 추출.
+    #    field_name 별로 결과 list 를 채운 뒤 이름으로 dispatch.
+    transition_field_to_items: dict[str, list[AnnouncementSummary]] = {
+        field_name: [] for field_name in _TRANSITION_PAYLOAD_KEY_TO_FIELD.values()
+    }
+    for payload_key, field_name in _TRANSITION_PAYLOAD_KEY_TO_FIELD.items():
+        entries = merged_payload.get(payload_key, [])
+        transition_field_to_items[field_name] = _build_summaries(
+            announcement_ids=(int(entry["id"]) for entry in entries),
+            announcement_meta_map=announcement_meta_map,
+            public_base_url=public_base_url,
+        )
+
+    received_scheduled_items = transition_field_to_items[
+        "transitioned_to_received_scheduled"
+    ]
+    receiving_items = transition_field_to_items["transitioned_to_receiving"]
+    closed_items = transition_field_to_items["transitioned_to_closed"]
+
+    # 8. total_count — 5 list 길이의 단순 합. 중복 제거 없음 (한 공고가 \"내용
+    #    변경\" + \"접수중 전이\" 양쪽에 있을 수 있다 — design note §3).
+    total_count = (
+        len(new_items)
+        + len(content_changed_items)
+        + len(received_scheduled_items)
+        + len(receiving_items)
+        + len(closed_items)
+    )
+
+    return AggregatedSnapshotPayload(
+        new=new_items,
+        content_changed=content_changed_items,
+        transitioned_to_received_scheduled=received_scheduled_items,
+        transitioned_to_receiving=receiving_items,
+        transitioned_to_closed=closed_items,
+        total_count=total_count,
+    )
+
+
+def _collect_announcement_id_union(merged_payload: dict[str, Any]) -> set[int]:
+    """머지된 payload 의 5종 카테고리에 등장하는 announcement_id 들의 union.
+
+    ``new`` / ``content_changed`` 는 int list, transition 3종은 ``[{id, from},
+    ...]`` 형식이라 두 가지 모두 다룬다. ``list_announcements_by_ids`` 의 단일
+    IN 쿼리 입력으로 쓰여 N+1 을 회피하는 게 본 헬퍼의 존재 이유다.
+
+    Args:
+        merged_payload: ``merge_snapshot_payload`` reduce 결과 (정규형).
+
+    Returns:
+        announcement_id 의 set. 빈 카테고리 / 빈 payload 도 빈 set 으로 안전.
+    """
+    union: set[int] = set()
+    union.update(
+        int(announcement_id) for announcement_id in merged_payload.get(CATEGORY_NEW, [])
+    )
+    union.update(
+        int(announcement_id)
+        for announcement_id in merged_payload.get(CATEGORY_CONTENT_CHANGED, [])
+    )
+    for payload_key in _TRANSITION_PAYLOAD_KEY_TO_FIELD:
+        for entry in merged_payload.get(payload_key, []):
+            union.add(int(entry["id"]))
+    return union
+
+
+def _build_summaries(
+    *,
+    announcement_ids,
+    announcement_meta_map: dict[int, Announcement],
+    public_base_url: str,
+) -> list[AnnouncementSummary]:
+    """announcement_id iterable → ``AnnouncementSummary`` list.
+
+    메타가 ``announcement_meta_map`` 에 없는 id 는 silent skip (DB 에서 삭제된
+    공고 등 — dashboard ``_build_expand_items_for_category`` 와 같은 정책). 표시할
+    수 있는 메타가 있는 row 만 본문에 들어가야 의미가 있어서, 누락분은 자연스럽게
+    빠진다.
+
+    ``announcement_id`` 의 입력 순서를 그대로 유지한다 — payload 가 이미 id ASC
+    로 정렬돼 있으므로 결과 list 도 id ASC 가 된다.
+
+    Args:
+        announcement_ids: 변환 대상 id iterable. 정렬 / 중복 제거는 호출자가
+            payload 의 정규형에 맡긴다.
+        announcement_meta_map: ``list_announcements_by_ids`` 결과 (id → ORM row).
+        public_base_url: ``build_announcement_detail_url`` 의 base.
+
+    Returns:
+        ``AnnouncementSummary`` list — 입력 순서 그대로. 메타 누락분은 제외.
+    """
+    summaries: list[AnnouncementSummary] = []
+    for announcement_id in announcement_ids:
+        announcement = announcement_meta_map.get(int(announcement_id))
+        if announcement is None:
+            # 메타 없는 row 는 본문에 표시할 수 없으므로 조용히 건너뛴다.
+            continue
+        summaries.append(
+            AnnouncementSummary(
+                announcement_id=announcement.id,
+                canonical_project_id=announcement.canonical_group_id,
+                title=announcement.title,
+                source_type=announcement.source_type,
+                agency=announcement.agency,
+                deadline_at=announcement.deadline_at,
+                # detail_url 은 본 row 의 PK 기준 (history row 라도 그 row 의
+                # 자체 URL 로 — prompt §3 주의사항 \"detail_url 은 그 row 가
+                # 가리키는 announcement 자체로\").
+                detail_url=build_announcement_detail_url(public_base_url, announcement.id),
+            )
+        )
+    return summaries
+
+
 __all__ = [
     "AggregatedSnapshotPayload",
     "AggregationWindow",
     "AnnouncementSummary",
+    "aggregate_snapshots",
     "compute_aggregation_window",
 ]
