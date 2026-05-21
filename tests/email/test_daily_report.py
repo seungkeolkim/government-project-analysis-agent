@@ -5,7 +5,8 @@
 
     1. ``last_sent_at`` SystemSetting row 없음 → ``is_first_send=True`` ,
        ``fallback_days=7`` 적용, ``from_dt = now - 7d``.
-    2. ``last_sent_at`` 있음 + 구간 내 snapshot 0 건 → None 반환.
+    2. ``last_sent_at`` 있음 + 구간 내 snapshot 0 건 → ``AggregationWindow(snapshot_count=0)``
+       반환 (0건이어도 SKIPPED 아님).
     3. ``last_sent_at`` 있음 + 구간 내 snapshot N 건 → ``AggregationWindow``
        (``snapshot_count=N`` , ``is_first_send=False`` , ``fallback_days=None``).
 
@@ -85,6 +86,7 @@ from app.email.daily_report import (
     AggregatedSnapshotPayload,
     AggregationWindow,
     AnnouncementSummary,
+    TEST_SEND_LOOKBACK_HOURS,
     aggregate_snapshots,
     compute_aggregation_window,
 )
@@ -197,19 +199,24 @@ def test_compute_window_first_send_custom_fallback_days(db_session: Session) -> 
 
 
 # ──────────────────────────────────────────────────────────────
-# 2. last_sent_at 있음 + 구간 내 snapshot 0 → None
+# 2. last_sent_at 있음 + 구간 내 snapshot 0 → AggregationWindow(snapshot_count=0)
 # ──────────────────────────────────────────────────────────────
 
 
-def test_compute_window_returns_none_when_no_snapshots_in_range(
+def test_compute_window_returns_window_with_zero_count_when_no_snapshots_in_range(
     db_session: Session,
 ) -> None:
-    """``last_sent_at`` 있음 + ``(last_sent_at, now]`` 안의 snapshot 0 건 → None.
+    """``last_sent_at`` 있음 + ``(last_sent_at, now]`` 안의 snapshot 0 건 → snapshot_count=0.
+
+    0건이어도 None 을 반환하지 않고 AggregationWindow 를 반환한다.
+    발송 여부 판단은 호출자(prepare_and_send_daily_report) 가 결정하지 않고,
+    항상 빈 본문으로 발송된다.
 
     검증:
         - ``(last_sent_at, now]`` 구간 밖 (직전) row 는 카운트에서 제외.
         - ``from_dt`` 는 배타이므로 \"정확히 last_sent_at 시각\" 의 row 도 제외.
-        - 결과적으로 0 건 → ``None`` 반환.
+        - 결과적으로 0 건 → ``AggregationWindow(snapshot_count=0)`` 반환.
+        - ``is_first_send=False``, ``from_dt`` 가 last_sent_at 과 일치.
     """
     last_sent = datetime(2026, 5, 18, 0, 0, 0, tzinfo=UTC)
     now = datetime(2026, 5, 19, 0, 0, 0, tzinfo=UTC)
@@ -238,9 +245,14 @@ def test_compute_window_returns_none_when_no_snapshots_in_range(
 
     window = compute_aggregation_window(db_session, now=now)
 
-    assert window is None, (
-        "from_dt 배타 / 구간 밖 row 만 존재 → None 이어야 함"
-    )
+    # 0건이어도 None 이 아닌 AggregationWindow 반환.
+    assert window is not None, "0건이어도 AggregationWindow 를 반환해야 함"
+    assert isinstance(window, AggregationWindow)
+    assert window.snapshot_count == 0
+    assert window.is_first_send is False
+    assert window.fallback_days is None
+    assert window.from_dt == last_sent
+    assert window.to_dt == now
 
 
 # ──────────────────────────────────────────────────────────────
@@ -386,8 +398,9 @@ def test_compute_window_does_not_expand_to_fallback_when_last_sent_present(
     """``last_sent_at`` 모드는 구간이 0건이어도 fallback 으로 확장하지 않는다.
 
     fallback_days 분기는 \"last_sent_at 부재\" 케이스 전용. 정상 운영 모드에서
-    구간 안 row 가 0건이면 그대로 SKIPPED 처리되어야 한다 — fallback 으로 늘리면
-    last_sent_at 갱신 정책이 어긋난다 (design note §7).
+    구간 안 row 가 0건이면 AggregationWindow(snapshot_count=0) 를 반환해 빈
+    본문으로 발송을 시도한다 — fallback 으로 늘리면 last_sent_at 갱신 정책이
+    어긋나고 과거 snapshot 이 중복 집계된다 (design note §7).
     """
     # last_sent_at 은 가까운 과거 1시간 전. 그 구간 안 row 없음.
     last_sent = datetime(2026, 5, 19, 11, 0, 0, tzinfo=UTC)
@@ -410,9 +423,14 @@ def test_compute_window_does_not_expand_to_fallback_when_last_sent_present(
 
     window = compute_aggregation_window(db_session, now=now)
 
-    assert window is None, (
-        "last_sent_at 있음 + 구간 안 0건 → None (fallback 으로 확장하지 않음)"
+    # 0건이어도 AggregationWindow 반환 — fallback 으로 확장하지 않음.
+    assert window is not None, (
+        "last_sent_at 있음 + 구간 안 0건 → AggregationWindow(snapshot_count=0) "
+        "반환해야 함 (None 이 아님)"
     )
+    assert window.snapshot_count == 0
+    assert window.is_first_send is False
+    assert window.from_dt == last_sent
 
 
 # ──────────────────────────────────────────────────────────────
@@ -1541,6 +1559,110 @@ def test_build_html_body_escapes_announcement_fields() -> None:
     assert "기관 &amp; 부서" in html_body
     # detail_url 의 & 도 href 에서 &amp; 로 escape (quote=True).
     assert 'href="https://example.com/x?a=1&amp;b=2"' in html_body
+
+
+# ──────────────────────────────────────────────────────────────
+# fixed_lookback_hours — 테스트 발송 전용 고정 구간
+# ──────────────────────────────────────────────────────────────
+
+
+def test_compute_window_fixed_lookback_hours_ignores_last_sent_at(
+    db_session: Session,
+) -> None:
+    """``fixed_lookback_hours`` 가 주어지면 ``last_sent_at`` 을 완전히 무시한다.
+
+    last_sent_at 이 1일 전으로 설정돼 있어도, fixed_lookback_hours=24 로 호출하면
+    ``from_dt = now - 24h`` 고정 구간이 반환된다.
+
+    검증:
+        - ``from_dt`` == ``now - timedelta(hours=24)``
+        - ``is_first_send`` is False (fixed 구간이므로 항상 False)
+        - ``fallback_days`` is None
+        - snapshot_count 는 fixed 구간 안의 row 수
+    """
+    last_sent = datetime(2026, 5, 18, 0, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 5, 19, 0, 0, 0, tzinfo=UTC)
+    expected_from_dt = now - timedelta(hours=24)
+
+    # last_sent_at 을 매우 오래 전 값으로 설정 — fixed 구간이면 이 값을 무시해야 함.
+    set_setting(db_session, SETTING_KEY_DAILY_REPORT_LAST_SENT_AT, last_sent.isoformat())
+
+    # 24h 구간 안에 snapshot 1건.
+    _insert_snapshot_with_created_at(
+        db_session,
+        created_at=now - timedelta(hours=12),
+        snapshot_date_iso="2026-05-18",
+        payload={"new": [9001]},
+    )
+    db_session.commit()
+
+    window = compute_aggregation_window(
+        db_session,
+        now=now,
+        fixed_lookback_hours=24,
+    )
+
+    assert window is not None
+    assert isinstance(window, AggregationWindow)
+    assert window.from_dt == expected_from_dt, (
+        "fixed_lookback_hours=24 이면 from_dt 는 now - 24h 여야 함"
+    )
+    assert window.to_dt == now
+    assert window.is_first_send is False
+    assert window.fallback_days is None
+    assert window.snapshot_count == 1
+
+
+def test_compute_window_fixed_lookback_hours_without_last_sent_at(
+    db_session: Session,
+) -> None:
+    """``last_sent_at`` 가 없어도 ``fixed_lookback_hours`` 가 있으면 고정 구간 사용.
+
+    last_sent_at 부재 시 기본 로직은 is_first_send=True + fallback_days 구간으로
+    빠지지만, fixed_lookback_hours 가 주어지면 SystemSetting 자체를 조회하지 않고
+    고정 구간을 쓴다.
+    """
+    now = datetime(2026, 5, 19, 6, 0, 0, tzinfo=UTC)
+    # last_sent_at SystemSetting row 없음 — 의도적으로 set 하지 않는다.
+
+    window = compute_aggregation_window(
+        db_session,
+        now=now,
+        fixed_lookback_hours=TEST_SEND_LOOKBACK_HOURS,
+    )
+
+    expected_from_dt = now - timedelta(hours=TEST_SEND_LOOKBACK_HOURS)
+    assert window is not None
+    assert window.from_dt == expected_from_dt
+    assert window.is_first_send is False
+    assert window.fallback_days is None
+
+
+def test_compute_window_fixed_lookback_hours_returns_zero_count_if_no_snapshots(
+    db_session: Session,
+) -> None:
+    """``fixed_lookback_hours`` 구간 안에 snapshot 이 0건이어도 AggregationWindow 반환.
+
+    고정 구간도 정규 구간과 마찬가지로 0건 snapshot → AggregationWindow(snapshot_count=0).
+    """
+    now = datetime(2026, 5, 19, 0, 0, 0, tzinfo=UTC)
+    # 구간(now-24h, now] 밖 snapshot 하나 — 제외돼야 함.
+    _insert_snapshot_with_created_at(
+        db_session,
+        created_at=now - timedelta(hours=48),
+        snapshot_date_iso="2026-05-17",
+        payload={"new": [9999]},
+    )
+    db_session.commit()
+
+    window = compute_aggregation_window(
+        db_session,
+        now=now,
+        fixed_lookback_hours=24,
+    )
+
+    assert window is not None
+    assert window.snapshot_count == 0
 
 
 # pytest 가 모듈 단독 실행 가능하도록.

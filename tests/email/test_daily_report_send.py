@@ -11,7 +11,8 @@
         B-1. 정상 시나리오: 2 수신자 모두 성공 → SUCCESS, last_sent_at 갱신.
         B-2. 부분 실패: 1 성공 / 1 실패 → PARTIAL, last_sent_at 갱신.
         B-3. 모두 실패 → FAILED, last_sent_at 유지.
-        B-4. 빈 구간 → SKIPPED, last_sent_at 유지, EmailSendRun 생성 0건.
+        B-4. 빈 구간(snapshot 0건) → SUCCESS(발송 성공 시), snapshot_count=0,
+             last_sent_at 갱신(scheduled + SUCCESS).
         B-5. ``email.send_enabled=false`` → 503 raise, EmailDailyReportRun row 는
              ``status=FAILED`` 로 commit.
         B-6. ``trigger='manual_test'`` 는 성공해도 last_sent_at 유지.
@@ -19,6 +20,8 @@
              snapshot_count 가 window 와 일치.
         B-8. EmailSendRun row 가 ``related_kind='daily_report'`` +
              ``related_id=run_id`` 로 정확히 N개 생성.
+        B-9. ``trigger='manual_test'`` 는 last_sent_at 이 없어도 24시간 고정
+             구간으로 발송되며 last_sent_at 이 변하지 않는다.
 
 DB:
     tests/conftest.py 의 ``test_engine`` + ``db_session`` fixture 사용.
@@ -478,26 +481,31 @@ def test_prepare_and_send_all_failure_keeps_last_sent_at(
 
 
 # ──────────────────────────────────────────────────────────────
-# B-4. 빈 구간 — SKIPPED, last_sent_at 유지, EmailSendRun 0건
+# B-4. 빈 구간(snapshot 0건) — SUCCESS, last_sent_at 갱신, EmailSendRun 생성
 # ──────────────────────────────────────────────────────────────
 
 
-def test_prepare_and_send_skipped_when_window_empty(db_session: Session) -> None:
-    """구간 안 snapshot 0건 → SKIPPED + 발송 자체 skip + last_sent_at 유지.
+def test_prepare_and_send_zero_snapshots_still_sends_and_updates_last_sent_at(
+    db_session: Session,
+) -> None:
+    """구간 안 snapshot 0건이어도 SKIPPED 없이 빈 본문으로 발송 + last_sent_at 갱신.
 
     검증:
-        - ``DailyReportResult.status == SKIPPED`` , 카운트 0.
-        - transport.send 호출 0회.
-        - EmailSendRun row 0개.
-        - EmailDailyReportRun row 가 SKIPPED 로 commit.
-        - last_sent_at 갱신되지 않음 (다음 잡이 같은 구간 처리).
+        - ``DailyReportResult.status == SUCCESS`` (발송 성공 시).
+        - ``snapshot_count == 0``.
+        - transport.send 가 1회 호출됨 (수신자 1명에게 발송).
+        - EmailSendRun row 가 1개 생성.
+        - EmailDailyReportRun row 가 SUCCESS 로 commit.
+        - ``aggregation_from`` / ``aggregation_to`` 가 window 값으로 채워짐.
+        - last_sent_at 이 now.isoformat() 로 갱신됨 (scheduled + SUCCESS → 갱신).
     """
     last_sent = datetime(2026, 5, 19, 11, 0, 0, tzinfo=UTC)
     now = datetime(2026, 5, 19, 12, 0, 0, tzinfo=UTC)
-    # 구간 (last_sent, now] 안에 snapshot 없음 — 직전에는 있어도 무관.
+    # 구간 (last_sent, now] 안에 snapshot 없음.
     _set_last_sent_at(db_session, last_sent.isoformat())
 
-    transport = _FakeTransport(results=[])
+    # 수신자 1명에게 발송 성공 결과 1개.
+    transport = _FakeTransport(results=[None])
     request = DailyReportRequest(
         trigger=TRIGGER_SCHEDULED,
         recipients=["admin@example.com"],
@@ -512,38 +520,42 @@ def test_prepare_and_send_skipped_when_window_empty(db_session: Session) -> None
         now=now,
     )
 
-    assert result.status == EmailDailyReportStatus.SKIPPED
+    # 0건이어도 SUCCESS — 발송 자체는 진행됨.
+    assert result.status == EmailDailyReportStatus.SUCCESS
     assert result.snapshot_count == 0
-    assert result.success_count == 0
+    assert result.success_count == 1
     assert result.failure_count == 0
-    assert transport.send_call_count == 0
+    assert result.recipient_count == 1
+    assert result.error_message is None
+    assert transport.send_call_count == 1
 
-    # EmailSendRun 미생성 — daily_report 키로 조회해 0건.
+    # EmailSendRun 생성 확인 — 발송이 실제로 일어났음.
     send_runs = (
         db_session.execute(
             select(EmailSendRun).where(
-                EmailSendRun.related_kind == RELATED_KIND_DAILY_REPORT
+                EmailSendRun.related_kind == RELATED_KIND_DAILY_REPORT,
+                EmailSendRun.related_id == result.run_id,
             )
         )
         .scalars()
         .all()
     )
-    assert send_runs == []
+    assert len(send_runs) == 1
 
-    # EmailDailyReportRun 은 SKIPPED 로 영속.
+    # EmailDailyReportRun 은 SUCCESS 로 영속 (SKIPPED 아님).
     run = db_session.get(EmailDailyReportRun, result.run_id)
     assert run is not None
-    assert run.status == EmailDailyReportStatus.SKIPPED
+    assert run.status == EmailDailyReportStatus.SUCCESS
     assert run.snapshot_count == 0
-    # aggregation_from / to 는 SKIPPED 케이스에서 NULL.
-    assert run.aggregation_from is None
-    assert run.aggregation_to is None
+    # aggregation_from / to 가 window 값으로 채워졌음.
+    assert run.aggregation_from is not None
+    assert run.aggregation_to is not None
     assert run.completed_at is not None
 
-    # last_sent_at — 변경되지 않음.
+    # scheduled + SUCCESS → last_sent_at 갱신됨.
     assert (
         get_setting(db_session, SETTING_KEY_DAILY_REPORT_LAST_SENT_AT)
-        == last_sent.isoformat()
+        == now.isoformat()
     )
 
 
@@ -713,3 +725,128 @@ def test_prepare_and_send_manual_admin_updates_last_sent_at_and_aggregation_colu
     assert run.snapshot_count == 1
     assert run.requested_by_user_id == requesting_admin.id
     assert run.trigger == TRIGGER_MANUAL_ADMIN
+
+
+# ──────────────────────────────────────────────────────────────
+# B-9. manual_test — 24시간 고정 구간 + last_sent_at 불변
+# ──────────────────────────────────────────────────────────────
+
+
+def test_prepare_and_send_manual_test_uses_24h_fixed_window_regardless_of_last_sent_at(
+    db_session: Session,
+) -> None:
+    """``trigger='manual_test'`` 는 last_sent_at 이 오래됐어도 24시간 고정 구간 사용.
+
+    last_sent_at 을 30일 전으로 설정해 두어도, manual_test 발송은 최근 24시간
+    구간만 사용한다. aggregation_from 이 now - 24h 임을 확인한다.
+
+    검증:
+        - run.aggregation_from == now - 24h (last_sent_at=30일 전 무시).
+        - run.aggregation_to == now.
+        - run.status == SUCCESS (수신자 발송 성공).
+        - last_sent_at 은 변경되지 않음.
+    """
+    from app.db.models import as_utc
+
+    now = datetime(2026, 5, 19, 12, 0, 0, tzinfo=UTC)
+    old_last_sent = now - timedelta(days=30)
+    expected_from_dt = now - timedelta(hours=24)
+
+    # 30일 전으로 last_sent_at 세팅.
+    _set_last_sent_at(db_session, old_last_sent.isoformat())
+
+    # 24h 구간 안에 snapshot 하나 삽입.
+    announcement = _insert_announcement(db_session, source_announcement_id="B9-ANN")
+    _insert_snapshot(
+        db_session,
+        created_at=now - timedelta(hours=12),
+        snapshot_date_iso="2026-05-19",
+        payload={"new": [announcement.id]},
+    )
+    db_session.commit()
+
+    transport = _FakeTransport(results=[None])
+    request = DailyReportRequest(
+        trigger=TRIGGER_MANUAL_TEST,
+        recipients=["tester@example.com"],
+        requested_by_user_id=None,
+    )
+
+    result = prepare_and_send_daily_report(
+        request,
+        session=db_session,
+        transport=transport,
+        max_retry_count=0,
+        now=now,
+    )
+
+    assert result.status == EmailDailyReportStatus.SUCCESS
+
+    run = db_session.get(EmailDailyReportRun, result.run_id)
+    assert run is not None
+    # aggregation_from 이 last_sent_at(30일 전) 이 아닌 now-24h 여야 함.
+    assert as_utc(run.aggregation_from) == expected_from_dt, (
+        "manual_test 는 last_sent_at 무시 — aggregation_from 이 now-24h 여야 함"
+    )
+    assert as_utc(run.aggregation_to) == now
+
+    # last_sent_at 는 여전히 30일 전 값 그대로.
+    assert (
+        get_setting(db_session, SETTING_KEY_DAILY_REPORT_LAST_SENT_AT)
+        == old_last_sent.isoformat()
+    )
+
+
+def test_prepare_and_send_manual_test_uses_24h_window_when_no_last_sent_at(
+    db_session: Session,
+) -> None:
+    """``trigger='manual_test'`` 는 last_sent_at 이 없어도 24시간 고정 구간 사용.
+
+    last_sent_at 이 설정되지 않은 초기 상태(첫 발송 전)에서도 manual_test 는
+    fallback_days 분기로 빠지지 않고 24시간 고정 구간을 쓴다.
+
+    검증:
+        - run.aggregation_from == now - 24h (last_sent_at 없음 → fallback 미적용).
+        - last_sent_at 이 발송 후에도 존재하지 않음 (또는 변경 없음).
+    """
+    from app.db.models import as_utc
+
+    now = datetime(2026, 5, 19, 12, 0, 0, tzinfo=UTC)
+    expected_from_dt = now - timedelta(hours=24)
+
+    # last_sent_at SystemSetting 을 의도적으로 설정하지 않는다.
+    announcement = _insert_announcement(db_session, source_announcement_id="B9B-ANN")
+    _insert_snapshot(
+        db_session,
+        created_at=now - timedelta(hours=6),
+        snapshot_date_iso="2026-05-19",
+        payload={"new": [announcement.id]},
+    )
+    db_session.commit()
+
+    transport = _FakeTransport(results=[None])
+    request = DailyReportRequest(
+        trigger=TRIGGER_MANUAL_TEST,
+        recipients=["tester@example.com"],
+        requested_by_user_id=None,
+    )
+
+    result = prepare_and_send_daily_report(
+        request,
+        session=db_session,
+        transport=transport,
+        max_retry_count=0,
+        now=now,
+    )
+
+    assert result.status == EmailDailyReportStatus.SUCCESS
+
+    run = db_session.get(EmailDailyReportRun, result.run_id)
+    assert run is not None
+    assert as_utc(run.aggregation_from) == expected_from_dt, (
+        "last_sent_at 없어도 manual_test 는 now-24h 고정 구간 사용"
+    )
+
+    # manual_test 발송 후 last_sent_at 은 여전히 없거나(None) 변경 없음.
+    saved = get_setting(db_session, SETTING_KEY_DAILY_REPORT_LAST_SENT_AT)
+    assert saved is None or saved == "", "manual_test 후 last_sent_at 갱신 금지"
