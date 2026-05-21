@@ -98,12 +98,11 @@ class AggregationWindow:
         from_dt: 누적 구간 시작 시각 (배타). UTC tz-aware datetime.
             ``SystemSetting[\"email.daily_report.last_sent_at\"]`` 가 있으면
             그 값을 파싱한 시각, 없거나 파싱 실패면 ``to_dt - fallback_days``.
+            테스트 발송(fixed_lookback_hours 지정 시)는 ``to_dt - N시간`` 고정.
         to_dt: 누적 구간 끝 시각 (포함). UTC tz-aware datetime. 호출자가
             전달한 ``now`` 와 동일하다 (\"발송 시각까지\" 시맨틱).
         snapshot_count: 구간 내 ``scrape_snapshots.created_at`` 이 들어 있는
-            row 수. ``compute_aggregation_window`` 는 이 값이 0 이면 None 을
-            반환하므로, AggregationWindow 가 생성되면 ``snapshot_count >= 1`` 이
-            보장된다.
+            row 수. 0건도 허용된다 — 빈 구간이어도 발송을 진행한다.
         is_first_send: ``last_sent_at`` SystemSetting 이 NULL / 빈 값 / 파싱
             실패였던 \"첫 발송\" 케이스면 True. 본문 빌더가 헤더 박스에 \"최초
             발송 — 직전 N일치 포함\" 안내를 노출한다.
@@ -251,21 +250,28 @@ def compute_aggregation_window(
     *,
     now: datetime,
     fallback_days: int = 7,
-) -> AggregationWindow | None:
-    """누적 구간 ``(last_sent_at, now]`` 을 계산한다.
+    fixed_lookback_hours: int | None = None,
+) -> AggregationWindow:
+    """누적 구간 ``(from_dt, to_dt]`` 을 계산한다.
 
-    동작 순서 (prompt §3 의사 코드 + design note §1·§7 정책 반영):
+    동작 순서:
+
+    ``fixed_lookback_hours`` 가 주어진 경우 (테스트 발송 전용):
+        - ``from_dt = now - timedelta(hours=fixed_lookback_hours)``
+        - ``last_sent_at`` SystemSetting 을 참조하지 않는다.
+        - ``is_first_send=False`` , ``fallback_days=None`` 로 고정.
+
+    ``fixed_lookback_hours`` 가 None 인 경우 (정규 발송):
         1. ``SystemSetting[\"email.daily_report.last_sent_at\"]`` 로드.
         2. 값이 있으면 ``from_dt = parsed`` , ``is_first_send=False`` ,
            ``fallback_days=None``.
            값이 없거나 파싱 실패면 ``from_dt = now - fallback_days`` ,
            ``is_first_send=True`` , ``fallback_days=fallback_days``.
-        3. ``to_dt = now`` (호출자가 ``now_utc()`` 를 전달하는 게 표준).
+        3. ``to_dt = now``.
         4. ``list_snapshots_created_in_range(session, from_dt, to_dt)`` 의
-           ``len`` 으로 누적 후보 row 수를 센다.
-        5. 0건이면 None 반환 — 호출자(``prepare_and_send_daily_report``) 가
-           ``EmailDailyReportRun.status='skipped'`` 분기로 들어간다.
-        6. 1건 이상이면 ``AggregationWindow`` 인스턴스 반환.
+           ``len`` 으로 구간 내 snapshot 수를 센다.
+        5. 0건이어도 항상 ``AggregationWindow`` 를 반환한다 — 빈 구간이어도
+           발송을 건너뛰지 않는다.
 
     시간 처리:
         모든 datetime 비교는 UTC tz-aware 로 수행한다. ``now`` 도 UTC tz-aware
@@ -278,33 +284,42 @@ def compute_aggregation_window(
             트리거 시각. 테스트는 고정 시각을 주입해 재현성을 확보한다.
         fallback_days: 첫 발송 (``last_sent_at`` 부재) 시 직전 N일치를 누적
             대상 구간으로 잡는다. design note §4 결정에 따라 default 7.
+            ``fixed_lookback_hours`` 가 주어지면 무시된다.
+        fixed_lookback_hours: None 이 아니면 ``last_sent_at`` 을 무시하고
+            ``from_dt = now - timedelta(hours=fixed_lookback_hours)`` 로 고정
+            구간을 만든다. 테스트 발송(``TRIGGER_MANUAL_TEST``) 전용.
 
     Returns:
-        구간 내 snapshot 이 1건 이상이면 ``AggregationWindow``. 0건이면 None.
+        항상 ``AggregationWindow``. 구간 내 snapshot 이 0건이어도 반환한다.
     """
     # 외부 입력 정규화 — naive 가 들어와도 비교 안전성 보장.
     now_utc_value = as_utc(now)
 
-    # 1. SystemSetting 로드 + 파싱.
-    raw_last_sent = get_setting(session, SETTING_KEY_DAILY_REPORT_LAST_SENT_AT)
-    parsed_last_sent = _parse_last_sent_at(raw_last_sent)
-
-    # 2. 첫 발송 분기 결정. 파싱 실패도 \"첫 발송\" 으로 회복.
-    if parsed_last_sent is None:
-        is_first_send = True
-        applied_fallback_days: int | None = fallback_days
-        from_dt = now_utc_value - timedelta(days=fallback_days)
-    else:
+    if fixed_lookback_hours is not None:
+        # 테스트 발송 전용 고정 구간 — last_sent_at SystemSetting 완전 무시.
+        from_dt = now_utc_value - timedelta(hours=fixed_lookback_hours)
         is_first_send = False
-        applied_fallback_days = None
-        from_dt = parsed_last_sent
+        applied_fallback_days: int | None = None
+    else:
+        # 정규 발송 — last_sent_at 기반 구간 계산.
+        raw_last_sent = get_setting(session, SETTING_KEY_DAILY_REPORT_LAST_SENT_AT)
+        parsed_last_sent = _parse_last_sent_at(raw_last_sent)
 
-    # 3. to_dt 는 항상 now.
+        # 첫 발송 분기 결정. 파싱 실패도 \"첫 발송\" 으로 회복.
+        if parsed_last_sent is None:
+            is_first_send = True
+            applied_fallback_days = fallback_days
+            from_dt = now_utc_value - timedelta(days=fallback_days)
+        else:
+            is_first_send = False
+            applied_fallback_days = None
+            from_dt = parsed_last_sent
+
+    # to_dt 는 항상 now.
     to_dt = now_utc_value
 
-    # 4. 구간 내 snapshot row 수 카운트. 본 헬퍼는 rows 자체를 반환해
-    #    aggregate_snapshots(00125-4) 가 동일 SELECT 를 재사용할 수 있게 한다.
-    #    구간이 좁아 (보통 하루) row 수가 적어 len() 의 비용은 무시 가능.
+    # 구간 내 snapshot row 수 카운트. 0건이어도 발송을 진행하므로 결과를 그대로
+    # AggregationWindow 에 담아 반환한다.
     snapshots_in_window = list_snapshots_created_in_range(
         session,
         from_exclusive=from_dt,
@@ -312,11 +327,6 @@ def compute_aggregation_window(
     )
     snapshot_count = len(snapshots_in_window)
 
-    # 5. 빈 구간 → None (호출자가 SKIPPED 분기).
-    if snapshot_count == 0:
-        return None
-
-    # 6. 정상 구간 → AggregationWindow.
     return AggregationWindow(
         from_dt=from_dt,
         to_dt=to_dt,
@@ -563,6 +573,10 @@ TRIGGER_SCHEDULED: Literal["scheduled"] = "scheduled"
 TRIGGER_MANUAL_ADMIN: Literal["manual_admin"] = "manual_admin"
 TRIGGER_MANUAL_TEST: Literal["manual_test"] = "manual_test"
 
+# TRIGGER_MANUAL_TEST 발송 시 compute_aggregation_window 에 전달하는 고정 구간(시간).
+# last_sent_at 과 무관하게 항상 최근 24시간분의 변화를 발송한다.
+TEST_SEND_LOOKBACK_HOURS: int = 24
+
 # last_sent_at SystemSetting 갱신 정책표 — design note §7 + prompt §5 의 표를 코드로
 # 옮긴 single source of truth.
 #
@@ -687,8 +701,10 @@ def prepare_and_send_daily_report(
         2. 게이트 / 구간 계산 / aggregate / 본문 빌드.
            - ``is_email_sending_enabled`` 가 False 면 row.status=FAILED commit +
              ``EmailSendingDisabledError`` raise (라우터가 503 변환).
-           - ``compute_aggregation_window`` 가 None 이면 row.status=SKIPPED
-             commit + 빠른 종료 (snapshot_count=0).
+           - ``trigger == TRIGGER_MANUAL_TEST`` 이면 ``compute_aggregation_window``
+             를 ``fixed_lookback_hours=TEST_SEND_LOOKBACK_HOURS`` 로 호출해
+             last_sent_at 과 무관하게 최근 24시간 구간을 고정한다.
+           - snapshot 이 0건이어도 SKIPPED 로 빠지지 않고 빈 본문으로 발송된다.
         3. 수신자별 1통씩 ``build_multipart_message`` → ``send_with_retry`` 호출.
            각 호출이 EmailSendRun row 1개를 commit 한다 (related_kind=
            'daily_report', related_id=run_id). 성공/실패 카운트만 본 함수가
@@ -766,31 +782,19 @@ def prepare_and_send_daily_report(
         )
         raise EmailSendingDisabledError(error_message)
 
-    # ── 단계 2-b. 누적 구간 계산 → SKIPPED 분기 ──────────────────────
-    window = compute_aggregation_window(session, now=started_at)
-    if window is None:
-        # 구간 내 snapshot 0건 — 발송 자체를 skip. last_sent_at 은 유지되어
-        # 다음 잡이 같은 구간 + 신규 누적까지 처리한다 (정책표 §7).
-        run.status = EmailDailyReportStatus.SKIPPED
-        run.aggregation_from = None
-        run.aggregation_to = None
-        run.snapshot_count = 0
-        run.completed_at = now_utc()
-        session.commit()
-        logger.info(
-            "Daily report SKIPPED — 구간 내 snapshot 0건: run_id={} trigger={!r}",
-            run.id,
-            request.trigger,
+    # ── 단계 2-b. 누적 구간 계산 ─────────────────────────────────────
+    # trigger 에 따라 구간 계산 방식을 분기한다.
+    # - TRIGGER_MANUAL_TEST: 최근 24시간 고정 구간 (last_sent_at 무시).
+    # - 그 외(scheduled / manual_admin): last_sent_at 기반 일반 구간.
+    # 0건 snapshot 이어도 SKIPPED 분기 없이 빈 본문으로 발송을 진행한다.
+    if request.trigger == TRIGGER_MANUAL_TEST:
+        window = compute_aggregation_window(
+            session,
+            now=started_at,
+            fixed_lookback_hours=TEST_SEND_LOOKBACK_HOURS,
         )
-        return DailyReportResult(
-            run_id=run.id,
-            status=EmailDailyReportStatus.SKIPPED,
-            snapshot_count=0,
-            recipient_count=len(recipients),
-            success_count=0,
-            failure_count=0,
-            error_message=None,
-        )
+    else:
+        window = compute_aggregation_window(session, now=started_at)
 
     # window 가 결정됐으니 aggregation_* 컬럼을 미리 채워 두어 후속 분기에서도
     # 이력이 일관되게 보인다. commit 은 단계 4 에서 일괄.
@@ -986,6 +990,7 @@ __all__ = [
     "AnnouncementSummary",
     "DailyReportRequest",
     "DailyReportResult",
+    "TEST_SEND_LOOKBACK_HOURS",
     "TRIGGER_MANUAL_ADMIN",
     "TRIGGER_MANUAL_TEST",
     "TRIGGER_SCHEDULED",
