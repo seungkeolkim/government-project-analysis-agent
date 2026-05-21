@@ -43,7 +43,110 @@
     </label>
 </section>
 
-{# ── 섹션 1: 메일 설정 ──────────────────────────────────────── #}
+{# ── 섹션 1: Daily Report 카드 (Phase A-3 / task 00125-9) ──────
+   마지막 발송 이후 누적된 공고 변화(snapshot diff)를 cron 으로 예약한
+   시각에 admin 사용자에게 자동 발송하는 기능의 운영 카드.
+
+   admin_email.js 의 initDailyReportSection() 이 아래 endpoint 들을 호출한다:
+     - GET  /api/admin/email/daily-report/settings   (진입 시 카드 채움)
+     - PUT  /api/admin/email/daily-report/settings   ([저장] 버튼)
+     - POST /api/admin/email/daily-report/test-send  ([테스트 발송] 버튼)
+     - POST /api/admin/email/daily-report/send-now   ([지금 발송] 버튼)
+
+   디자인 노트 §10: 「메일 발송 설정」 카드 바로 아래에 둔다. #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">Daily Report</h3>
+    <p class="admin-state__muted">
+        마지막 발송 이후 누적된 공고 변화를 정리해, cron 으로 예약한 시각에
+        admin 사용자에게 자동으로 메일을 보냅니다. 위 「메일 발송 설정」 이
+        비활성화되어 있으면 예약 발송과 테스트 발송 모두 차단됩니다.
+    </p>
+
+    {# flash 박지 — initDailyReportSection 이 설정 저장/조회 결과를 그린다. #}
+    <div id="daily-report-flash-area"></div>
+
+    <form id="daily-report-settings-form" class="admin-form" autocomplete="off">
+        {# 활성화 체크박스 — 켜려면 cron 표현식이 반드시 있어야 한다(서버 422 가드). #}
+        <label class="admin-checkbox admin-schedule__enabled">
+            <input id="daily-report-enabled"
+                   type="checkbox"
+                   name="enabled">
+            <span>Daily Report 활성화</span>
+        </label>
+
+        {# Cron 표현식 — 5필드 cron 문자열. APScheduler 가 KST 로 해석한다. #}
+        <label class="admin-schedule__text">
+            <span>Cron 표현식 (KST 기준 · 5필드)</span>
+            <input id="daily-report-cron"
+                   name="cron_expression"
+                   type="text"
+                   class="admin-schedule__input"
+                   placeholder="0 9 * * 1-5"
+                   autocomplete="off"
+                   spellcheck="false">
+        </label>
+        <p class="admin-state__muted">
+            예시: <code>0 9 * * 1-5</code> — 평일(월~금) 오전 9시.
+            cron 표현식은 한국 표준시(KST) 기준으로 해석됩니다.
+        </p>
+
+        {# 다음 실행 예측 / 마지막 발송 — JS 가 텍스트로 채운다. #}
+        <p class="admin-state__muted">
+            다음 실행 예측: <span id="daily-report-next-run">—</span>
+        </p>
+        <p class="admin-state__muted">
+            마지막 발송: <span id="daily-report-last-sent">—</span>
+        </p>
+
+        {# 수신자 요약 — admin 수 / 미설정 경고. JS 가 동적으로 그린다. #}
+        <div id="daily-report-recipients-summary"></div>
+
+        {# 수신자 admin 목록 자세히 보기 — 네이티브 details/summary expand. #}
+        <details class="daily-report-recipients">
+            <summary>수신자 admin 목록 자세히 보기</summary>
+            <div id="daily-report-recipients-detail"></div>
+        </details>
+
+        {# 테스트 발송 박스 — 단일 임의 주소로 1통 발송 (manual_test 트리거).
+           받는 사람 주소는 카드 전역 [저장] 으로 함께 저장되며, [테스트 발송] 은
+           현재 입력값으로 즉시 1통 보낸다 (last_sent_at 갱신 없음). #}
+        <fieldset class="admin-fieldset daily-report-test-box">
+            <legend class="admin-fieldset__legend">테스트 발송</legend>
+            <label class="admin-schedule__text">
+                <span>받는 사람</span>
+                <input id="daily-report-test-recipient"
+                       name="test_recipient"
+                       type="email"
+                       class="admin-schedule__input"
+                       placeholder="example@innodep.com"
+                       autocomplete="off"
+                       spellcheck="false">
+            </label>
+            <button id="daily-report-test-send-button"
+                    type="button"
+                    class="admin-button admin-button--secondary">📤 테스트 발송</button>
+        </fieldset>
+        <p class="admin-state__muted">
+            받는 사람 주소는 아래 「저장」 버튼으로 함께 저장됩니다.
+            「테스트 발송」 은 현재 입력값으로 즉시 1통을 보냅니다.
+        </p>
+
+        {# 지금 발송 + 저장 — 지금 발송은 admin 전원에게 즉시 발송(manual_admin). #}
+        <div class="daily-report-actions">
+            <button id="daily-report-send-now-button"
+                    type="button"
+                    class="admin-button admin-button--secondary">📤 지금 admin 에게만 발송</button>
+            <button id="daily-report-settings-save"
+                    type="submit"
+                    class="admin-button admin-button--primary">저장</button>
+        </div>
+    </form>
+
+    {# 테스트 발송 / 지금 발송 결과 박스 영역 — JS 가 동적으로 그린다. #}
+    <div id="daily-report-result-area"></div>
+</section>
+
+{# ── 섹션 2: 메일 설정 ──────────────────────────────────────── #}
 <section class="admin-section">
     <h3 class="admin-section__heading">메일 설정</h3>
     <p class="admin-state__muted">
@@ -264,8 +367,35 @@
     <div id="send-runs-table-area"></div>
 </section>
 
-{# 페이지 전용 JS — admin_email.js. 본 subtask 에서는 initSettingsSection() 만
-   호출되며 후속 subtask 가 같은 파일에 initTestSendSection /
-   initSendRunsSection 호출을 추가한다. #}
+{# ── 섹션 5: Daily Report 발송 이력 (Phase A-3 / task 00125-9) ──
+   EmailDailyReportRun 이력을 별도 테이블로 표시한다. 각 행을 클릭하면
+   해당 발송의 수신자별 EmailSendRun 결과가 expand 로 펼쳐진다 — forward
+   의 발송 이력 expand 패턴(forward-history__* CSS)을 그대로 재사용한다.
+
+   admin_email.js 의 initDailyReportRunsSection() 이 아래를 호출한다:
+     - GET /api/admin/email/daily-report/runs?limit=50
+     - GET /api/admin/email/daily-report/runs/{run_id}/sends  (행 expand) #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">Daily Report 발송 이력</h3>
+    <p class="admin-state__muted">
+        최근 Daily Report 발송 시도 50건. 행을 클릭하면 수신자별 발송 결과가
+        펼쳐집니다.
+    </p>
+
+    {# 컨트롤 영역 — 우측에 새로고침 버튼만 (status 필터 없음). #}
+    <div class="admin-email-runs-controls">
+        <span></span>
+        <button id="daily-report-runs-refresh-button"
+                type="button"
+                class="admin-button admin-button--secondary">새로고침</button>
+    </div>
+
+    {# 테이블/빈상태/에러 박스 영역 — admin_email.js 가 동적 렌더링. #}
+    <div id="daily-report-runs-table-area"></div>
+</section>
+
+{# 페이지 전용 JS — admin_email.js. DOMContentLoaded 에서 5개 섹션의 init
+   함수가 모두 호출된다 (메일 설정 / 테스트 발송 / 발송 이력 / Daily Report
+   카드 / Daily Report 발송 이력). #}
 <script src="/static/js/admin_email.js"></script>
 {% endblock %}
