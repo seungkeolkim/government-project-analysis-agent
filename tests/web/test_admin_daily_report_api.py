@@ -399,6 +399,98 @@ def test_put_daily_report_settings_disabled_with_empty_cron_ok(
 
 
 # ──────────────────────────────────────────────────────────────
+# 3-b. PUT /daily-report/settings — 실제 스케줄러 통합 (task 00128 회귀)
+# ──────────────────────────────────────────────────────────────
+#
+# 위 3번 테스트들은 register_daily_report_cron_schedule 을 mock 으로 교체해
+# 라우터→service 경계만 본다. 아래 두 테스트는 register_* 를 mock 하지 **않고**
+# 실제 APScheduler 잡 등록/제거까지 통과시켜, task 00128 버그를 회귀로 가드한다.
+#
+# 버그 원인: register_daily_report_cron_schedule 이 set_setting + flush 로 이미
+# write 트랜잭션이 열린 session_scope 안에서 호출됐다. APScheduler 의
+# SQLAlchemyJobStore 는 같은 SQLite 파일의 scheduler_jobs 테이블에 별도 커넥션
+# 으로 write 하므로, SQLite 단일 writer 제약에 걸려 "database is locked" 500 이
+# 발생 → 저장이 롤백되어 활성화가 미반영되고, 잡도 등록되지 않아 next_run_at 이
+# 항상 None 으로 떴다. 수정: 스케줄 잡 갱신을 session_scope 밖에서 먼저 수행한다.
+
+
+def test_put_daily_report_settings_enabled_registers_job_and_returns_next_run_at(
+    admin_client: TestClient,
+    db_session: Session,
+) -> None:
+    """[task 00128 회귀] enabled=True 저장이 500 없이 성공하고 next_run_at 이 채워진다.
+
+    register_daily_report_cron_schedule 을 mock 하지 않고 실제 스케줄러로 PUT →
+    잡 등록 → next_run_at 직렬화 전체 흐름을 검증한다. 버그가 있으면 PUT 이
+    "database is locked" 500 으로 떨어진다.
+    """
+    response = admin_client.put(
+        "/api/admin/email/daily-report/settings",
+        json={
+            "enabled": True,
+            "cron_expression": "30 9 * * 1-5",
+            "test_recipient": "ops@example.com",
+        },
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["enabled"] is True
+    assert data["cron_expression"] == "30 9 * * 1-5"
+    # 활성화 저장 직후 next_run_at 이 실제 다음 실행 시각으로 채워져야 한다.
+    assert data["next_run_at"] is not None
+
+    # SystemSetting 이 실제로 커밋됐는지 확인 — 롤백되지 않았다.
+    db_session.expire_all()
+    assert (
+        get_setting(db_session, SETTING_KEY_DAILY_REPORT_ENABLED) == "true"
+    )
+
+    # 새로고침(GET) 해도 활성화 상태와 next_run_at 이 그대로 유지된다.
+    get_response = admin_client.get(
+        "/api/admin/email/daily-report/settings"
+    )
+    assert get_response.status_code == 200, get_response.text
+    get_data = get_response.json()
+    assert get_data["enabled"] is True
+    assert get_data["cron_expression"] == "30 9 * * 1-5"
+    assert get_data["next_run_at"] is not None
+
+
+def test_put_daily_report_settings_disabled_removes_job_and_clears_next_run_at(
+    admin_client: TestClient,
+) -> None:
+    """[task 00128 회귀] 활성화 후 비활성화하면 잡이 제거되고 next_run_at 이 None.
+
+    비활성 저장도 database is locked 없이 200 이어야 한다 (회귀 없음 확인).
+    """
+    # 먼저 활성화 — next_run_at 이 채워진 상태를 만든다.
+    enable_response = admin_client.put(
+        "/api/admin/email/daily-report/settings",
+        json={
+            "enabled": True,
+            "cron_expression": "30 9 * * 1-5",
+            "test_recipient": "",
+        },
+    )
+    assert enable_response.status_code == 200, enable_response.text
+    assert enable_response.json()["next_run_at"] is not None
+
+    # 비활성화 — 잡 제거 + next_run_at None.
+    disable_response = admin_client.put(
+        "/api/admin/email/daily-report/settings",
+        json={
+            "enabled": False,
+            "cron_expression": "",
+            "test_recipient": "",
+        },
+    )
+    assert disable_response.status_code == 200, disable_response.text
+    disable_data = disable_response.json()
+    assert disable_data["enabled"] is False
+    assert disable_data["next_run_at"] is None
+
+
+# ──────────────────────────────────────────────────────────────
 # 4. POST /daily-report/test-send — recipient 우선순위 / 게이트
 # ──────────────────────────────────────────────────────────────
 
