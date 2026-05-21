@@ -229,6 +229,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 - **표시 timezone 은 Asia/Seoul 단일 고정 (사용자별 설정 없음)**: 팀 공용 로컬 단일 운영 전제. `app/timezone.py` 헬퍼와 Jinja2 필터 (`kst_format`, `kst_date`) 가 강제. `datetime.utcnow()` 등 naive 생성은 프로젝트 금지 패턴.
 - **APScheduler `BackgroundScheduler(timezone=KST)`**: cron 표현식이 KST 기준으로 해석. `30 9 * * *` = KST 09:30. timezone 변경 후 jobstore 기존 잡의 `next_run_time` 이 자동 재해석되도록 startup 에서 trigger 의 timezone 필드를 KST 로 갱신 + `reschedule_job` 호출.
+- **APScheduler JobStore write 는 `session_scope` 밖에서 먼저 수행**: `SQLAlchemyJobStore` 는 동일 SQLite 파일의 `scheduler_jobs` 테이블에 **별도 커넥션**으로 write 한다. `set_setting + flush` 로 이미 write 트랜잭션이 열린 `session_scope` 안에서 `register_*_cron_schedule` 을 호출하면 SQLite 단일 writer 제약("database is locked") 으로 500 + 롤백이 발생한다. 해결 패턴: `register_*_cron_schedule` 호출을 `session_scope` **전에** 배치한다. Daily Report 설정 저장(`put_daily_report_settings`)과 백업 설정 저장 모두 동일 패턴 — 코드 내 주석('순서 주의') 참조.
 - **외부 응답 (IRIS / NTIS) 날짜는 KST 가정 → UTC 변환 저장**: 소스가 timezone 을 명시하지 않지만 KST 기준으로 게시된다는 관찰. 원문은 `raw_metadata` 에 보존 — 가정이 틀렸을 때 backfill 가능 (`scripts/python/backfill_kst_assumption.py`).
 - **APScheduler 3.x 를 웹 프로세스 내부 BackgroundScheduler 로**: 별도 worker 프로세스를 띄우지 않고 FastAPI 와 같은 프로세스 안에서 가동 — 운영 단순성이 팀 공용 로컬 배포 목적에 부합. JobStore 는 `SQLAlchemyJobStore` 단일 (`scheduler_jobs` 테이블, APScheduler 가 자체 생성해 Alembic 관리 밖). 재기동 시 잡 자동 복원. `misfire_grace_time=300` · `coalesce=True` · `max_instances=1` 로 놓친 잡 합치기 + 중복 기동 방지. 4.x 는 API breaking change 라 `apscheduler>=3.10,<4.0` 으로 고정.
 - **APScheduler 백그라운드 컨텍스트에서 docker 바이너리 절대경로 탐색**: `scheduled_scrape` 가 호출하는 `build_compose_command` 가 `argv[0]` 을 `"docker"` 문자열로 두면 APScheduler 의 제한된 PATH 에서 `FileNotFoundError`. `_resolve_docker_binary()` 가 `shutil.which` → 관행 경로 (`/usr/bin/docker`, `/usr/local/bin/docker`) → `DOCKER_BINARY` env 순으로 탐색해 절대경로 반환. 탐색 실패 시 `ComposeEnvironmentError` 로 ScrapeRun failed.
@@ -342,6 +343,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
+- [00128] Daily Report 활성화 저장 미반영·다음 실행 예측 오표시 버그 수정 — APScheduler SQLAlchemyJobStore 가 같은 SQLite 파일에 별도 커넥션으로 write 해 `session_scope` write 트랜잭션과 SQLite 단일 writer 충돌("database is locked")이 원인; 스케줄 잡 갱신을 `session_scope` 밖에서 먼저 수행하는 순서로 수정 — 2026-05-21
 - [00126] daily report 발송 정책 개선 — snapshot 0건이어도 SKIPPED 없이 항상 발송, `manual_test` 트리거는 `TEST_SEND_LOOKBACK_HOURS=24`시간 고정 구간 사용(`fixed_lookback_hours` 파라미터 추가), 빈 구간 SKIPPED 분기 완전 제거 — 2026-05-21
 - [00125] 단체 Daily Report 자동 발송 (Phase A-3) — `app/email/daily_report.py` 신설(누적 구간 계산·snapshot reduce 머지·발송 서비스), `EmailDailyReportRun` 이력 테이블 + Alembic migration, APScheduler `daily-report` cron 잡(등록·복원·제거), Admin API 5종 + `email.html` 「Daily Report」 카드·발송 이력 섹션 — 2026-05-21
 - [00124] 즐겨찾기 공고 목록 컬럼을 전체 공고 목록(list.html)과 동일하게 통일 — `list_favorites_with_announcements`에 `ann_received_at` 추가, 즐겨찾기 라우트에 진행 상태/전달 컨텍스트 전달, `favorites.html` 컬럼 구성 전면 재구성 — 2026-05-19
@@ -351,5 +353,5 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - [00120] 메일 포워딩 비동기화 + 프로그레스 바 — POST /forward 즉시 반환 후 BackgroundTasks 발송, 모달에 polling 기반 실시간 N명 중 M명 완료 / 실패 K건 표시 — 2026-05-19
 - [00119] 메일 포워드 버튼 툴팁 방향 변경 (상단 → 좌측) — `[data-tooltip]::after` CSS를 `bottom/left/translateX` 기준에서 `top/right/translateY` 기준으로 변경; 우측 overflow로 인한 테이블 컬럼 expand 문제 해소 — 2026-05-19
 - [00118] 메일 포워드 버튼 툴팁 노출 지연 제거 — native `title` 속성의 OS/브라우저 지연 문제로 `data-tooltip` 커스텀 CSS 툴팁(0ms 즉시 표시)으로 교체; `[data-tooltip]::after` CSS 규칙 신설, `title=""` → `data-tooltip=""` 일원화 — 2026-05-19
-- [00116] 메일 발송 비활성화 시 disabled 버튼 툴팁 추가 + 테스트 발송 게이트 제외 — `send_enabled=False` 시 목록·상세 페이지 발송 버튼 래퍼에 툴팁 표시; 테스트 발송 엔드포인트(`POST /admin/email/test-send`)는 `is_email_sending_enabled` 게이트에서 제외 — 2026-05-18
+
 
