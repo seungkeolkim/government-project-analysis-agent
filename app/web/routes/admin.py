@@ -55,7 +55,14 @@ from app.auth.constants import (
     SESSION_LIFETIME_DAYS,
 )
 from app.auth.dependencies import admin_user_required, ensure_same_origin
-from app.auth.service import PasswordPolicyError, change_password, create_session, delete_user
+from app.auth.service import (
+    PasswordPolicyError,
+    change_email,
+    change_email_subscribed,
+    change_password,
+    create_session,
+    delete_user,
+)
 from app.db.models import Organization, ScrapeRun, User
 from app.db.session import SessionLocal, session_scope
 from app.organizations.io import (
@@ -1809,6 +1816,110 @@ def users_set_organizations(
     return RedirectResponse(
         url=_users_flash_url(
             f"'{target_username}' 의 조직 소속이 변경되었습니다.", level="success"
+        ),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.post(
+    "/users/{user_id}/email",
+    dependencies=[Depends(ensure_same_origin)],
+)
+def users_set_email(
+    user_id: int,
+    new_email: str = Form(default=""),
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """관리자가 대상 사용자의 이메일 주소를 변경한다.
+
+    빈 문자열로 저장하면 해당 사용자의 이메일이 제거(None)된다.
+    형식 오류 시 change_email 이 ValueError 를 던지며 flash error redirect 한다.
+
+    Args:
+        user_id:   이메일을 변경할 사용자 PK (URL 경로 파라미터).
+        new_email: 새 이메일 주소. 빈 문자열이면 이메일 제거(None).
+    """
+    session = SessionLocal()
+    try:
+        target_user = session.get(User, user_id)
+        if target_user is None:
+            return RedirectResponse(
+                url=_users_flash_url(
+                    f"사용자를 찾을 수 없습니다: user_id={user_id}", level="error"
+                ),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+
+        target_username = target_user.username  # session.close() 이전에 캡처
+        try:
+            change_email(session, target_user, new_email=new_email)
+        except ValueError as exc:
+            session.rollback()
+            return RedirectResponse(
+                url=_users_flash_url(str(exc), level="error"),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+
+        session.commit()
+    finally:
+        session.close()
+
+    logger.info(
+        "관리자 이메일 변경: 관리자={} target_user_id={} new_email={!r}",
+        current_user.username, user_id, new_email or None,
+    )
+    return RedirectResponse(
+        url=_users_flash_url(
+            f"'{target_username}' 의 이메일이 변경되었습니다.", level="success"
+        ),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.post(
+    "/users/{user_id}/email-subscription",
+    dependencies=[Depends(ensure_same_origin)],
+)
+def users_set_email_subscription(
+    user_id: int,
+    subscribed: bool = Form(default=False),
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """관리자가 대상 사용자의 이메일 수신 여부를 변경한다.
+
+    체크박스 미체크 시 Form 값이 전송되지 않으므로 default=False 로 처리한다.
+    Pydantic 은 체크박스 "true" 값을 True 로 강제 변환한다.
+
+    Args:
+        user_id:    이메일 수신 여부를 변경할 사용자 PK.
+        subscribed: True 이면 수신 동의, False 이면 수신 거부.
+    """
+    session = SessionLocal()
+    try:
+        target_user = session.get(User, user_id)
+        if target_user is None:
+            return RedirectResponse(
+                url=_users_flash_url(
+                    f"사용자를 찾을 수 없습니다: user_id={user_id}", level="error"
+                ),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+
+        target_username = target_user.username  # session.close() 이전에 캡처
+        change_email_subscribed(session, target_user, subscribed=subscribed)
+        session.commit()
+    finally:
+        session.close()
+
+    logger.info(
+        "관리자 이메일 수신 설정 변경: 관리자={} target_user_id={} subscribed={}",
+        current_user.username, user_id, subscribed,
+    )
+    subscribed_label = "수신 동의" if subscribed else "수신 거부"
+    return RedirectResponse(
+        url=_users_flash_url(
+            f"'{target_username}' 의 이메일 수신 여부가 '{subscribed_label}' 로 변경되었습니다.",
+            level="success",
         ),
         status_code=status.HTTP_303_SEE_OTHER,
     )
