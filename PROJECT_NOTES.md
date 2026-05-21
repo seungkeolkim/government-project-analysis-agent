@@ -351,5 +351,4 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - [00118] 메일 포워드 버튼 툴팁 노출 지연 제거 — native `title` 속성의 OS/브라우저 지연 문제로 `data-tooltip` 커스텀 CSS 툴팁(0ms 즉시 표시)으로 교체; `[data-tooltip]::after` CSS 규칙 신설, `title=""` → `data-tooltip=""` 일원화 — 2026-05-19
 - [00116] 메일 발송 비활성화 시 disabled 버튼 툴팁 추가 + 테스트 발송 게이트 제외 — `send_enabled=False` 시 목록·상세 페이지 발송 버튼 래퍼에 툴팁 표시; 테스트 발송 엔드포인트(`POST /admin/email/test-send`)는 `is_email_sending_enabled` 게이트에서 제외 — 2026-05-18
 - [00115] 메일 전송 기능 활성화 토글 + 발송 게이트 추가 — `email.send_enabled` SystemSetting(기본 off) + `app/email/gate.py` 게이트 신설, 포워딩 경로에 적용; 관리자 이메일 탭에 「메일 발송 설정」 섹션 + 활성화 토글 UI 추가 — 2026-05-18
-- [00113] 포워딩 발신자 표 단일 조직 표시 + 무소속 안내 문구 수정 — `forwarding.py` 가 모든 소속 조직 대신 선택된 조직 1건만 발신자 표에 노출하도록 변경, 무소속 안내 메시지 \"개인 자격으로 발송됩니다\" → \"조직 정보 없이 발송됩니다\" 로 수정 — 2026-05-18
 
