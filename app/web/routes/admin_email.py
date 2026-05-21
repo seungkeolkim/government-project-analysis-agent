@@ -1124,13 +1124,23 @@ def put_daily_report_settings(
     저장 흐름:
         1. Pydantic validator 가 cron 표현식 형식 / enabled-vs-cron 일관성을 422
            로 미리 거른다.
-        2. SystemSetting 3종 (enabled / cron_expression / test_recipient) 저장.
-        3. ``register_daily_report_cron_schedule(cron, enabled)`` 호출 —
+        2. ``register_daily_report_cron_schedule(cron, enabled)`` 호출 —
            enabled=False / cron 빈 값 → 잡 제거, 그 외 → add or reschedule.
            ``ScheduleValidationError`` 는 422 로 변환 (Pydantic 검증과 별개로
            스케줄러 내부에서 거부된 경우).
+        3. SystemSetting 3종 (enabled / cron_expression / test_recipient) 저장.
         4. 저장 후 GET 과 동일 형식의 응답을 빌드해 반환 — next_run_at 까지 갱신된
            최신 상태가 즉시 노출된다.
+
+    순서 주의 (task 00128 버그 수정):
+        스케줄러 잡 갱신(2)을 SystemSetting 저장(3)보다 **먼저**, 그리고
+        ``session_scope`` 트랜잭션 **밖에서** 수행한다. ``register_daily_report_cron_schedule``
+        은 APScheduler 의 ``SQLAlchemyJobStore`` 를 통해 같은 SQLite 파일의
+        ``scheduler_jobs`` 테이블에 별도 커넥션으로 write 한다. 만약 ``set_setting``
+        + ``flush`` 로 이미 write 트랜잭션이 열린 세션 안에서 호출하면 SQLite 의
+        단일 writer 제약에 걸려 ``database is locked`` 가 발생한다. 백업 설정 저장
+        (``admin.backup_settings_save``)도 동일하게 스케줄 등록을 ``session_scope``
+        밖에서 먼저 처리한다 — 같은 순서를 따른다.
 
     ``last_sent_at`` 은 본 endpoint 에서 직접 수정하지 않는다 — 발송 흐름
     (``prepare_and_send_daily_report``) 의 정책 표가 single source of truth.
@@ -1145,10 +1155,32 @@ def put_daily_report_settings(
         body.test_recipient,
     )
 
-    # 스케줄러 잡 등록은 SystemSetting 저장과 별개 트랜잭션이지만, 실패 시 422 로
-    # 사용자에게 즉시 알려야 하므로 try/except 로 감싼다. ``register_daily_report_cron_schedule``
-    # 가 비활성 분기에서 ``_require_running_scheduler`` 를 호출하므로 스케줄러가
-    # 미기동 상태면 ScheduleValidationError 가 발생한다 — 그 경우는 422.
+    # 1. APScheduler 잡 갱신 — SystemSetting 저장 트랜잭션을 열기 **전에**, 그리고
+    #    session_scope 밖에서 먼저 수행한다. 이렇게 해야 jobstore(scheduler_jobs
+    #    테이블) write 가 웹 세션의 write 트랜잭션과 SQLite 단일 writer 제약에서
+    #    충돌(\"database is locked\")하지 않는다 (위 docstring '순서 주의' 참조).
+    #    register_daily_report_cron_schedule 은 비활성 분기에서
+    #    _require_running_scheduler 를 호출하므로 스케줄러 미기동 시
+    #    ScheduleValidationError 가 발생한다 — 그 경우는 422.
+    try:
+        register_daily_report_cron_schedule(
+            body.cron_expression,
+            enabled=body.enabled,
+        )
+    except ScheduleValidationError as exc:
+        logger.warning(
+            "Daily Report cron 등록 실패: user_id={} cron={!r} error={}",
+            current_user.id,
+            body.cron_expression,
+            exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    # 2. 스케줄 잡 갱신이 끝난 뒤 SystemSetting 3종을 저장한다. 이 시점에는
+    #    scheduler_jobs 쪽 write 가 이미 커밋돼 잠금 충돌이 없다.
     with session_scope() as session:
         # bool → \"true\" / \"false\" (소문자 통일, send_enabled 패턴과 동일).
         set_setting(
@@ -1168,25 +1200,9 @@ def put_daily_report_settings(
         )
         session.flush()
 
-        # APScheduler 잡 갱신 — SystemSetting 토글이 source of truth 이므로,
-        # 본 라인이 저장 후 잡 상태를 SystemSetting 과 동기화한다.
-        try:
-            register_daily_report_cron_schedule(
-                body.cron_expression,
-                enabled=body.enabled,
-            )
-        except ScheduleValidationError as exc:
-            logger.warning(
-                "Daily Report cron 등록 실패: user_id={} cron={!r} error={}",
-                current_user.id,
-                body.cron_expression,
-                exc,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=str(exc),
-            ) from exc
-
+        # 저장된 값 + 갱신된 스케줄 잡(next_run_at)을 한 번에 직렬화해 응답한다.
+        # _build_daily_report_settings_response 는 읽기 전용(SELECT)이므로 열린
+        # write 트랜잭션 안에서 호출해도 잠금 충돌이 없다.
         response = _build_daily_report_settings_response(session)
 
     logger.info("Daily Report 설정 저장 완료: user_id={}", current_user.id)
