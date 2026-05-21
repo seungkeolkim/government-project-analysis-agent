@@ -3974,6 +3974,45 @@ details[open] .user-card__org-summary::before {
     padding: 6px 4px;
 }
 
+/* 이메일 주소 변경 폼 */
+.user-card__email-form {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.user-card__email-input {
+    padding: 6px 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    font-size: 13px;
+    width: 200px;
+    background: #ffffff;
+    color: #111827;
+}
+
+.user-card__email-input:focus {
+    outline: 2px solid #93c5fd;
+    outline-offset: -1px;
+    border-color: #1d4ed8;
+}
+
+/* 이메일 수신 여부 변경 폼 */
+.user-card__email-sub-form {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.user-card__email-sub-label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 13px;
+    color: #374151;
+    cursor: pointer;
+}
+
 /* ---------- 공지사항 + 건의사항 게시판 (task 00056 → 00101) ---------- */
 
 /* task 00101 — 헤더 위 최상단 컨테이너. 링크를 가로로 나란히 배치한다.

@@ -1,13 +1,15 @@
 {#
-  [사용자 관리] 탭 (task 00049-4).
+  [사용자 관리] 탭 (task 00049-4, 확장 task 00129).
 
   구성:
     1. flash 배지 — POST 후 redirect 시 쿼리 파라미터로 전달된 메시지.
     2. 사용자 카드 목록 — id ASC, 각 카드에:
         a. 사용자 기본 정보 (아이디, 이메일, 이메일 수신[읽기전용], 관리자 뱃지, 소속 조직)
         b. 비밀번호 변경 폼 (새 비밀번호 단일 입력)
-        c. 조직 소속 변경 <details>/<summary> 인라인 펼침 폼
-        d. 계정 삭제 버튼 (본인 계정은 disabled 표시)
+        c. 이메일 주소 변경 폼 (빈 값으로 저장하면 이메일 제거)
+        d. 이메일 수신 여부 변경 폼 (체크박스)
+        e. 조직 소속 변경 <details>/<summary> 인라인 펼침 폼
+        f. 계정 삭제 버튼 (본인 계정은 disabled 표시)
 
   컨텍스트 규약:
     - top_tab:       'org_group'
@@ -83,6 +85,34 @@
                     required
                     placeholder="새 비밀번호">
                 <button type="submit" class="user-card__action-btn">비밀번호 변경</button>
+            </form>
+
+            {# 이메일 주소 변경 폼 #}
+            <form class="user-card__email-form"
+                  method="post"
+                  action="/admin/users/{{ user.id }}/email">
+                <input
+                    class="user-card__email-input"
+                    type="email"
+                    name="new_email"
+                    value="{{ user.email or '' }}"
+                    placeholder="이메일 주소 (비우면 제거)">
+                <button type="submit" class="user-card__action-btn">이메일 변경</button>
+            </form>
+
+            {# 이메일 수신 여부 변경 폼 (체크박스 미체크 시 값 미전송 → default=False 처리) #}
+            <form class="user-card__email-sub-form"
+                  method="post"
+                  action="/admin/users/{{ user.id }}/email-subscription">
+                <label class="user-card__email-sub-label">
+                    <input
+                        type="checkbox"
+                        name="subscribed"
+                        value="true"
+                        {% if user.email_subscribed %}checked{% endif %}>
+                    이메일 수신
+                </label>
+                <button type="submit" class="user-card__action-btn">저장</button>
             </form>
 
             {# 조직 소속 변경 인라인 펼침 #}
