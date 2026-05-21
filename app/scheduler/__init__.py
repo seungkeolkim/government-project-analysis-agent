@@ -14,9 +14,14 @@ from __future__ import annotations
 
 from app.scheduler.constants import (
     DEFAULT_MISFIRE_GRACE_TIME_SEC,
+    JOB_ID_DAILY_REPORT,
     SCHEDULER_JOBS_TABLENAME,
 )
-from app.scheduler.job_runner import scheduled_backup_job, scheduled_scrape
+from app.scheduler.job_runner import (
+    scheduled_backup_job,
+    scheduled_daily_report_job,
+    scheduled_scrape,
+)
 from app.scheduler.service import (
     ScheduleSummary,
     ScheduleValidationError,
@@ -24,12 +29,16 @@ from app.scheduler.service import (
     add_interval_schedule,
     delete_schedule,
     ensure_backup_cron_registered,
+    ensure_daily_report_cron_registered,
     get_backup_schedule_summary,
+    get_daily_report_schedule_summary,
     is_scheduler_running,
     list_general_schedules,
     list_schedules,
     register_backup_cron_schedule,
+    register_daily_report_cron_schedule,
     remove_backup_cron_schedule,
+    remove_daily_report_cron_schedule,
     start as start_scheduler,
     stop as stop_scheduler,
     toggle_schedule,
@@ -37,6 +46,7 @@ from app.scheduler.service import (
 
 __all__ = [
     "DEFAULT_MISFIRE_GRACE_TIME_SEC",
+    "JOB_ID_DAILY_REPORT",
     "SCHEDULER_JOBS_TABLENAME",
     "ScheduleSummary",
     "ScheduleValidationError",
@@ -44,13 +54,18 @@ __all__ = [
     "add_interval_schedule",
     "delete_schedule",
     "ensure_backup_cron_registered",
+    "ensure_daily_report_cron_registered",
     "get_backup_schedule_summary",
+    "get_daily_report_schedule_summary",
     "is_scheduler_running",
     "list_general_schedules",
     "list_schedules",
     "register_backup_cron_schedule",
+    "register_daily_report_cron_schedule",
     "remove_backup_cron_schedule",
+    "remove_daily_report_cron_schedule",
     "scheduled_backup_job",
+    "scheduled_daily_report_job",
     "scheduled_scrape",
     "start_scheduler",
     "stop_scheduler",

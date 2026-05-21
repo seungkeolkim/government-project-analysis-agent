@@ -67,7 +67,12 @@ from app.progress.repository import (
 )
 from app.db.session import SessionLocal
 from app.logging_setup import configure_logging
-from app.scheduler import ensure_backup_cron_registered, start_scheduler, stop_scheduler
+from app.scheduler import (
+    ensure_backup_cron_registered,
+    ensure_daily_report_cron_registered,
+    start_scheduler,
+    stop_scheduler,
+)
 from app.scrape_control import cleanup_stale_running_runs
 from app.suggestions import (
     ensure_deleted_at_columns,
@@ -383,6 +388,19 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     except Exception as exc:
         logger.warning(
             "백업 cron startup 등록 실패(스킵, 웹 기동 계속): ({}: {})",
+            type(exc).__name__, exc,
+        )
+
+    # task 00125-7 (Phase A-3) — startup 시 Daily Report cron 잡을 SystemSetting
+    # 기반으로 복원한다. ``email.daily_report.enabled`` 가 True 면 cron 표현식으로
+    # 등록 (jobstore 에 복원된 잡이 있으면 reschedule), False 면 비활성화 분기
+    # (잡스토어 복원분도 함께 제거). 백업 패턴과 동일 try/except — startup 실패
+    # 시에도 웹 기동은 계속한다.
+    try:
+        ensure_daily_report_cron_registered()
+    except Exception as exc:
+        logger.warning(
+            "Daily report cron startup 등록 실패(스킵, 웹 기동 계속): ({}: {})",
             type(exc).__name__, exc,
         )
 

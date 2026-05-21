@@ -159,8 +159,112 @@ def scheduled_backup_job() -> None:
         )
 
 
+def scheduled_daily_report_job() -> None:
+    """APScheduler 가 호출하는 Daily Report 자동 발송 진입점 (task 00125-7).
+
+    APScheduler jobstore 에 ``app.scheduler.job_runner.scheduled_daily_report_job``
+    경로로 pickle 되므로, 이 함수의 모듈 경로·이름은 **절대 변경 금지**.
+
+    설계:
+        - 인자 없음 — pickle 안정성 + 운영 중 SystemSetting 변경이 즉시 반영
+          (잡 args 에 박혀 있지 않도록).
+        - ``app.email`` / ``app.db.session`` 모듈은 함수 안에서 lazy import —
+          순환 import 방지 (디자인 노트 §0-3 컨벤션과 동일 정책).
+        - 모든 예외를 swallow + ``logger.exception`` — APScheduler 스레드가
+          조용히 죽지 않게 한다 (``scheduled_scrape`` / ``scheduled_backup_job``
+          과 동일 정책).
+
+    동작 흐름:
+        1. ``session_scope()`` 로 ORM 세션 컨텍스트 진입.
+        2. ``collect_admin_recipient_emails(session)`` 로 발송 대상 admin 수집.
+        3. ``build_transport_from_settings(session)`` 으로 EmailTransport 빌드.
+        4. ``DailyReportRequest(trigger='scheduled', ...)`` 생성.
+        5. ``prepare_and_send_daily_report(...)`` 호출 — 게이트 / aggregate /
+           본문 / 발송 / last_sent_at 정책은 모두 그쪽 함수가 책임진다.
+        6. ``EmailSendingDisabledError`` (게이트 차단) 는 \"운영자 설정 문제\" 라
+           WARN 로그만 — EmailDailyReportRun row 는 prepare_and_send 가 미리
+           FAILED 로 commit 해 두므로 이력은 남는다.
+    """
+    try:
+        # 순환 import 방지를 위해 함수 내부 lazy import 사용 (scheduled_backup_job
+        # 과 동일 패턴).
+        from app.db.session import session_scope
+        from app.email.constants import (
+            DEFAULT_EMAIL_MAX_RETRY_COUNT,
+            SETTING_KEY_EMAIL_MAX_RETRY_COUNT,
+        )
+        from app.email.daily_report import (
+            TRIGGER_SCHEDULED,
+            DailyReportRequest,
+            collect_admin_recipient_emails,
+            prepare_and_send_daily_report,
+        )
+        from app.email.gate import EmailSendingDisabledError
+        from app.email.transport.factory import build_transport_from_settings
+        from app.backup.service import get_setting
+
+        with session_scope() as session:
+            # 발송 대상 admin 수집 — design note §5 정책 (is_admin AND email AND
+            # email_subscribed). 빈 list 가 와도 prepare_and_send 가
+            # \"수신자 0 → FAILED\" 분기로 처리한다.
+            recipients = collect_admin_recipient_emails(session)
+
+            # max_retry_count 는 SystemSetting 에서 로드 — sender / forwarding 의
+            # 동일 패턴. 파싱 실패 시 DEFAULT 로 안전 fallback.
+            raw_max_retry = get_setting(session, SETTING_KEY_EMAIL_MAX_RETRY_COUNT)
+            try:
+                max_retry_count = (
+                    int(raw_max_retry) if raw_max_retry not in (None, "") else DEFAULT_EMAIL_MAX_RETRY_COUNT
+                )
+            except (TypeError, ValueError):
+                max_retry_count = DEFAULT_EMAIL_MAX_RETRY_COUNT
+
+            transport = build_transport_from_settings(session)
+
+            request = DailyReportRequest(
+                trigger=TRIGGER_SCHEDULED,
+                recipients=recipients,
+                requested_by_user_id=None,
+            )
+            try:
+                result = prepare_and_send_daily_report(
+                    request,
+                    session=session,
+                    transport=transport,
+                    max_retry_count=max_retry_count,
+                )
+            except EmailSendingDisabledError as exc:
+                # 게이트 차단 — prepare_and_send_daily_report 가 이미
+                # EmailDailyReportRun row 를 FAILED 로 commit 한 상태다. cron
+                # 자체는 유지해 게이트 활성화 시 다음 주기에 자동 재개.
+                logger.warning(
+                    "Daily report 스케줄 발송 건너뜀 — 메일 전송 게이트 비활성: {}",
+                    exc,
+                )
+                return
+
+        logger.info(
+            "Daily report 스케줄 발송 완료: run_id={} status={!r} snapshot_count={} "
+            "recipient_count={} success={} failure={}",
+            result.run_id,
+            result.status.value if hasattr(result.status, "value") else str(result.status),
+            result.snapshot_count,
+            result.recipient_count,
+            result.success_count,
+            result.failure_count,
+        )
+    except Exception as exc:
+        # APScheduler 가 잡 예외를 전파하게 두면 일부 버전에서 이후 주기가
+        # 스킵될 수 있어, 안전하게 삼킨다 (scheduled_scrape 와 동일 정책).
+        logger.exception(
+            "Daily report 스케줄 발송 중 예기치 못한 예외(다음 주기로 이월): {}: {}",
+            type(exc).__name__, exc,
+        )
+
+
 __all__ = [
     "gc_orphan_attachments_job",
     "scheduled_backup_job",
+    "scheduled_daily_report_job",
     "scheduled_scrape",
 ]

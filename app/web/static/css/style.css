@@ -5593,3 +5593,62 @@ details[open] .user-card__org-summary::before {
     overflow-wrap: anywhere;
     color: #b91c1c;
 }
+
+/* ---------- Daily Report 카드 (Phase A-3 / task 00125-9) ----------
+ *
+ * 「메일 발송」 탭의 Daily Report 카드 + 발송 이력 섹션 전용 스타일.
+ * 발송 이력 테이블은 forward-history__* 클래스를 그대로 재사용하므로
+ * 본 블록에는 카드 고유 요소(수신자 경고 / 액션 버튼 행 / 수신자 목록)만 둔다.
+ */
+
+/* 수신자 미설정·수신거부 admin 경고 — admin-flash 의 노랑 변형. */
+.admin-flash--warning {
+    background: #fffbeb;
+    color: #92400e;
+    border-color: #fde68a;
+}
+
+/* 「지금 발송」 + 「저장」 버튼을 한 줄에 배치한다. 좁은 화면에서는 wrap. */
+.daily-report-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 4px;
+}
+
+/* 수신자 admin 목록 자세히 보기 — 네이티브 details/summary expand. */
+.daily-report-recipients {
+    font-size: 13px;
+    color: #374151;
+}
+
+.daily-report-recipients > summary {
+    cursor: pointer;
+    color: #1d4ed8;
+}
+
+/* 수신자 admin 별 발송 적합성 표 — 카드 expand 영역에 표시된다. */
+.daily-report-recipients__table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    margin-top: 8px;
+}
+
+.daily-report-recipients__table th,
+.daily-report-recipients__table td {
+    padding: 4px 8px;
+    border-bottom: 1px solid #f1f1f1;
+    text-align: left;
+}
+
+.daily-report-recipients__table thead th {
+    color: #6b7280;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+/* 발송 대상에서 제외된 admin 행 — 흐리게 표시해 한눈에 구분되게 한다. */
+.daily-report-recipients__row--excluded {
+    color: #9ca3af;
+}

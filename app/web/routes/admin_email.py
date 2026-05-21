@@ -27,15 +27,24 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from loguru import logger
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 from sqlalchemy import select
 
 from app.auth.dependencies import admin_user_required, ensure_same_origin
 from app.backup.service import get_setting, set_setting
-from app.db.models import EmailSendRun, EmailSendRunStatus, User
+from app.db.models import (
+    EmailDailyReportRun,
+    EmailSendRun,
+    EmailSendRunStatus,
+    User,
+)
 from app.db.session import session_scope
 from app.email.constants import (
     DEFAULT_APP_PUBLIC_BASE_URL,
+    DEFAULT_DAILY_REPORT_CRON,
+    DEFAULT_DAILY_REPORT_ENABLED,
+    DEFAULT_DAILY_REPORT_LAST_SENT_AT,
+    DEFAULT_DAILY_REPORT_TEST_RECIPIENT,
     DEFAULT_EMAIL_FROM_DISPLAY_NAME,
     DEFAULT_EMAIL_M365_CLIENT_ID,
     DEFAULT_EMAIL_M365_CLIENT_SECRET,
@@ -44,8 +53,13 @@ from app.email.constants import (
     DEFAULT_EMAIL_MAX_RETRY_COUNT,
     DEFAULT_EMAIL_SEND_ENABLED,
     DEFAULT_EMAIL_TRANSPORT_TYPE,
+    RELATED_KIND_DAILY_REPORT,
     RELATED_KIND_TEST_SEND,
     SETTING_KEY_APP_PUBLIC_BASE_URL,
+    SETTING_KEY_DAILY_REPORT_CRON,
+    SETTING_KEY_DAILY_REPORT_ENABLED,
+    SETTING_KEY_DAILY_REPORT_LAST_SENT_AT,
+    SETTING_KEY_DAILY_REPORT_TEST_RECIPIENT,
     SETTING_KEY_EMAIL_FROM_DISPLAY_NAME,
     SETTING_KEY_EMAIL_M365_CLIENT_ID,
     SETTING_KEY_EMAIL_M365_CLIENT_SECRET,
@@ -55,10 +69,23 @@ from app.email.constants import (
     SETTING_KEY_EMAIL_SEND_ENABLED,
     SETTING_KEY_EMAIL_TRANSPORT_TYPE,
 )
-from app.email.gate import is_email_sending_enabled
+from app.email.daily_report import (
+    TRIGGER_MANUAL_ADMIN,
+    TRIGGER_MANUAL_TEST,
+    DailyReportRequest,
+    collect_admin_recipient_emails,
+    prepare_and_send_daily_report,
+)
+from app.email.gate import EmailSendingDisabledError, is_email_sending_enabled
 from app.email.message_builder import build_plain_text_message
 from app.email.sender import send_with_retry
 from app.email.transport.factory import build_transport_from_settings
+from app.scheduler import (
+    ScheduleValidationError,
+    get_daily_report_schedule_summary,
+    register_daily_report_cron_schedule,
+)
+from app.timezone import KST
 
 
 # ──────────────────────────────────────────────────────────────
@@ -623,6 +650,813 @@ def get_email_send_runs(
 
         rows = list(session.execute(stmt).scalars().all())
         items = [_serialize_send_run(row) for row in rows]
+
+    return {
+        "items": items,
+        "count": len(items),
+    }
+
+
+# ──────────────────────────────────────────────────────────────
+# Phase A-3 (task 00125-8) — Daily Report 관리 API
+# ──────────────────────────────────────────────────────────────
+#
+# 디자인 노트 §9 / phase_a3_prompt.md §7 인용. 운영자가 \"메일 발송 설정\" 페이지의
+# 「Daily Report」 카드에서 호출하는 5개 endpoint + 발송 이력 expand 1개를 본 라우터
+# 안에 함께 둔다 (별도 admin_daily_report.py 신설하지 않음 — 같은 admin 도메인이라
+# 응집도 우선). 권한은 라우터 레벨 ``admin_user_required`` 로 공통 보호.
+#
+# 엔드포인트:
+#   GET  /api/admin/email/daily-report/settings
+#       → 현재 설정 + 다음 실행 시각 + admin 수신자 명단 (eligible 플래그 포함)
+#   PUT  /api/admin/email/daily-report/settings
+#       → 4 SystemSetting 저장 + APScheduler 잡 자동 등록/제거
+#   POST /api/admin/email/daily-report/test-send
+#       → 단일 임의 주소로 trigger=manual_test 발송 (last_sent_at 갱신 안 함)
+#   POST /api/admin/email/daily-report/send-now
+#       → 현재 시점 is_admin email 자동 수집 후 trigger=manual_admin 발송
+#   GET  /api/admin/email/daily-report/runs
+#       → EmailDailyReportRun 최근 N건 (default 50, max 200)
+#   GET  /api/admin/email/daily-report/runs/{run_id}/sends
+#       → 해당 daily report 의 수신자별 EmailSendRun 목록
+
+
+# /daily-report/runs 의 limit query 파라미터 상하한.
+DAILY_REPORT_RUNS_LIMIT_DEFAULT: int = 50
+DAILY_REPORT_RUNS_LIMIT_MAX: int = 200
+
+# test_recipient SystemSetting 키의 최대 길이. EmailStr 의 RFC 320 자 한도와
+# 정합 (recipient 컬럼이 String(320) 인 EmailSendRun 과 일치).
+DAILY_REPORT_TEST_RECIPIENT_MAX_LENGTH: int = 320
+
+
+def _validate_cron_expression(cron_expression: str) -> str:
+    """5필드 cron 표현식을 ``CronTrigger.from_crontab`` 으로 파싱해 유효성을 확인한다.
+
+    빈 문자열은 그대로 반환한다 (PUT settings 에서 ``enabled=False`` 인 경우
+    cron 을 비워 저장하는 흐름을 허용). 형식이 잘못된 경우 ``ValueError`` 를
+    raise — Pydantic validator 가 이를 422 로 변환한다.
+
+    Args:
+        cron_expression: 사용자가 입력한 cron 문자열.
+
+    Returns:
+        앞뒤 공백 제거된 cron 표현식. 빈 입력은 빈 문자열 그대로.
+
+    Raises:
+        ValueError: cron 표현식 파싱 실패 (잘못된 필드 수 / 범위 등).
+    """
+    stripped = cron_expression.strip()
+    if not stripped:
+        return ""
+    # lazy import — apscheduler 의 호환성 문제를 런타임에만 노출 (service.py 와
+    # 동일 정책). cron 형식만 검증하므로 timezone 은 부가 정보로만 쓰인다.
+    from apscheduler.triggers.cron import CronTrigger
+
+    try:
+        CronTrigger.from_crontab(stripped, timezone=KST)
+    except Exception as exc:
+        raise ValueError(
+            f"cron 표현식이 올바르지 않습니다: {exc}"
+        ) from exc
+    return stripped
+
+
+class AdminRecipientInfo(BaseModel):
+    """GET /daily-report/settings 응답의 admin 수신자 상세 1건.
+
+    UI 의 "자세히 보기" expand 영역에 표시되며, 운영자가 누가 발송 대상인지
+    한눈에 확인할 수 있게 한다. ``eligible=False`` 인 admin 은 발송 명단에서
+    제외된다 (이메일 미설정 또는 ``email_subscribed=False``).
+    """
+
+    username: str
+    email: str | None
+    email_subscribed: bool
+    eligible: bool
+
+
+class DailyReportSettingsOut(BaseModel):
+    """GET / PUT /daily-report/settings 응답 본문 (디자인 노트 §9 스키마)."""
+
+    enabled: bool
+    cron_expression: str
+    last_sent_at: str | None
+    test_recipient: str
+    next_run_at: str | None
+    admin_emails: list[AdminRecipientInfo]
+    admin_count_eligible: int
+    admin_count_without_email: int
+    admin_count_unsubscribed: int
+
+
+class DailyReportSettingsIn(BaseModel):
+    """PUT /daily-report/settings 요청 본문.
+
+    cron 표현식은 Pydantic validator 가 ``CronTrigger.from_crontab`` 으로 파싱해
+    형식 오류를 422 로 즉시 반환한다. ``enabled=True`` 인데 cron 이 빈 값이면
+    ``model_validator`` 가 422 를 던진다 — 활성화하려면 cron 이 반드시 있어야
+    한다는 운영 의미를 라우터 진입 전에 강제.
+
+    ``test_recipient`` 는 빈 문자열 허용 (미설정 상태로 저장 가능). 형식 검증은
+    실제 사용 시점(POST /test-send)에서 한다 — 사용자가 미완성 입력을 일시 저장
+    하는 흐름을 허용한다.
+    """
+
+    enabled: bool = False
+    cron_expression: str = Field(default="", max_length=200)
+    test_recipient: str = Field(
+        default="",
+        max_length=DAILY_REPORT_TEST_RECIPIENT_MAX_LENGTH,
+    )
+
+    @field_validator("cron_expression")
+    @classmethod
+    def validate_cron(cls, value: str) -> str:
+        """cron 표현식 형식을 ``CronTrigger.from_crontab`` 으로 검증한다."""
+        return _validate_cron_expression(value)
+
+    @field_validator("test_recipient")
+    @classmethod
+    def strip_test_recipient(cls, value: str) -> str:
+        """앞뒤 공백 제거. 빈 문자열은 그대로 둔다 (미설정 상태 허용)."""
+        return value.strip()
+
+    @model_validator(mode="after")
+    def validate_enabled_requires_cron(self) -> "DailyReportSettingsIn":
+        """``enabled=True`` 인데 cron 이 빈 값이면 활성화 불가하다는 의미를 강제."""
+        if self.enabled and not self.cron_expression:
+            raise ValueError(
+                "Daily Report 를 활성화하려면 cron 표현식을 입력해야 합니다."
+            )
+        return self
+
+
+class DailyReportTestSendIn(BaseModel):
+    """POST /daily-report/test-send 요청 본문.
+
+    ``recipient`` 가 None 또는 빈 문자열이면 라우터가 SystemSetting 의
+    ``email.daily_report.test_recipient`` 를 fallback 으로 사용한다. 둘 다 빈 값
+    이면 라우터가 422 를 반환한다 (Pydantic 단계에서는 빈 문자열도 허용).
+
+    형식 검증을 Pydantic ``EmailStr`` 에 위임하지 않고 라우터에서 처리하는 이유:
+    Pydantic ``EmailStr`` 은 빈 문자열을 거부하므로 fallback 분기를 만들 수 없다.
+    그 대신 라우터가 ``email_validator.validate_email`` 로 명시적 검증한다.
+    """
+
+    recipient: str | None = Field(
+        default=None,
+        max_length=DAILY_REPORT_TEST_RECIPIENT_MAX_LENGTH,
+    )
+
+
+class DailyReportRunResult(BaseModel):
+    """POST /daily-report/test-send / send-now 응답 본문 (디자인 노트 §9 스키마)."""
+
+    run_id: int
+    status: str
+    snapshot_count: int
+    recipient_count: int
+    success_count: int
+    failure_count: int
+    error_message: str | None
+
+
+# ──────────────────────────────────────────────────────────────
+# Daily Report — 내부 헬퍼
+# ──────────────────────────────────────────────────────────────
+
+
+def _load_daily_report_setting_values(session) -> dict[str, Any]:
+    """SystemSetting 4종 + send_enabled 게이트 값을 한 번에 읽어 dict 으로 반환한다.
+
+    GET / PUT 모두 settings 응답 직렬화에 같은 값들을 사용하므로 헬퍼로 묶었다.
+    각 값은 row 가 없으면 ``DEFAULT_*`` 로 fallback (constants 동일 패턴).
+
+    Returns:
+        ``{"enabled": bool, "cron_expression": str, "last_sent_at": str | None,
+            "test_recipient": str}``. ``last_sent_at`` 은 빈 문자열을 None 으로
+        변환해 응답 직렬화 단계에서 명확하게 \"미설정\" 을 표현한다.
+    """
+    raw_enabled = get_setting(session, SETTING_KEY_DAILY_REPORT_ENABLED)
+    if raw_enabled is None or raw_enabled.strip() == "":
+        enabled = DEFAULT_DAILY_REPORT_ENABLED
+    else:
+        enabled = raw_enabled.strip().lower() == "true"
+
+    cron_expression = (
+        get_setting(session, SETTING_KEY_DAILY_REPORT_CRON)
+        or DEFAULT_DAILY_REPORT_CRON
+    )
+    raw_last_sent_at = get_setting(session, SETTING_KEY_DAILY_REPORT_LAST_SENT_AT)
+    if raw_last_sent_at is None or raw_last_sent_at.strip() == "":
+        last_sent_at: str | None = None
+    else:
+        last_sent_at = raw_last_sent_at.strip()
+    test_recipient = (
+        get_setting(session, SETTING_KEY_DAILY_REPORT_TEST_RECIPIENT)
+        or DEFAULT_DAILY_REPORT_TEST_RECIPIENT
+    )
+
+    return {
+        "enabled": enabled,
+        "cron_expression": cron_expression,
+        "last_sent_at": last_sent_at,
+        "test_recipient": test_recipient,
+    }
+
+
+def _build_admin_recipient_overview(
+    session,
+) -> tuple[list[AdminRecipientInfo], int, int, int]:
+    """``is_admin=True`` 사용자의 발송 적합성 매트릭스를 만든다.
+
+    디자인 노트 §5 결정 (eligible = email NOT NULL/'' AND email_subscribed=True)
+    을 응답 직렬화 직전에 한 번 더 평가한다. ``collect_admin_recipient_emails``
+    가 실제 발송 대상 email list 만 반환하는 데 비해, 본 헬퍼는 운영자가 UI
+    에서 \"누가 빠지는지\" 까지 보기 위해 전수 admin 의 상태를 반환한다.
+
+    Returns:
+        ``(admin_emails, eligible_count, without_email_count, unsubscribed_count)``.
+        admin_emails 는 username 알파벳순으로 정렬돼 UI 표시 순서를 안정화한다.
+    """
+    statement = select(User).where(User.is_admin.is_(True)).order_by(User.username.asc())
+    admin_users = list(session.execute(statement).scalars().all())
+
+    admin_emails: list[AdminRecipientInfo] = []
+    eligible_count = 0
+    without_email_count = 0
+    unsubscribed_count = 0
+    for admin in admin_users:
+        # email 컬럼은 nullable + 빈 문자열도 \"미설정\" 으로 간주 (collect_admin_recipient_emails
+        # 의 SQL 필터와 동일 시맨틱).
+        has_email = bool(admin.email and admin.email.strip())
+        subscribed = bool(admin.email_subscribed)
+        eligible = has_email and subscribed
+        if eligible:
+            eligible_count += 1
+        if not has_email:
+            without_email_count += 1
+        if has_email and not subscribed:
+            unsubscribed_count += 1
+        admin_emails.append(
+            AdminRecipientInfo(
+                username=admin.username,
+                email=admin.email if has_email else None,
+                email_subscribed=subscribed,
+                eligible=eligible,
+            )
+        )
+
+    return admin_emails, eligible_count, without_email_count, unsubscribed_count
+
+
+def _next_run_at_iso() -> str | None:
+    """APScheduler 의 daily report 잡 next_run_time 을 ISO-8601 문자열로 반환한다.
+
+    잡이 없거나 스케줄러가 미기동이면 None. ``ScheduleSummary.next_run_time``
+    은 KST tz-aware datetime (BackgroundScheduler.timezone=KST) 이므로 그대로
+    ``isoformat()`` 한다.
+    """
+    summary = get_daily_report_schedule_summary()
+    if summary is None or summary.next_run_time is None:
+        return None
+    return summary.next_run_time.isoformat()
+
+
+def _build_daily_report_settings_response(session) -> DailyReportSettingsOut:
+    """SystemSetting + admin 명단 + next_run_at 을 한 번에 묶어 GET 응답으로 직렬화."""
+    values = _load_daily_report_setting_values(session)
+    (
+        admin_emails,
+        eligible_count,
+        without_email_count,
+        unsubscribed_count,
+    ) = _build_admin_recipient_overview(session)
+    return DailyReportSettingsOut(
+        enabled=values["enabled"],
+        cron_expression=values["cron_expression"],
+        last_sent_at=values["last_sent_at"],
+        test_recipient=values["test_recipient"],
+        next_run_at=_next_run_at_iso(),
+        admin_emails=admin_emails,
+        admin_count_eligible=eligible_count,
+        admin_count_without_email=without_email_count,
+        admin_count_unsubscribed=unsubscribed_count,
+    )
+
+
+def _serialize_daily_report_run(run: EmailDailyReportRun) -> dict[str, Any]:
+    """EmailDailyReportRun 1 row 를 /daily-report/runs 응답용 dict 로 직렬화.
+
+    ``requested_by`` 는 lazy relationship 으로 load (페이지당 50 row + 같은
+    admin user 가 대부분이라 N+1 영향이 작다 — EmailSendRun ``_serialize_send_run``
+    과 동일 정책).
+    """
+    requested_by_user = run.requested_by
+    return {
+        "id": run.id,
+        "trigger": run.trigger,
+        "status": run.status.value if run.status is not None else None,
+        "aggregation_from": (
+            run.aggregation_from.isoformat()
+            if run.aggregation_from is not None
+            else None
+        ),
+        "aggregation_to": (
+            run.aggregation_to.isoformat()
+            if run.aggregation_to is not None
+            else None
+        ),
+        "snapshot_count": run.snapshot_count,
+        "recipient_count": run.recipient_count,
+        "success_count": run.success_count,
+        "failure_count": run.failure_count,
+        "error_message": run.error_message,
+        "started_at": (
+            run.started_at.isoformat() if run.started_at is not None else None
+        ),
+        "completed_at": (
+            run.completed_at.isoformat() if run.completed_at is not None else None
+        ),
+        "requested_by": (
+            {
+                "id": requested_by_user.id,
+                "username": requested_by_user.username,
+            }
+            if requested_by_user is not None
+            else None
+        ),
+    }
+
+
+def _serialize_daily_report_send_run(send_run: EmailSendRun) -> dict[str, Any]:
+    """EmailSendRun 1 row 를 발송 이력 expand 응답용 dict 로 직렬화.
+
+    forward 의 ``_serialize_send_run`` 스키마 그대로 (수신자별 발송 시도 결과).
+    """
+    return {
+        "id": send_run.id,
+        "recipient": send_run.recipient,
+        "status": send_run.status.value if send_run.status is not None else None,
+        "attempt_count": send_run.attempt_count,
+        "error_message": send_run.error_message,
+        "sent_at": (
+            send_run.sent_at.isoformat() if send_run.sent_at is not None else None
+        ),
+    }
+
+
+def _resolve_test_send_recipient(session, body_recipient: str | None) -> str:
+    """``POST /daily-report/test-send`` 의 수신자 결정 + 형식 검증.
+
+    우선순위:
+        1. body 의 ``recipient`` 가 비어 있지 않으면 사용.
+        2. 그 외에는 SystemSetting ``test_recipient`` 값을 fallback.
+        3. 둘 다 빈 값이면 422 (HTTPException) raise.
+
+    결정된 값은 ``email_validator.validate_email`` 로 형식 검증해 잘못된 주소를
+    422 로 거부한다 (Pydantic ``EmailStr`` 이 빈 문자열을 거부해 fallback 분기를
+    만들기 어려운 점 회피).
+
+    Args:
+        session: SystemSetting fallback 조회용 ORM 세션.
+        body_recipient: 라우터가 받은 PUT body 의 ``recipient`` 값.
+
+    Returns:
+        검증을 통과한 단일 이메일 주소. 정규화된 값(``normalized``)을 반환해
+        EmailStr 의 case-folding 정책과 일치하게 한다.
+
+    Raises:
+        HTTPException(422): 받는 사람을 결정할 수 없거나 형식이 잘못됨.
+    """
+    candidate = (body_recipient or "").strip()
+    if not candidate:
+        stored = (
+            get_setting(session, SETTING_KEY_DAILY_REPORT_TEST_RECIPIENT)
+            or DEFAULT_DAILY_REPORT_TEST_RECIPIENT
+        )
+        candidate = (stored or "").strip()
+    if not candidate:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "받는 사람을 입력하거나, 「Daily Report」 카드에서 기본 받는 "
+                "사람을 먼저 저장해 주세요."
+            ),
+        )
+
+    # email_validator 는 EmailStr 가 내부적으로 쓰는 라이브러리 — 같은 정책으로
+    # 형식 검증해 결과의 normalized 주소를 사용한다.
+    from email_validator import EmailNotValidError, validate_email
+
+    try:
+        validated = validate_email(candidate, check_deliverability=False)
+    except EmailNotValidError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"이메일 주소 형식이 올바르지 않습니다: {exc}",
+        ) from exc
+    return validated.normalized
+
+
+def _result_to_response(result: Any) -> DailyReportRunResult:
+    """``DailyReportResult`` dataclass → Pydantic 응답 객체로 변환."""
+    return DailyReportRunResult(
+        run_id=result.run_id,
+        status=(
+            result.status.value
+            if result.status is not None
+            else None
+        ),
+        snapshot_count=result.snapshot_count,
+        recipient_count=result.recipient_count,
+        success_count=result.success_count,
+        failure_count=result.failure_count,
+        error_message=result.error_message,
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# 5. GET /api/admin/email/daily-report/settings
+# ──────────────────────────────────────────────────────────────
+
+
+@router.get(
+    "/daily-report/settings",
+    response_model=DailyReportSettingsOut,
+)
+def get_daily_report_settings(
+    current_user: User = Depends(admin_user_required),
+) -> DailyReportSettingsOut:
+    """Daily Report 설정 + admin 수신자 명단 + 다음 실행 시각을 한 번에 반환한다.
+
+    응답 스키마는 디자인 노트 §9 / phase_a3_prompt.md §7 그대로:
+        - enabled / cron_expression / last_sent_at / test_recipient (SystemSetting)
+        - next_run_at (APScheduler ``next_run_time``, KST tz-aware ISO-8601)
+        - admin_emails (전수 admin 의 username/email/email_subscribed/eligible)
+        - 카운터 3종 (eligible / without_email / unsubscribed)
+    """
+    logger.debug(
+        "GET /api/admin/email/daily-report/settings 진입: user_id={}",
+        current_user.id,
+    )
+    with session_scope() as session:
+        return _build_daily_report_settings_response(session)
+
+
+# ──────────────────────────────────────────────────────────────
+# 6. PUT /api/admin/email/daily-report/settings
+# ──────────────────────────────────────────────────────────────
+
+
+@router.put(
+    "/daily-report/settings",
+    response_model=DailyReportSettingsOut,
+    dependencies=[Depends(ensure_same_origin)],
+)
+def put_daily_report_settings(
+    body: DailyReportSettingsIn,
+    current_user: User = Depends(admin_user_required),
+) -> DailyReportSettingsOut:
+    """Daily Report SystemSetting 3종 저장 + APScheduler 잡 자동 등록/제거.
+
+    저장 흐름:
+        1. Pydantic validator 가 cron 표현식 형식 / enabled-vs-cron 일관성을 422
+           로 미리 거른다.
+        2. SystemSetting 3종 (enabled / cron_expression / test_recipient) 저장.
+        3. ``register_daily_report_cron_schedule(cron, enabled)`` 호출 —
+           enabled=False / cron 빈 값 → 잡 제거, 그 외 → add or reschedule.
+           ``ScheduleValidationError`` 는 422 로 변환 (Pydantic 검증과 별개로
+           스케줄러 내부에서 거부된 경우).
+        4. 저장 후 GET 과 동일 형식의 응답을 빌드해 반환 — next_run_at 까지 갱신된
+           최신 상태가 즉시 노출된다.
+
+    ``last_sent_at`` 은 본 endpoint 에서 직접 수정하지 않는다 — 발송 흐름
+    (``prepare_and_send_daily_report``) 의 정책 표가 single source of truth.
+    수동 reset 이 필요하면 SQL 직접 수정 (README.USER.md 의 트러블슈팅 절).
+    """
+    logger.info(
+        "PUT /api/admin/email/daily-report/settings 진입: user_id={} "
+        "enabled={} cron={!r} test_recipient={!r}",
+        current_user.id,
+        body.enabled,
+        body.cron_expression,
+        body.test_recipient,
+    )
+
+    # 스케줄러 잡 등록은 SystemSetting 저장과 별개 트랜잭션이지만, 실패 시 422 로
+    # 사용자에게 즉시 알려야 하므로 try/except 로 감싼다. ``register_daily_report_cron_schedule``
+    # 가 비활성 분기에서 ``_require_running_scheduler`` 를 호출하므로 스케줄러가
+    # 미기동 상태면 ScheduleValidationError 가 발생한다 — 그 경우는 422.
+    with session_scope() as session:
+        # bool → \"true\" / \"false\" (소문자 통일, send_enabled 패턴과 동일).
+        set_setting(
+            session,
+            SETTING_KEY_DAILY_REPORT_ENABLED,
+            "true" if body.enabled else "false",
+        )
+        set_setting(
+            session,
+            SETTING_KEY_DAILY_REPORT_CRON,
+            body.cron_expression,
+        )
+        set_setting(
+            session,
+            SETTING_KEY_DAILY_REPORT_TEST_RECIPIENT,
+            body.test_recipient,
+        )
+        session.flush()
+
+        # APScheduler 잡 갱신 — SystemSetting 토글이 source of truth 이므로,
+        # 본 라인이 저장 후 잡 상태를 SystemSetting 과 동기화한다.
+        try:
+            register_daily_report_cron_schedule(
+                body.cron_expression,
+                enabled=body.enabled,
+            )
+        except ScheduleValidationError as exc:
+            logger.warning(
+                "Daily Report cron 등록 실패: user_id={} cron={!r} error={}",
+                current_user.id,
+                body.cron_expression,
+                exc,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
+        response = _build_daily_report_settings_response(session)
+
+    logger.info("Daily Report 설정 저장 완료: user_id={}", current_user.id)
+    return response
+
+
+# ──────────────────────────────────────────────────────────────
+# 7. POST /api/admin/email/daily-report/test-send
+# ──────────────────────────────────────────────────────────────
+
+
+@router.post(
+    "/daily-report/test-send",
+    response_model=DailyReportRunResult,
+    dependencies=[Depends(ensure_same_origin)],
+)
+def post_daily_report_test_send(
+    body: DailyReportTestSendIn,
+    current_user: User = Depends(admin_user_required),
+) -> DailyReportRunResult:
+    """단일 수신자에게 daily report 본 발송 동작을 그대로 시도한다 (manual_test).
+
+    ``trigger=manual_test`` 라 발송 성공해도 ``last_sent_at`` 은 갱신되지 않는다
+    (정책표). 게이트 미통과 시 503 — A-1 의 ``/test-send`` 와 달리 daily report
+    의 test-send 는 본 발송 흐름을 그대로 검증하는 게 목적이라 게이트 적용 필수
+    (디자인 노트 §7).
+    """
+    logger.info(
+        "POST /api/admin/email/daily-report/test-send 진입: user_id={} recipient={!r}",
+        current_user.id,
+        body.recipient,
+    )
+
+    with session_scope() as session:
+        # 1. recipient 결정 + 형식 검증 (body 우선, 빈 값이면 SystemSetting).
+        recipient = _resolve_test_send_recipient(session, body.recipient)
+
+        # 2. transport 구성 — admin_email 의 test-send 와 동일 정책. 미지원 값
+        #    → 422 (운영자에게 SystemSetting 입력 오류임을 알린다).
+        try:
+            transport = build_transport_from_settings(session)
+        except ValueError as exc:
+            logger.warning(
+                "Daily Report 테스트 발송 실패 — transport 구성 오류: user_id={} error={}",
+                current_user.id,
+                exc,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
+        # 3. max_retry_count 읽기.
+        max_retry_count = _read_max_retry_count(session)
+
+        request_dto = DailyReportRequest(
+            trigger=TRIGGER_MANUAL_TEST,
+            recipients=[recipient],
+            requested_by_user_id=current_user.id,
+        )
+
+        # 4. prepare_and_send_daily_report — 게이트 / 빈 구간 / 발송 루프 모두
+        #    내부에서 처리. ``EmailSendingDisabledError`` 만 별도 403/503 변환.
+        try:
+            result = prepare_and_send_daily_report(
+                request_dto,
+                session=session,
+                transport=transport,
+                max_retry_count=max_retry_count,
+            )
+        except EmailSendingDisabledError as exc:
+            logger.warning(
+                "Daily Report 테스트 발송 거부 — 메일 전송 비활성화: user_id={}",
+                current_user.id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+
+    logger.info(
+        "Daily Report 테스트 발송 완료: user_id={} run_id={} status={}",
+        current_user.id,
+        result.run_id,
+        result.status.value if result.status is not None else None,
+    )
+    return _result_to_response(result)
+
+
+# ──────────────────────────────────────────────────────────────
+# 8. POST /api/admin/email/daily-report/send-now
+# ──────────────────────────────────────────────────────────────
+
+
+@router.post(
+    "/daily-report/send-now",
+    response_model=DailyReportRunResult,
+    dependencies=[Depends(ensure_same_origin)],
+)
+def post_daily_report_send_now(
+    current_user: User = Depends(admin_user_required),
+) -> DailyReportRunResult:
+    """현재 시점 ``is_admin=True`` 사용자 email 을 수집해 즉시 발송한다 (manual_admin).
+
+    수신자 명단은 ``collect_admin_recipient_emails`` (디자인 노트 §5: is_admin
+    AND email NOT NULL/'' AND email_subscribed=True). 발송 성공이면 last_sent_at
+    이 갱신되어 다음 scheduled 잡의 누적 구간 시작점이 \"방금\" 으로 당겨진다 —
+    같은 윈도우 중복 발송 방지.
+
+    빈 수신자 케이스 (이메일이 설정된 admin 0명) 는 ``prepare_and_send_daily_report``
+    가 FAILED + ``error_message='발송 대상 수신자가 없습니다.'`` 로 commit + 200
+    응답으로 받아낸다 (HTTP 422 가 아니라 200 + status=failed 인 이유: 사용자는
+    이 시점에 \"발송 시도 이력\" 을 남기길 원할 수 있기 때문).
+    """
+    logger.info(
+        "POST /api/admin/email/daily-report/send-now 진입: user_id={}",
+        current_user.id,
+    )
+
+    with session_scope() as session:
+        # 1. 수신자 수집 — design note §5 정책 (eligible admin email 만).
+        recipients = collect_admin_recipient_emails(session)
+
+        # 2. transport 구성 + max_retry_count.
+        try:
+            transport = build_transport_from_settings(session)
+        except ValueError as exc:
+            logger.warning(
+                "Daily Report 즉시 발송 실패 — transport 구성 오류: user_id={} error={}",
+                current_user.id,
+                exc,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
+        max_retry_count = _read_max_retry_count(session)
+
+        request_dto = DailyReportRequest(
+            trigger=TRIGGER_MANUAL_ADMIN,
+            recipients=recipients,
+            requested_by_user_id=current_user.id,
+        )
+
+        # 3. prepare_and_send_daily_report — 게이트 / SKIPPED / 발송 루프 통합.
+        try:
+            result = prepare_and_send_daily_report(
+                request_dto,
+                session=session,
+                transport=transport,
+                max_retry_count=max_retry_count,
+            )
+        except EmailSendingDisabledError as exc:
+            logger.warning(
+                "Daily Report 즉시 발송 거부 — 메일 전송 비활성화: user_id={}",
+                current_user.id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+
+    logger.info(
+        "Daily Report 즉시 발송 완료: user_id={} run_id={} status={} recipient_count={}",
+        current_user.id,
+        result.run_id,
+        result.status.value if result.status is not None else None,
+        result.recipient_count,
+    )
+    return _result_to_response(result)
+
+
+# ──────────────────────────────────────────────────────────────
+# 9. GET /api/admin/email/daily-report/runs?limit=50
+# ──────────────────────────────────────────────────────────────
+
+
+@router.get("/daily-report/runs")
+def get_daily_report_runs(
+    limit: int = Query(
+        default=DAILY_REPORT_RUNS_LIMIT_DEFAULT,
+        ge=1,
+        le=DAILY_REPORT_RUNS_LIMIT_MAX,
+    ),
+    current_user: User = Depends(admin_user_required),
+) -> dict[str, Any]:
+    """최근 EmailDailyReportRun 이력을 ``started_at`` 내림차순으로 반환한다.
+
+    Args:
+        limit: 반환할 최대 row 수. 기본 50, 최대 200.
+        current_user: 라우터 dependency 로 이미 검증된 admin user.
+
+    Returns:
+        ``{"items": [...], "count": N}`` — 각 item 은
+        ``_serialize_daily_report_run`` 결과.
+    """
+    logger.debug(
+        "GET /api/admin/email/daily-report/runs 진입: user_id={} limit={}",
+        current_user.id,
+        limit,
+    )
+
+    with session_scope() as session:
+        stmt = (
+            select(EmailDailyReportRun)
+            .order_by(EmailDailyReportRun.started_at.desc())
+            .limit(limit)
+        )
+        rows = list(session.execute(stmt).scalars().all())
+        items = [_serialize_daily_report_run(run) for run in rows]
+
+    return {
+        "items": items,
+        "count": len(items),
+    }
+
+
+# ──────────────────────────────────────────────────────────────
+# 10. GET /api/admin/email/daily-report/runs/{run_id}/sends
+# ──────────────────────────────────────────────────────────────
+
+
+@router.get("/daily-report/runs/{run_id}/sends")
+def get_daily_report_run_sends(
+    run_id: int,
+    current_user: User = Depends(admin_user_required),
+) -> dict[str, Any]:
+    """해당 daily report run 의 수신자별 EmailSendRun 목록을 반환한다.
+
+    ``related_kind='daily_report'`` AND ``related_id={run_id}`` 매칭으로 발송
+    이력 expand 데이터를 만든다 (forward 의 ``/sends`` 와 동일 패턴). 본 run
+    의 ``status=SKIPPED`` 면 EmailSendRun 자체가 생성되지 않아 빈 list 가
+    반환된다.
+
+    Args:
+        run_id: EmailDailyReportRun PK (path 파라미터).
+        current_user: 라우터 dependency 로 이미 검증된 admin user.
+
+    Returns:
+        ``{"items": [...], "count": N}`` — ``created_at`` 오름차순 (발송 시도
+        순서). 매칭되는 EmailSendRun 이 없으면 빈 list.
+
+    Raises:
+        HTTPException(404): ``run_id`` 에 해당하는 EmailDailyReportRun row 가 없음.
+    """
+    logger.debug(
+        "GET /api/admin/email/daily-report/runs/{}/sends 진입: user_id={}",
+        run_id,
+        current_user.id,
+    )
+
+    with session_scope() as session:
+        run = session.get(EmailDailyReportRun, run_id)
+        if run is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Daily Report 발송 이력을 찾을 수 없습니다: run_id={run_id}",
+            )
+
+        stmt = (
+            select(EmailSendRun)
+            .where(
+                EmailSendRun.related_kind == RELATED_KIND_DAILY_REPORT,
+                EmailSendRun.related_id == run_id,
+            )
+            .order_by(EmailSendRun.created_at.asc())
+        )
+        send_runs = list(session.execute(stmt).scalars().all())
+        items = [_serialize_daily_report_send_run(row) for row in send_runs]
 
     return {
         "items": items,

@@ -2737,6 +2737,237 @@ class EmailForwardLog(Base):
         )
 
 
+class EmailDailyReportStatus(StrEnum):
+    """단체 Daily Report 발송 시도 1회의 최종 상태 (Phase A-3 / task 00125-2).
+
+    한 번의 ``prepare_and_send_daily_report`` 호출이 EmailDailyReportRun row 를
+    한 개 만든다. status 는 다음 5종을 거친다 (전이 흐름):
+
+        IN_PROGRESS ──▶ SUCCESS / PARTIAL / FAILED / SKIPPED
+
+    값:
+        IN_PROGRESS  'in_progress' — INSERT 직후, 발송 루프 진행 중. row 가
+                                     남아 있다는 사실이 \"트랜잭션 1단계 commit\"
+                                     의 시그널 (이력 보존 + 동시성 가시화).
+        SUCCESS      'success'     — 모든 수신자에게 발송 성공.
+        PARTIAL      'partial'     — 일부 수신자 성공 / 일부 실패 혼재.
+        FAILED       'failed'      — 모든 수신자 실패 또는 게이트 차단 등
+                                     사전 단계에서 실패해 발송 자체가 안 됨.
+        SKIPPED      'skipped'     — 누적 구간 내 scrape_snapshots 0건 등으로
+                                     발송 자체를 skip. last_sent_at 갱신 없음
+                                     (다음 잡이 같은 구간 + 신규 누적까지 처리).
+
+    저장 형식: native_enum=False — Postgres ENUM 타입 미생성, CHECK constraint
+    만 추가. EmailSendRunStatus / EmailForwardStatus 와 동일 패턴.
+    """
+
+    IN_PROGRESS = "in_progress"
+    SUCCESS = "success"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class EmailDailyReportRun(Base):
+    """단체 Daily Report 발송 시도 1회의 이력 (Phase A-3 / task 00125-2).
+
+    docs/phase_a3_design_note.md §14 + phase_a3_prompt.md §"백엔드 변경 2" 인용.
+    한 ``prepare_and_send_daily_report`` 호출이 본 row 1개를 만든다. 개별 수신자
+    단위 발송 결과는 ``EmailSendRun`` 에 ``related_kind='daily_report'`` /
+    ``related_id=<본 row.id>`` 로 연결된다 (EmailForwardLog 패턴과 동일 다형성
+    관계).
+
+    트랜잭션 3단계 (forwarding 의 prepare / run 분리 패턴 차용):
+        1. row INSERT (status=IN_PROGRESS) + commit       (본 row 생성)
+        2. 게이트 / 구간 계산 → SKIPPED / FAILED 분기 commit  또는 본 row 갱신
+        3. 수신자별 발송 루프 + 최종 status / completed_at commit
+
+    ``last_sent_at`` 의 single source of truth 는 SystemSetting 이며 본 row 의
+    started_at MAX 로 대체하지 않는다 (디자인 노트 §0-2). 본 row 는 \"이력 전용\".
+
+    시간 처리:
+        - ``started_at`` / ``completed_at`` / ``aggregation_from`` /
+          ``aggregation_to`` 모두 UTC tz-aware 로 저장 (PROJECT_NOTES 컨벤션 —
+          \"DB 저장은 UTC, 표시 경계에서 KST\"). 화면 표시 직전에
+          ``app.timezone.format_kst`` / Jinja2 ``kst_format`` 필터로 KST 변환.
+
+    trigger 의 컬럼 타입:
+        - String(20). 'scheduled' / 'manual_admin' / 'manual_test' 3 값만 들어
+          가지만, CHECK constraint 는 두지 않는다 (EmailSendRun.related_kind /
+          transport_type 과 동일한 확장 여유 패턴 — 디자인 노트 §0-3 의 \"본문
+          디자인 골격만\" 원칙과 같은 결로 트리거 도메인도 확장 여유를 둔다).
+    """
+
+    __tablename__ = "email_daily_report_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # 발송을 어떤 경로로 트리거했는지. 'scheduled'/'manual_admin'/'manual_test'.
+    # CHECK constraint 없음 — 확장 여유 (EmailSendRun.related_kind 패턴).
+    trigger: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        doc=(
+            "트리거 종류. 'scheduled' / 'manual_admin' / 'manual_test'. CHECK "
+            "constraint 없음 — 향후 새 트리거 추가 시 ALTER 없이 확장 가능."
+        ),
+    )
+
+    # 발송 결과 enum. native_enum=False — Postgres ENUM 미생성, CHECK constraint
+    # 만 추가 (EmailSendRunStatus / EmailForwardStatus 동일 패턴).
+    status: Mapped[EmailDailyReportStatus] = mapped_column(
+        Enum(
+            EmailDailyReportStatus,
+            name="email_daily_report_status",
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+            native_enum=False,
+        ),
+        nullable=False,
+        doc=(
+            "발송 결과. 'in_progress' / 'success' / 'partial' / 'failed' / "
+            "'skipped' 중 하나. INSERT 직후 'in_progress' 로 채워진 뒤, 발송 "
+            "루프 완료 시 최종 상태로 갱신된다."
+        ),
+    )
+
+    # 누적 구간의 시작 (exclusive). SKIPPED 케이스에서 구간 자체가 결정되지 않은
+    # 시점에 row 가 commit 되면 NULL 가능. 시작 결정 후에는 to 와 한 쌍으로 채워짐.
+    aggregation_from: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        doc=(
+            "누적 구간 시작 시각 (UTC tz-aware, exclusive). last_sent_at 또는 "
+            "fallback 의 결과. SKIPPED row 는 NULL 가능."
+        ),
+    )
+
+    aggregation_to: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        doc=(
+            "누적 구간 끝 시각 (UTC tz-aware, inclusive). 통상 now_utc(). SKIPPED "
+            "row 는 NULL 가능."
+        ),
+    )
+
+    # 구간 내 scrape_snapshots row 수. 0 이면 SKIPPED, 그 외에는 aggregate 의
+    # 입력 row 수와 일치.
+    snapshot_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        doc="누적 구간 내 scrape_snapshots row 수 (aggregate 입력 row 수).",
+    )
+
+    recipient_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        doc="발송 대상 수신자 수 (admin email 또는 test recipient 1 등).",
+    )
+
+    success_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        doc="발송 성공 수신자 수.",
+    )
+
+    failure_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        doc="발송 실패 수신자 수.",
+    )
+
+    error_message: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc=(
+            "사전 단계 실패 사유 또는 마지막 발송 시도의 에러 메시지. SUCCESS / "
+            "SKIPPED row 는 NULL. 수신자별 상세 에러는 EmailSendRun.error_message "
+            "에 보관된다 (forwarding 과 동일 책임 분리)."
+        ),
+    )
+
+    # 발송 시도 시작 시각 (UTC tz-aware). server_default + Python default 양쪽
+    # 둬, raw INSERT 호환 + ORM 우선 적용 모두 지원 (EmailSendRun 동일 패턴).
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        doc=(
+            "본 run 트리거 시각 (UTC tz-aware). 표시 직전에 KST 변환 "
+            "(app.timezone.format_kst / Jinja2 kst_format 필터)."
+        ),
+    )
+
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        doc=(
+            "발송 루프 종료 시각 (UTC tz-aware). 트랜잭션 3단계 (최종 commit) "
+            "시점에 채워진다. 진행 중이거나 사전 단계 실패 직전에는 NULL."
+        ),
+    )
+
+    # manual 트리거 시 누가 눌렀는지 기록. scheduled 이면 NULL.
+    # 사용자 탈퇴 시 SET NULL 로 row 자체는 이력으로 보존 (EmailForwardLog /
+    # EmailSendRun 동일 패턴).
+    requested_by_user_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey(
+            "users.id",
+            name="fk_email_daily_report_runs_requested_by_user_id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        doc=(
+            "manual 트리거 시 발송을 누른 사용자 PK. scheduled 트리거 또는 사용자 "
+            "탈퇴 후에는 NULL."
+        ),
+    )
+
+    # 관계 — admin UI 의 발송 이력 응답에서 username 을 끌어올 때 사용.
+    # EmailSendRun.requested_by 와 동일 단방향 lazy='select' 패턴.
+    requested_by: Mapped[User | None] = relationship(
+        "User",
+        foreign_keys=[requested_by_user_id],
+        lazy="select",
+    )
+
+    __table_args__ = (
+        # status enum DB 레벨 강제 — SQLAlchemy 의 Enum(native_enum=False) 는
+        # create_constraint=False 가 기본이라 CHECK 를 자동 생성하지 않으므로
+        # 명시적으로 선언한다 (EmailSendRun / EmailForwardLog 와 동일 패턴).
+        # migration 파일에도 동일 CHECK 를 중복 선언한다.
+        CheckConstraint(
+            "status IN ('in_progress', 'success', 'partial', 'failed', 'skipped')",
+            name="ck_email_daily_report_runs_status",
+        ),
+        # 발송 이력 화면이 ORDER BY started_at DESC LIMIT 50 으로 조회하는 SQL 의
+        # 핵심 인덱스. ascending 인덱스는 양방향 스캔이 가능해 DESC ORDER BY 도
+        # 효율적이다 (EmailSendRun §5-3 결정 동일).
+        Index(
+            "ix_email_daily_report_runs_started_at",
+            "started_at",
+        ),
+        # 실패/skipped 만 빠르게 필터링하는 보조 인덱스. 향후 활용.
+        Index(
+            "ix_email_daily_report_runs_status",
+            "status",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현을 반환한다."""
+        return (
+            f"<EmailDailyReportRun id={self.id} trigger={self.trigger!r} "
+            f"status={self.status!r} snapshot_count={self.snapshot_count} "
+            f"recipient_count={self.recipient_count}>"
+        )
+
+
 __all__ = [
     "Base",
     "Announcement",
@@ -2751,6 +2982,8 @@ __all__ = [
     "CanonicalProject",
     "DeltaAnnouncement",
     "DeltaAttachment",
+    "EmailDailyReportRun",
+    "EmailDailyReportStatus",
     "EmailForwardLog",
     "EmailForwardStatus",
     "EmailSendRun",

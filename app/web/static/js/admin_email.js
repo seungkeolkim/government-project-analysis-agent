@@ -1,10 +1,13 @@
-// 관리자 「메일 발송」 탭 인터랙션 (Phase A-1 / task 00104-11~13).
+// 관리자 「메일 발송」 탭 인터랙션 (Phase A-1 / task 00104-11~13,
+// Phase A-3 / task 00125-9).
 //
-// 본 파일은 3 개 섹션의 init 함수를 들고 있다 — 각 섹션은 별도 subtask 에서
-// 단계적으로 도입된다.
-//   - initSettingsSection — 메일 설정 form (task 00104-11, 본 subtask 산출물)
-//   - initTestSendSection — 테스트 발송 (task 00104-12, 미구현)
-//   - initSendRunsSection — 발송 이력 (task 00104-13, 미구현)
+// 본 파일은 5 개 섹션의 init 함수를 들고 있다 — 각 섹션은 별도 subtask 에서
+// 단계적으로 도입됐다.
+//   - initSettingsSection       — 메일 설정 form (task 00104-11)
+//   - initTestSendSection       — 테스트 발송 (task 00104-12)
+//   - initSendRunsSection       — 발송 이력 (task 00104-13)
+//   - initDailyReportSection    — Daily Report 카드 (task 00125-9)
+//   - initDailyReportRunsSection — Daily Report 발송 이력 (task 00125-9)
 //
 // 외부 의존성 없음 — vanilla JS ES5+ 호환. fetch / async-await 대신 then 체인
 // 으로 통일해 기존 progress.js / relevance.js 와 같은 톤 유지.
@@ -825,6 +828,955 @@
     }
 
     // ──────────────────────────────────────────────────────────
+    // 섹션 4: Daily Report 카드 (Phase A-3 / task 00125-9)
+    // ──────────────────────────────────────────────────────────
+
+    var DAILY_REPORT_SETTINGS_URL = '/api/admin/email/daily-report/settings';
+    var DAILY_REPORT_TEST_SEND_URL = '/api/admin/email/daily-report/test-send';
+    var DAILY_REPORT_SEND_NOW_URL = '/api/admin/email/daily-report/send-now';
+
+    /**
+     * Daily Report 발송 status 코드를 아이콘 + 한글 라벨로 변환한다.
+     *
+     * @param {string} status success / partial / failed / skipped / in_progress.
+     * @returns {string} 아이콘 + 라벨 (예: '✅ 성공'). 미지원 값은 raw 그대로.
+     */
+    function formatDailyReportStatus(status) {
+        if (status === 'success') {
+            return '✅ 성공';
+        }
+        if (status === 'partial') {
+            return '⚠️ 부분 성공';
+        }
+        if (status === 'failed') {
+            return '❌ 실패';
+        }
+        if (status === 'skipped') {
+            return '⏭ 건너뜀';
+        }
+        if (status === 'in_progress') {
+            return '⏳ 진행 중';
+        }
+        return status ? String(status) : '-';
+    }
+
+    /**
+     * Daily Report 트리거 코드를 한글 라벨로 변환한다.
+     *
+     * @param {string} trigger scheduled / manual_admin / manual_test.
+     * @returns {string} 한글 라벨. 미지원 값은 raw 그대로.
+     */
+    function formatDailyReportTrigger(trigger) {
+        if (trigger === 'scheduled') {
+            return '예약';
+        }
+        if (trigger === 'manual_admin') {
+            return '지금 발송';
+        }
+        if (trigger === 'manual_test') {
+            return '테스트';
+        }
+        return trigger ? String(trigger) : '-';
+    }
+
+    /**
+     * ISO-8601 datetime 문자열을 KST 날짜(YYYY-MM-DD) 로 변환한다.
+     *
+     * 누적 구간 컬럼은 시각까지 표시하면 셀이 길어지므로 날짜만 노출한다.
+     *
+     * @param {string|null|undefined} isoString ISO-8601 datetime 또는 falsy.
+     * @returns {string} 'YYYY-MM-DD' 또는 빈 문자열 (falsy 입력).
+     */
+    function formatDateKst(isoString) {
+        if (!isoString) {
+            return '';
+        }
+        var dateValue = new Date(isoString);
+        if (isNaN(dateValue.getTime())) {
+            return String(isoString);
+        }
+        return dateValue.toLocaleDateString('en-CA', {
+            timeZone: 'Asia/Seoul',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit'
+        });
+    }
+
+    /**
+     * window 에 'daily-report-send-completed' custom event 를 dispatch 한다.
+     * Daily Report 발송 이력 섹션이 이 신호를 청취해 테이블을 자동 재로드한다.
+     */
+    function dispatchDailyReportSendCompletedEvent() {
+        try {
+            window.dispatchEvent(new CustomEvent('daily-report-send-completed'));
+        } catch (dispatchError) {
+            // 옛 브라우저 — silent. 새로고침 버튼으로 수동 갱신 가능.
+        }
+    }
+
+    /**
+     * 「Daily Report」 카드를 초기화한다.
+     *
+     * - 페이지 로드 시 GET /daily-report/settings 로 현재 값을 받아 카드를 채운다.
+     * - [저장] 클릭 → PUT /daily-report/settings (enabled / cron / test_recipient).
+     * - [테스트 발송] 클릭 → POST /daily-report/test-send (현재 받는 사람 입력값).
+     * - [지금 admin 에게만 발송] 클릭 → window.confirm 후 POST /daily-report/send-now.
+     *
+     * 페이지에 form 요소가 없으면 즉시 반환 — 멱등 안전.
+     */
+    function initDailyReportSection() {
+        var form = document.getElementById('daily-report-settings-form');
+        if (!form) {
+            return;
+        }
+
+        var enabledCheckbox = document.getElementById('daily-report-enabled');
+        var cronInput = document.getElementById('daily-report-cron');
+        var nextRunSpan = document.getElementById('daily-report-next-run');
+        var lastSentSpan = document.getElementById('daily-report-last-sent');
+        var recipientsSummary =
+            document.getElementById('daily-report-recipients-summary');
+        var recipientsDetail =
+            document.getElementById('daily-report-recipients-detail');
+        var testRecipientInput =
+            document.getElementById('daily-report-test-recipient');
+        var testSendButton =
+            document.getElementById('daily-report-test-send-button');
+        var sendNowButton =
+            document.getElementById('daily-report-send-now-button');
+        var saveButton = document.getElementById('daily-report-settings-save');
+        var flashArea = document.getElementById('daily-report-flash-area');
+        var resultArea = document.getElementById('daily-report-result-area');
+
+        // 가장 최근에 로드한 settings — 「지금 발송」 confirm 메시지에 수신자
+        // 명단을 보여주기 위해 보관한다.
+        var latestSettings = null;
+
+        // ── 초기 로드 ─────────────────────────────────────────
+        loadDailyReportSettings();
+
+        // ── 이벤트 바인딩 ─────────────────────────────────────
+        form.addEventListener('submit', function (event) {
+            event.preventDefault();
+            saveDailyReportSettings();
+        });
+        testSendButton.addEventListener('click', function () {
+            performDailyReportTestSend();
+        });
+        sendNowButton.addEventListener('click', function () {
+            performDailyReportSendNow();
+        });
+
+        /**
+         * 카드 flash 영역에 success / error 박스를 그린다.
+         *
+         * @param {'success'|'error'} kind 박스 종류.
+         * @param {string} message 한글 메시지.
+         */
+        function showDailyReportFlash(kind, message) {
+            if (!flashArea) {
+                return;
+            }
+            flashArea.innerHTML = '';
+            var box = document.createElement('div');
+            box.className = 'admin-flash admin-flash--' + kind;
+            box.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+            box.textContent = message;
+            flashArea.appendChild(box);
+        }
+
+        /**
+         * 카드 flash 영역을 비운다 (새 요청 시작 시 호출).
+         */
+        function clearDailyReportFlash() {
+            if (flashArea) {
+                flashArea.innerHTML = '';
+            }
+        }
+
+        /**
+         * 테스트/지금 발송 결과 박스를 그린다. 여러 줄은 <br> 로 분리한다.
+         *
+         * @param {'success'|'error'} kind admin-flash--success / --error.
+         * @param {string[]} lines 사용자에게 보여 줄 한글 메시지 줄들.
+         */
+        function showDailyReportResult(kind, lines) {
+            if (!resultArea) {
+                return;
+            }
+            resultArea.innerHTML = '';
+            var box = document.createElement('div');
+            box.className = 'admin-flash admin-flash--' + kind;
+            box.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+            for (var index = 0; index < lines.length; index += 1) {
+                if (index > 0) {
+                    box.appendChild(document.createElement('br'));
+                }
+                box.appendChild(document.createTextNode(lines[index]));
+            }
+            resultArea.appendChild(box);
+        }
+
+        /**
+         * settings 응답을 카드 입력/표시 요소에 반영한다.
+         *
+         * @param {object} settings GET / PUT 응답 형식의 DailyReportSettingsOut.
+         */
+        function applyDailyReportSettings(settings) {
+            latestSettings = settings || {};
+
+            enabledCheckbox.checked = !!latestSettings.enabled;
+            cronInput.value = latestSettings.cron_expression || '';
+            testRecipientInput.value = latestSettings.test_recipient || '';
+
+            // 다음 실행 예측 — next_run_at 이 있으면 KST 표시, 없으면 안내.
+            nextRunSpan.textContent = latestSettings.next_run_at
+                ? formatDateTimeKst(latestSettings.next_run_at)
+                : '— (비활성 또는 미등록)';
+
+            // 마지막 발송 — last_sent_at 이 NULL 이면 첫 발송 전.
+            lastSentSpan.textContent = latestSettings.last_sent_at
+                ? formatDateTimeKst(latestSettings.last_sent_at)
+                : '— (아직 발송된 적 없음)';
+
+            renderRecipientsSummary(latestSettings);
+            renderRecipientsDetail(latestSettings);
+        }
+
+        /**
+         * 수신자 요약 줄 — admin 수 / 발송 대상 수 / 미설정·수신거부 경고.
+         *
+         * @param {object} settings DailyReportSettingsOut.
+         */
+        function renderRecipientsSummary(settings) {
+            recipientsSummary.innerHTML = '';
+
+            var adminList = Array.isArray(settings.admin_emails)
+                ? settings.admin_emails
+                : [];
+            var eligibleCount =
+                typeof settings.admin_count_eligible === 'number'
+                    ? settings.admin_count_eligible
+                    : 0;
+            var withoutEmailCount =
+                typeof settings.admin_count_without_email === 'number'
+                    ? settings.admin_count_without_email
+                    : 0;
+            var unsubscribedCount =
+                typeof settings.admin_count_unsubscribed === 'number'
+                    ? settings.admin_count_unsubscribed
+                    : 0;
+
+            var summaryLine = document.createElement('p');
+            summaryLine.className = 'admin-state__muted';
+            summaryLine.textContent =
+                '수신자: admin 사용자 ' + adminList.length + '명 중 발송 대상 ' +
+                eligibleCount + '명';
+            recipientsSummary.appendChild(summaryLine);
+
+            // 미설정 / 수신거부 admin 이 있으면 노란 경고 박스.
+            if (withoutEmailCount > 0 || unsubscribedCount > 0) {
+                var warningParts = [];
+                if (withoutEmailCount > 0) {
+                    warningParts.push('이메일 미설정 ' + withoutEmailCount + '명');
+                }
+                if (unsubscribedCount > 0) {
+                    warningParts.push('수신 거부 ' + unsubscribedCount + '명');
+                }
+                var warningBox = document.createElement('div');
+                warningBox.className = 'admin-flash admin-flash--warning';
+                warningBox.setAttribute('role', 'status');
+                warningBox.textContent =
+                    '⚠️ ' + warningParts.join(' · ') +
+                    ' — 해당 admin 은 발송 대상에서 제외됩니다.';
+                recipientsSummary.appendChild(warningBox);
+            }
+        }
+
+        /**
+         * 수신자 admin 목록 expand 영역에 상세 테이블을 그린다.
+         *
+         * @param {object} settings DailyReportSettingsOut.
+         */
+        function renderRecipientsDetail(settings) {
+            recipientsDetail.innerHTML = '';
+
+            var adminList = Array.isArray(settings.admin_emails)
+                ? settings.admin_emails
+                : [];
+            if (adminList.length === 0) {
+                var emptyText = document.createElement('p');
+                emptyText.className = 'admin-state__muted';
+                emptyText.textContent = 'admin 사용자가 없습니다.';
+                recipientsDetail.appendChild(emptyText);
+                return;
+            }
+
+            var table = document.createElement('table');
+            table.className = 'daily-report-recipients__table';
+
+            var thead = document.createElement('thead');
+            var headerRow = document.createElement('tr');
+            ['사용자', '이메일', '수신 동의', '발송 대상'].forEach(
+                function (headerText) {
+                    var th = document.createElement('th');
+                    th.textContent = headerText;
+                    headerRow.appendChild(th);
+                }
+            );
+            thead.appendChild(headerRow);
+            table.appendChild(thead);
+
+            var tbody = document.createElement('tbody');
+            adminList.forEach(function (admin) {
+                var row = document.createElement('tr');
+                // 발송 제외 admin 행은 흐리게 표시.
+                if (!admin.eligible) {
+                    row.className = 'daily-report-recipients__row--excluded';
+                }
+
+                var usernameTd = document.createElement('td');
+                usernameTd.textContent = admin.username || '';
+                row.appendChild(usernameTd);
+
+                var emailTd = document.createElement('td');
+                emailTd.textContent = admin.email || '(미설정)';
+                row.appendChild(emailTd);
+
+                var subscribedTd = document.createElement('td');
+                subscribedTd.textContent = admin.email_subscribed ? '동의' : '거부';
+                row.appendChild(subscribedTd);
+
+                var eligibleTd = document.createElement('td');
+                eligibleTd.textContent = admin.eligible ? '✅ 포함' : '제외';
+                row.appendChild(eligibleTd);
+
+                tbody.appendChild(row);
+            });
+            table.appendChild(tbody);
+            recipientsDetail.appendChild(table);
+        }
+
+        /**
+         * GET /daily-report/settings — 페이지 로드 시 또는 저장 직후 호출.
+         */
+        function loadDailyReportSettings() {
+            clearDailyReportFlash();
+            saveButton.disabled = true;
+            fetch(DAILY_REPORT_SETTINGS_URL, {
+                method: 'GET',
+                credentials: 'same-origin',
+                headers: { 'Accept': 'application/json' }
+            })
+                .then(parseJsonResponse)
+                .then(function (result) {
+                    if (!result.resp.ok) {
+                        throw new Error(
+                            extractErrorMessage(result.resp, result.body)
+                        );
+                    }
+                    applyDailyReportSettings(result.body || {});
+                })
+                .catch(function (error) {
+                    showDailyReportFlash(
+                        'error',
+                        'Daily Report 설정 조회 실패: ' + (error.message || error)
+                    );
+                })
+                .then(function () {
+                    saveButton.disabled = false;
+                });
+        }
+
+        /**
+         * PUT /daily-report/settings — [저장] 버튼 클릭 시 호출.
+         *
+         * enabled / cron_expression / test_recipient 3종을 저장한다. 저장 성공
+         * 시 서버가 register_daily_report_cron_schedule() 로 APScheduler 잡을
+         * 등록/제거하며, 응답에 갱신된 next_run_at 까지 포함된다.
+         */
+        function saveDailyReportSettings() {
+            clearDailyReportFlash();
+            saveButton.disabled = true;
+
+            var requestBody = {
+                enabled: !!enabledCheckbox.checked,
+                cron_expression: cronInput.value.trim(),
+                test_recipient: testRecipientInput.value.trim()
+            };
+
+            fetch(DAILY_REPORT_SETTINGS_URL, {
+                method: 'PUT',
+                credentials: 'same-origin',
+                headers: {
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(requestBody)
+            })
+                .then(parseJsonResponse)
+                .then(function (result) {
+                    if (!result.resp.ok) {
+                        throw new Error(
+                            extractErrorMessage(result.resp, result.body)
+                        );
+                    }
+                    applyDailyReportSettings(result.body || {});
+                    showDailyReportFlash(
+                        'success', 'Daily Report 설정이 저장되었습니다.'
+                    );
+                })
+                .catch(function (error) {
+                    showDailyReportFlash(
+                        'error', '저장 실패: ' + (error.message || error)
+                    );
+                })
+                .then(function () {
+                    saveButton.disabled = false;
+                });
+        }
+
+        /**
+         * POST /daily-report/test-send — [테스트 발송] 버튼 클릭 시 호출.
+         *
+         * 현재 받는 사람 입력값을 그대로 전송한다. 빈 값이면 서버가 SystemSetting
+         * 의 test_recipient 를 fallback 으로 쓴다. trigger=manual_test 이므로
+         * last_sent_at 은 갱신되지 않는다.
+         */
+        function performDailyReportTestSend() {
+            if (resultArea) {
+                resultArea.innerHTML = '';
+            }
+            testSendButton.disabled = true;
+
+            var requestBody = {
+                recipient: testRecipientInput.value.trim()
+            };
+
+            fetch(DAILY_REPORT_TEST_SEND_URL, {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(requestBody)
+            })
+                .then(parseJsonResponse)
+                .then(function (result) {
+                    var resp = result.resp;
+                    var body = result.body || {};
+                    if (resp.ok) {
+                        showDailyReportResult('success', [
+                            '테스트 발송 완료 (run_id: ' + body.run_id +
+                                ', 상태: ' + formatDailyReportStatus(body.status) +
+                                ').',
+                            '수신함과 정크메일 폴더를 모두 확인해주세요.'
+                        ]);
+                    } else {
+                        showDailyReportResult('error', [
+                            '테스트 발송 실패 (HTTP ' + resp.status + '): ' +
+                                extractErrorMessage(resp, body),
+                            '아래 「Daily Report 발송 이력」 에서 상세 정보를 확인할 수 있습니다.'
+                        ]);
+                    }
+                })
+                .catch(function (error) {
+                    showDailyReportResult('error', [
+                        '테스트 발송 요청 실패: ' + (error.message || error),
+                        '네트워크 연결을 확인하거나 잠시 후 다시 시도해주세요.'
+                    ]);
+                })
+                .then(function () {
+                    testSendButton.disabled = false;
+                    // 발송 이력 섹션에 자동 새로고침 신호.
+                    dispatchDailyReportSendCompletedEvent();
+                });
+        }
+
+        /**
+         * POST /daily-report/send-now — [지금 admin 에게만 발송] 클릭 시 호출.
+         *
+         * 메일 발송은 외부 영향이 큰 액션이라 window.confirm 으로 우발 클릭을
+         * 막는다 (디자인 노트 §10). 확인 시 현재 시점 admin 수신자 전원에게
+         * 즉시 발송한다 (trigger=manual_admin).
+         */
+        function performDailyReportSendNow() {
+            // confirm 메시지 — 가장 최근 로드한 settings 의 발송 대상 명단 사용.
+            var eligibleEmails = [];
+            if (latestSettings && Array.isArray(latestSettings.admin_emails)) {
+                latestSettings.admin_emails.forEach(function (admin) {
+                    if (admin.eligible && admin.email) {
+                        eligibleEmails.push(admin.email);
+                    }
+                });
+            }
+            var confirmMessage =
+                '현재 발송 대상 admin ' + eligibleEmails.length +
+                '명에게 즉시 Daily Report 를 발송합니다. 계속할까요?';
+            if (eligibleEmails.length > 0) {
+                confirmMessage += '\n\n수신자: ' + eligibleEmails.join(', ');
+            }
+            if (!window.confirm(confirmMessage)) {
+                return;
+            }
+
+            if (resultArea) {
+                resultArea.innerHTML = '';
+            }
+            sendNowButton.disabled = true;
+
+            fetch(DAILY_REPORT_SEND_NOW_URL, {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json'
+                }
+            })
+                .then(parseJsonResponse)
+                .then(function (result) {
+                    var resp = result.resp;
+                    var body = result.body || {};
+                    if (resp.ok) {
+                        showDailyReportResult('success', [
+                            '즉시 발송 완료 (run_id: ' + body.run_id +
+                                ', 상태: ' + formatDailyReportStatus(body.status) +
+                                ').',
+                            '수신자 ' + body.recipient_count + '명 중 성공 ' +
+                                body.success_count + '명 / 실패 ' +
+                                body.failure_count + '명.'
+                        ]);
+                        // last_sent_at 이 갱신될 수 있으므로 설정도 다시 로드.
+                        loadDailyReportSettings();
+                    } else {
+                        showDailyReportResult('error', [
+                            '즉시 발송 실패 (HTTP ' + resp.status + '): ' +
+                                extractErrorMessage(resp, body),
+                            '아래 「Daily Report 발송 이력」 에서 상세 정보를 확인할 수 있습니다.'
+                        ]);
+                    }
+                })
+                .catch(function (error) {
+                    showDailyReportResult('error', [
+                        '즉시 발송 요청 실패: ' + (error.message || error),
+                        '네트워크 연결을 확인하거나 잠시 후 다시 시도해주세요.'
+                    ]);
+                })
+                .then(function () {
+                    sendNowButton.disabled = false;
+                    dispatchDailyReportSendCompletedEvent();
+                });
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // 섹션 5: Daily Report 발송 이력 (Phase A-3 / task 00125-9)
+    // ──────────────────────────────────────────────────────────
+
+    var DAILY_REPORT_RUNS_URL = '/api/admin/email/daily-report/runs';
+    var DAILY_REPORT_RUNS_LIMIT = 50;
+
+    /**
+     * EmailDailyReportRun 1 row 의 누적 구간 표시 문자열을 만든다.
+     *
+     * @param {object} run /daily-report/runs 응답 1건.
+     * @returns {string} 'YYYY-MM-DD ~ YYYY-MM-DD' 또는 '-' (구간 정보 없음).
+     */
+    function buildDailyReportRangeText(run) {
+        var fromText = formatDateKst(run.aggregation_from);
+        var toText = formatDateKst(run.aggregation_to);
+        if (!fromText && !toText) {
+            // SKIPPED 등 — 누적 구간이 기록되지 않음.
+            return '-';
+        }
+        return (fromText || '?') + ' ~ ' + (toText || '?');
+    }
+
+    /**
+     * EmailDailyReportRun 1 row 의 발송 결과 요약 문자열을 만든다.
+     *
+     * @param {object} run /daily-report/runs 응답 1건.
+     * @returns {string} 예: '3건 성공', '2건 성공 / 1건 실패', '-' (skipped).
+     */
+    function buildDailyReportResultText(run) {
+        if (run.status === 'skipped') {
+            return '-';
+        }
+        var successCount =
+            typeof run.success_count === 'number' ? run.success_count : 0;
+        var failureCount =
+            typeof run.failure_count === 'number' ? run.failure_count : 0;
+        var resultText = successCount + '건 성공';
+        if (failureCount > 0) {
+            resultText += ' / ' + failureCount + '건 실패';
+        }
+        return resultText;
+    }
+
+    /**
+     * 수신자별 발송 결과(EmailSendRun) status 의 아이콘 표시를 만든다.
+     *
+     * @param {string} status 'sent' | 'failed' | 그 외.
+     * @returns {string} '✅ 성공' | '❌ 실패' | 원본 문자열.
+     */
+    function buildDailyReportSendStatusText(status) {
+        if (status === 'sent') {
+            return '✅ 성공';
+        }
+        if (status === 'failed') {
+            return '❌ 실패';
+        }
+        return status ? String(status) : '-';
+    }
+
+    /**
+     * 수신자별 발송 결과 표를 만든다 — forward 발송 이력의 sends 표 패턴 재사용.
+     *
+     * @param {Array} sendRuns /runs/{id}/sends 응답의 items 배열.
+     * @returns {HTMLElement} 표 또는 빈 상태 안내 요소.
+     */
+    function buildDailyReportSendsTable(sendRuns) {
+        if (!sendRuns || sendRuns.length === 0) {
+            var emptyBox = document.createElement('p');
+            emptyBox.className = 'forward-history__sends-empty';
+            emptyBox.textContent =
+                '수신자별 발송 기록이 없습니다 (건너뜀 또는 발송 전 실패).';
+            return emptyBox;
+        }
+
+        var table = document.createElement('table');
+        table.className = 'forward-history__sends-table';
+
+        var thead = document.createElement('thead');
+        var headerRow = document.createElement('tr');
+        var headerLabels = [
+            { text: '받는 사람', className: 'forward-history__sends-col-recipient' },
+            { text: '상태', className: 'forward-history__sends-col-status' },
+            { text: '시도 횟수', className: 'forward-history__sends-col-attempt' },
+            { text: '에러', className: 'forward-history__sends-col-error' },
+            { text: '발송 시각', className: 'forward-history__sends-col-sent-at' }
+        ];
+        headerLabels.forEach(function (label) {
+            var th = document.createElement('th');
+            th.className = label.className;
+            th.textContent = label.text;
+            headerRow.appendChild(th);
+        });
+        thead.appendChild(headerRow);
+        table.appendChild(thead);
+
+        var tbody = document.createElement('tbody');
+        sendRuns.forEach(function (sendRun) {
+            var row = document.createElement('tr');
+
+            var recipientTd = document.createElement('td');
+            recipientTd.textContent = sendRun.recipient || '-';
+            row.appendChild(recipientTd);
+
+            var statusTd = document.createElement('td');
+            statusTd.textContent =
+                buildDailyReportSendStatusText(sendRun.status);
+            row.appendChild(statusTd);
+
+            var attemptTd = document.createElement('td');
+            attemptTd.textContent =
+                typeof sendRun.attempt_count === 'number'
+                    ? String(sendRun.attempt_count) + '회'
+                    : '-';
+            row.appendChild(attemptTd);
+
+            var errorTd = document.createElement('td');
+            errorTd.className = 'forward-history__sends-error';
+            errorTd.textContent = sendRun.error_message
+                ? sendRun.error_message
+                : '-';
+            row.appendChild(errorTd);
+
+            var sentAtTd = document.createElement('td');
+            sentAtTd.textContent = formatDateTimeKst(sendRun.sent_at) || '-';
+            row.appendChild(sentAtTd);
+
+            tbody.appendChild(row);
+        });
+        table.appendChild(tbody);
+
+        return table;
+    }
+
+    /**
+     * 발송 이력 1 행의 expand 영역을 펼치거나 접는다.
+     *
+     * 첫 펼침에서만 GET /runs/{id}/sends 를 호출하고 응답을 DOM 에 캐시한다
+     * (발송 결과는 immutable). 호출이 실패하면 캐시하지 않아 다음 펼침에서
+     * 재시도된다 — forward_history.js 의 toggleExpand 패턴과 동일.
+     *
+     * @param {HTMLTableRowElement} mainRow main 행.
+     * @param {HTMLTableRowElement} expandRow main 행 바로 아래 hidden 행.
+     */
+    function toggleDailyReportRunExpand(mainRow, expandRow) {
+        var expandCell =
+            expandRow.querySelector('.forward-history__expand-cell');
+        var toggleButton =
+            mainRow.querySelector('.forward-history__toggle');
+
+        if (!expandRow.hidden) {
+            // 펼쳐진 상태 → 접는다.
+            expandRow.hidden = true;
+            mainRow.classList.remove('forward-history__row--expanded');
+            if (toggleButton) {
+                toggleButton.textContent = '▾';
+                toggleButton.setAttribute('aria-label', '수신자별 결과 펼치기');
+            }
+            return;
+        }
+
+        // 접힌 상태 → 펼친다.
+        expandRow.hidden = false;
+        mainRow.classList.add('forward-history__row--expanded');
+        if (toggleButton) {
+            toggleButton.textContent = '▴';
+            toggleButton.setAttribute('aria-label', '수신자별 결과 접기');
+        }
+
+        // 이미 한 번 불러왔으면 캐시된 DOM 을 그대로 보여준다.
+        if (expandRow.dataset.loaded === '1') {
+            return;
+        }
+
+        var runId = mainRow.dataset.runId;
+        expandCell.innerHTML = '';
+        var loadingBox = document.createElement('p');
+        loadingBox.className = 'forward-history__sends-loading';
+        loadingBox.textContent = '수신자별 발송 결과를 불러오는 중…';
+        expandCell.appendChild(loadingBox);
+
+        fetch(
+            DAILY_REPORT_RUNS_URL + '/' + encodeURIComponent(runId) + '/sends',
+            {
+                method: 'GET',
+                credentials: 'same-origin',
+                headers: { 'Accept': 'application/json' }
+            }
+        )
+            .then(parseJsonResponse)
+            .then(function (result) {
+                if (!result.resp.ok) {
+                    throw new Error(
+                        extractErrorMessage(result.resp, result.body)
+                    );
+                }
+                var items = (result.body && result.body.items) || [];
+                expandCell.innerHTML = '';
+                expandCell.appendChild(buildDailyReportSendsTable(items));
+                // 발송 결과는 immutable — 한 번 성공하면 캐시한다.
+                expandRow.dataset.loaded = '1';
+            })
+            .catch(function () {
+                expandCell.innerHTML = '';
+                var errorBox = document.createElement('p');
+                errorBox.className = 'forward-history__sends-error-msg';
+                errorBox.textContent =
+                    '수신자별 발송 결과를 불러오지 못했습니다. 다시 펼쳐 주세요.';
+                expandCell.appendChild(errorBox);
+                // 캐시 표시를 하지 않아 다음 펼침에서 재시도된다.
+            });
+    }
+
+    /**
+     * EmailDailyReportRun 목록을 테이블로 렌더한다. 각 run 은 main 행 + 그
+     * 아래 hidden expand 행 2개로 구성되며, main 행 클릭 시 수신자별 발송
+     * 결과가 펼쳐진다. 모든 동적 텍스트는 textContent 로 주입해 XSS 를 막는다.
+     *
+     * @param {HTMLElement} tableArea 테이블을 그릴 컨테이너.
+     * @param {Array} runs /daily-report/runs 응답의 items 배열.
+     */
+    function renderDailyReportRunsTable(tableArea, runs) {
+        tableArea.innerHTML = '';
+
+        if (!runs || runs.length === 0) {
+            var emptyMessage = document.createElement('p');
+            emptyMessage.className = 'admin-state__muted';
+            emptyMessage.textContent = 'Daily Report 발송 이력이 없습니다.';
+            tableArea.appendChild(emptyMessage);
+            return;
+        }
+
+        var table = document.createElement('table');
+        table.className = 'forward-history__table';
+
+        var thead = document.createElement('thead');
+        var headerRow = document.createElement('tr');
+        var headers = [
+            '시각 (KST)', '트리거', '상태', '구간',
+            '스냅샷', '결과', ''
+        ];
+        headers.forEach(function (headerText) {
+            var th = document.createElement('th');
+            th.textContent = headerText;
+            headerRow.appendChild(th);
+        });
+        thead.appendChild(headerRow);
+        table.appendChild(thead);
+
+        var tbody = document.createElement('tbody');
+        runs.forEach(function (run) {
+            // ── main 행 ──
+            var mainRow = document.createElement('tr');
+            mainRow.className = 'forward-history__row';
+            mainRow.dataset.runId = String(run.id);
+
+            var timeTd = document.createElement('td');
+            timeTd.textContent = formatDateTimeKst(run.started_at) || '-';
+            mainRow.appendChild(timeTd);
+
+            var triggerTd = document.createElement('td');
+            triggerTd.textContent = formatDailyReportTrigger(run.trigger);
+            mainRow.appendChild(triggerTd);
+
+            var statusTd = document.createElement('td');
+            statusTd.textContent = formatDailyReportStatus(run.status);
+            mainRow.appendChild(statusTd);
+
+            var rangeTd = document.createElement('td');
+            rangeTd.textContent = buildDailyReportRangeText(run);
+            mainRow.appendChild(rangeTd);
+
+            var snapshotTd = document.createElement('td');
+            snapshotTd.textContent =
+                typeof run.snapshot_count === 'number'
+                    ? String(run.snapshot_count) + '건'
+                    : '-';
+            mainRow.appendChild(snapshotTd);
+
+            var resultTd = document.createElement('td');
+            // 에러 메시지가 있으면 tooltip 으로 전체를 노출.
+            if (run.error_message) {
+                resultTd.title = run.error_message;
+            }
+            resultTd.textContent = buildDailyReportResultText(run);
+            mainRow.appendChild(resultTd);
+
+            // 펼침 ▾ 버튼.
+            var toggleCell = document.createElement('td');
+            toggleCell.className = 'forward-history__toggle-cell';
+            var toggleButton = document.createElement('button');
+            toggleButton.type = 'button';
+            toggleButton.className = 'forward-history__toggle';
+            toggleButton.setAttribute('aria-label', '수신자별 결과 펼치기');
+            toggleButton.textContent = '▾';
+            toggleCell.appendChild(toggleButton);
+            mainRow.appendChild(toggleCell);
+
+            // ── expand 행 (기본 hidden) ──
+            var expandRow = document.createElement('tr');
+            expandRow.className = 'forward-history__expand-row';
+            expandRow.hidden = true;
+            var expandCell = document.createElement('td');
+            expandCell.className = 'forward-history__expand-cell';
+            // main 행의 컬럼 수(7)와 맞춘다.
+            expandCell.colSpan = 7;
+            expandRow.appendChild(expandCell);
+
+            // main 행 클릭(또는 ▾ 버튼) → expand toggle.
+            mainRow.addEventListener('click', function () {
+                toggleDailyReportRunExpand(mainRow, expandRow);
+            });
+
+            tbody.appendChild(mainRow);
+            tbody.appendChild(expandRow);
+        });
+        table.appendChild(tbody);
+
+        tableArea.appendChild(table);
+    }
+
+    /**
+     * 테이블 영역에 에러 박스를 그린다 (fetch 실패 시).
+     *
+     * @param {HTMLElement} tableArea 테이블 컨테이너.
+     * @param {string} message 에러 메시지.
+     */
+    function renderDailyReportRunsError(tableArea, message) {
+        tableArea.innerHTML = '';
+        var box = document.createElement('div');
+        box.className = 'admin-flash admin-flash--error';
+        box.setAttribute('role', 'alert');
+        box.textContent = 'Daily Report 발송 이력 조회 실패: ' + message;
+        tableArea.appendChild(box);
+    }
+
+    /**
+     * 「Daily Report 발송 이력」 섹션을 초기화한다.
+     *
+     * - 페이지 로드 시 GET /daily-report/runs?limit=50.
+     * - 새로고침 버튼 클릭 시 재조회.
+     * - 'daily-report-send-completed' window event 청취 시 자동 재조회
+     *   (Daily Report 카드의 테스트/지금 발송 직후 dispatch 됨).
+     *
+     * 페이지에 요소가 없으면 즉시 반환 — 멱등 안전.
+     */
+    function initDailyReportRunsSection() {
+        var tableArea =
+            document.getElementById('daily-report-runs-table-area');
+        if (!tableArea) {
+            return;
+        }
+        var refreshButton =
+            document.getElementById('daily-report-runs-refresh-button');
+
+        if (refreshButton) {
+            refreshButton.addEventListener('click', loadDailyReportRuns);
+        }
+        // 카드의 발송 완료 직후 신호 청취 (성공/실패 무관).
+        window.addEventListener(
+            'daily-report-send-completed', loadDailyReportRuns
+        );
+
+        // 페이지 진입 시 즉시 최초 로드.
+        loadDailyReportRuns();
+
+        /**
+         * GET /daily-report/runs 호출 후 테이블을 갱신한다.
+         */
+        function loadDailyReportRuns() {
+            if (refreshButton) {
+                refreshButton.disabled = true;
+            }
+
+            fetch(
+                DAILY_REPORT_RUNS_URL + '?limit=' + DAILY_REPORT_RUNS_LIMIT,
+                {
+                    method: 'GET',
+                    credentials: 'same-origin',
+                    headers: { 'Accept': 'application/json' }
+                }
+            )
+                .then(parseJsonResponse)
+                .then(function (result) {
+                    if (!result.resp.ok) {
+                        throw new Error(
+                            extractErrorMessage(result.resp, result.body)
+                        );
+                    }
+                    var items = (result.body && result.body.items) || [];
+                    renderDailyReportRunsTable(tableArea, items);
+                })
+                .catch(function (error) {
+                    renderDailyReportRunsError(
+                        tableArea, error.message || String(error)
+                    );
+                })
+                .then(function () {
+                    if (refreshButton) {
+                        refreshButton.disabled = false;
+                    }
+                });
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────
     // DOMContentLoaded — 페이지 전체 진입점
     // ──────────────────────────────────────────────────────────
 
@@ -832,5 +1784,7 @@
         initSettingsSection();
         initTestSendSection();
         initSendRunsSection();
+        initDailyReportSection();
+        initDailyReportRunsSection();
     });
 })();

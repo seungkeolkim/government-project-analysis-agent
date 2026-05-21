@@ -4,6 +4,16 @@ Phase A-1 (task 00104-7):
     ``build_plain_text_message`` — To / Subject / (옵션) From 헤더를 채우고
     ``set_content(body)`` 로 plain text 본문만 가진 EmailMessage 를 반환한다.
 
+Phase A-3 (task 00125-5, docs/phase_a3_design_note.md §6·§11):
+    단체 Daily Report 메일용 빌더 3종을 추가한다.
+
+    - ``build_daily_report_subject`` — 제목 (구간 KST 표기).
+    - ``build_daily_report_text_body`` — 헤더 + 요약 줄 + 5종 카테고리 섹션 +
+      footer 의 text/plain 본문. 빈 카테고리 섹션은 생략, 카테고리당 50건 cap +
+      \"외 N건\" 안내.
+    - ``build_daily_report_html_body`` — 위와 동일 구성의 HTML 본문. forward
+      빌더의 grayscale 인라인 CSS 패턴을 그대로 모방한다.
+
 Phase A-2 Part 2 (task 00109-2, docs/phase_a2_part2_design_note.md §3·§7·§8):
     공고 포워딩 메일용 빌더 4종을 추가한다.
 
@@ -37,11 +47,25 @@ Phase A-2 Part 2 (task 00109-2, docs/phase_a2_part2_design_note.md §3·§7·§8
 from __future__ import annotations
 
 import html
+from dataclasses import dataclass
 from email.message import EmailMessage
 from email.utils import formataddr
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.timezone import format_kst, now_kst, to_kst
+
+if TYPE_CHECKING:
+    # Phase A-3 (task 00125-5) daily report 빌더 시그니처에서만 쓰이는 forward
+    # type 들. runtime 에는 ``getattr`` 로 필드 접근만 하므로 import 가 필요
+    # 없고, 정적 타입 분석 / IDE 보조 목적으로만 노출한다. ``app.email.daily_report``
+    # 가 본 모듈을 import 하므로 (``build_announcement_detail_url``), runtime
+    # import 를 두면 순환 import 가 된다 — TYPE_CHECKING 가드가 그 사고를
+    # 방지한다.
+    from app.email.daily_report import (
+        AggregatedSnapshotPayload,
+        AggregationWindow,
+        AnnouncementSummary,
+    )
 
 
 def build_plain_text_message(
@@ -625,6 +649,383 @@ def build_forward_html_body(
     )
 
 
+# ──────────────────────────────────────────────────────────────
+# Phase A-3 (task 00125-5) — 단체 Daily Report 본문 빌더
+# ──────────────────────────────────────────────────────────────
+#
+# 디자인 결정 (docs/phase_a3_design_note.md §6·§11, phase_a3_prompt.md §4):
+#     - 인라인 CSS · 헤더 박스 · footer 패턴을 forward 빌더 그대로 모방하고
+#       grayscale 색상도 동일 (텍스트 #333 / 메타 박스 #f5f5f5 / 보조 #888·#999).
+#     - 5종 카테고리 라벨·이모지·dataclass 필드명 매핑은 본 모듈의
+#       ``_DAILY_REPORT_CATEGORY_DESCRIPTORS`` 한 자리에 모은다 — 본문 빌더가
+#       이 tuple 을 순회만 하면 되도록.
+#     - 빈 카테고리는 섹션 전체를 생략한다 (text/HTML 양쪽).
+#     - 카테고리당 50건 cap. 초과분은 끝에 ``"외 N건 — 대시보드에서 확인"`` 한 줄.
+#     - 한국어 날짜 표기는 KST 변환 후 ``YYYY-MM-DD HH:mm`` (subtask guidance).
+#     - URL 은 ``AnnouncementSummary.detail_url`` 을 그대로 사용 — 호출자
+#       (``aggregate_snapshots``)가 이미 ``build_announcement_detail_url`` 로
+#       조립해 채워 둔 값이다.
+
+
+# 카테고리 1종의 표시 메타데이터. ``AggregatedSnapshotPayload`` 의 dataclass
+# 필드명을 ``field_name`` 으로 가지고, 빌더는 ``getattr(payload, field_name)``
+# 으로 해당 카테고리의 ``AnnouncementSummary`` list 를 꺼낸다.
+@dataclass(frozen=True)
+class _DailyReportCategoryDescriptor:
+    """Daily report 본문 1개 카테고리의 표시 메타.
+
+    Attributes:
+        emoji: 헤더 / 요약 줄에 같이 노출되는 이모지 (예: ``"🆕"``).
+        label: 카테고리 섹션 헤더에 노출되는 한글 라벨 (예: ``"신규 공고"``).
+        short_label: 요약 줄에서 쓰이는 짧은 라벨 (예: ``"신규"``).
+        field_name: ``AggregatedSnapshotPayload`` 의 해당 카테고리 dataclass
+            필드명. 빌더가 ``getattr`` 로 list 를 꺼낼 때 사용한다.
+    """
+
+    emoji: str
+    label: str
+    short_label: str
+    field_name: str
+
+
+# 5종 카테고리 표시 순서 + 메타데이터 single source of truth. design note §3 의
+# 매핑 표 + prompt §4 의 본문 spec 을 합쳐 정의했다. 카테고리 추가/순서 변경은
+# 본 tuple 한 곳만 수정하면 본문 빌더가 자동 반영한다.
+_DAILY_REPORT_CATEGORY_DESCRIPTORS: tuple[_DailyReportCategoryDescriptor, ...] = (
+    _DailyReportCategoryDescriptor(
+        emoji="🆕", label="신규 공고", short_label="신규", field_name="new",
+    ),
+    _DailyReportCategoryDescriptor(
+        emoji="📝",
+        label="내용 변경",
+        short_label="변경",
+        field_name="content_changed",
+    ),
+    _DailyReportCategoryDescriptor(
+        emoji="✅",
+        label="접수예정 전이",
+        short_label="접수예정",
+        field_name="transitioned_to_received_scheduled",
+    ),
+    _DailyReportCategoryDescriptor(
+        emoji="▶",
+        label="접수중 전이",
+        short_label="접수중",
+        field_name="transitioned_to_receiving",
+    ),
+    _DailyReportCategoryDescriptor(
+        emoji="🚫",
+        label="마감 전이",
+        short_label="마감",
+        field_name="transitioned_to_closed",
+    ),
+)
+
+
+# 카테고리당 본문 표시 cap. 작업지시서 §4 + design note §11 명시. 초과분은
+# 섹션 끝에 ``"외 N건 — 대시보드에서 확인"`` 안내문만 1줄 들어간다. 본 상수가
+# 운영 중 조정 후보 (design note §15 의 사용자 결정 항목) — SystemSetting 화는
+# 미적용, 코드 상수 1곳만 바꾸면 즉시 반영된다.
+_DAILY_REPORT_CATEGORY_ITEM_CAP: int = 50
+
+
+# Daily report 의 KST 시각 표기 포맷. subtask guidance 명시 — 분 단위까지만
+# 표시하고 초는 생략한다 (메일 본문 readability).
+_DAILY_REPORT_DATETIME_FORMAT: str = "%Y-%m-%d %H:%M"
+
+
+# 메일 제목의 고정 prefix. forward 의 ``_FORWARD_SUBJECT_PREFIX`` 와 같은 톤.
+_DAILY_REPORT_SUBJECT_PREFIX: str = "[정부사업 모니터링] Daily Report — "
+
+
+def build_daily_report_subject(window: AggregationWindow) -> str:
+    """Daily report 메일 제목 1줄을 만든다.
+
+    형식 (prompt §4 예시 그대로):
+        ``[정부사업 모니터링] Daily Report — 2026-05-19 09:00 ~ 2026-05-20 09:00``
+
+    - 시각 부분은 ``window.from_dt`` / ``window.to_dt`` (UTC tz-aware) 를 KST
+      변환 후 ``YYYY-MM-DD HH:mm`` 포맷으로 표기.
+    - ``is_first_send`` 일 때도 제목은 같다. "최초 발송 — 직전 N일치 포함" 은
+      본문 헤더 박스에서만 노출 (제목까지 길게 늘리지 않음 — design note §6).
+
+    Args:
+        window: ``compute_aggregation_window`` 의 반환값.
+
+    Returns:
+        제목 문자열.
+    """
+    from_kst = format_kst(window.from_dt, _DAILY_REPORT_DATETIME_FORMAT)
+    to_kst = format_kst(window.to_dt, _DAILY_REPORT_DATETIME_FORMAT)
+    return f"{_DAILY_REPORT_SUBJECT_PREFIX}{from_kst} ~ {to_kst}"
+
+
+def _format_daily_report_deadline(deadline_at: Any) -> str:
+    """``AnnouncementSummary.deadline_at`` 을 본문 한 줄용 문자열로 변환.
+
+    ``None`` 이면 ``"-"`` 를 반환해 본문에서 빈 칸을 피한다. 값이 있으면 KST
+    변환 후 ``YYYY-MM-DD HH:mm`` 으로 표기 (guidance 의 한국어 날짜 표기 컨벤션).
+
+    Args:
+        deadline_at: UTC tz-aware ``datetime`` 또는 ``None``.
+
+    Returns:
+        ``"2026-06-01 12:00"`` 같은 문자열, 또는 ``"-"``.
+    """
+    if deadline_at is None:
+        return "-"
+    return format_kst(deadline_at, _DAILY_REPORT_DATETIME_FORMAT)
+
+
+def _build_daily_report_summary_line(payload: AggregatedSnapshotPayload) -> str:
+    """5종 카테고리의 건수를 한 줄로 요약하는 문자열을 만든다.
+
+    형식 (prompt §4 spec):
+        ``🆕 신규 N건 · 📝 변경 M건 · ✅ 접수예정 K건 · ▶ 접수중 L건 · 🚫 마감 P건``
+
+    빈 카테고리도 0건으로 한 줄에 포함된다 (운영자가 "0건이 정상" 인지 한눈에
+    파악할 수 있도록 — 섹션 자체는 생략하지만 요약 줄은 항상 5종 모두 노출).
+
+    Args:
+        payload: ``aggregate_snapshots`` 의 반환값.
+
+    Returns:
+        요약 줄 문자열 (text/HTML 양쪽에서 그대로 사용).
+    """
+    parts: list[str] = []
+    for descriptor in _DAILY_REPORT_CATEGORY_DESCRIPTORS:
+        items = getattr(payload, descriptor.field_name)
+        parts.append(f"{descriptor.emoji} {descriptor.short_label} {len(items)}건")
+    return " · ".join(parts)
+
+
+def build_daily_report_text_body(
+    *,
+    window: AggregationWindow,
+    payload: AggregatedSnapshotPayload,
+) -> str:
+    """Daily report 의 text/plain 본문을 만든다.
+
+    multipart/alternative 의 text 대체본용. 구성 (prompt §4):
+        1. 헤더 — 구간 표기(KST) + (옵션) 최초 발송 안내 + 누적 snapshot 수
+        2. 요약 줄 — 5종 카테고리 건수 한 줄
+        3. 5종 카테고리 섹션 — 카테고리당 ``label (N건)`` + 공고당 1줄.
+           빈 카테고리는 섹션 자체 생략. 50건 초과 시 끝에 ``외 N건`` 안내.
+        4. footer — 시스템 안내 + 수신 거부 안내
+
+    공고 1줄 형식 (prompt §4):
+        ``- {제목} ({detail_url}) — {발주기관 or '-'} — 마감일 {YYYY-MM-DD HH:mm or '-'}``
+
+    Args:
+        window: ``compute_aggregation_window`` 의 반환값.
+        payload: ``aggregate_snapshots`` 의 반환값.
+
+    Returns:
+        text/plain 본문 문자열 (끝에 개행 1개 추가).
+    """
+    lines: list[str] = ["[Daily Report — 공고 변화 누적 알림]", ""]
+
+    # ── 헤더 ─────────────────────────────────────────────────────
+    from_kst = format_kst(window.from_dt, _DAILY_REPORT_DATETIME_FORMAT)
+    to_kst = format_kst(window.to_dt, _DAILY_REPORT_DATETIME_FORMAT)
+    lines.append(f"구간 (KST): {from_kst} ~ {to_kst}")
+    if window.is_first_send:
+        # fallback_days 가 None 인 경우 ("0" 처럼 보일 수 있는 corner) 는
+        # compute_aggregation_window 가 보장상 첫 발송이면 항상 정수다 — 단순
+        # str() 변환으로 충분.
+        lines.append(
+            f"※ 최초 발송 — 직전 {window.fallback_days}일치 변화를 포함합니다."
+        )
+    lines.append(f"누적 snapshot: {window.snapshot_count}건")
+    lines.append("")
+
+    # ── 요약 줄 ──────────────────────────────────────────────────
+    lines.append(_build_daily_report_summary_line(payload))
+    lines.append("")
+
+    # ── 5종 카테고리 섹션 (빈 카테고리는 생략) ─────────────────────
+    for descriptor in _DAILY_REPORT_CATEGORY_DESCRIPTORS:
+        items: list[AnnouncementSummary] = getattr(payload, descriptor.field_name)
+        if not items:
+            continue
+        lines.append(f"{descriptor.emoji} {descriptor.label} ({len(items)}건)")
+        displayed_items = items[:_DAILY_REPORT_CATEGORY_ITEM_CAP]
+        for summary in displayed_items:
+            agency_text = summary.agency or "-"
+            deadline_text = _format_daily_report_deadline(summary.deadline_at)
+            lines.append(
+                f"- {summary.title} ({summary.detail_url}) — "
+                f"{agency_text} — 마감일 {deadline_text}"
+            )
+        overflow = len(items) - len(displayed_items)
+        if overflow > 0:
+            lines.append(f"  ... 외 {overflow}건 — 대시보드에서 확인")
+        lines.append("")
+
+    # ── footer ───────────────────────────────────────────────────
+    lines.extend(
+        [
+            "---",
+            "이 메일은 정부사업 모니터링 시스템에서 발송되었습니다.",
+            "수신 거부는 시스템 관리자에게 문의해 주세요.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _build_daily_report_category_section_html(
+    descriptor: _DailyReportCategoryDescriptor,
+    items: list[AnnouncementSummary],
+) -> str:
+    """HTML 본문에서 1개 카테고리 섹션을 만든다.
+
+    빈 list 이면 ``""`` 반환 — 호출자가 빈 문자열 그대로 본문에 붙여 섹션이
+    자연스럽게 사라지게 한다. 50건 cap 적용 + overflow 안내문은 ``<li>``
+    한 줄 + 회색 텍스트로 표시.
+
+    모든 동적 값 (title / agency / detail_url / deadline 문자열) 은
+    ``html.escape`` 로 이스케이프된다. ``detail_url`` 은 href 속성에도 들어가므로
+    ``quote=True`` 까지 적용.
+
+    Args:
+        descriptor: 본 카테고리의 표시 메타.
+        items: ``AnnouncementSummary`` list (이미 카테고리에 해당).
+
+    Returns:
+        섹션 1개의 HTML 조각 문자열. items 가 빈 list 이면 ``""``.
+    """
+    if not items:
+        return ""
+    displayed_items = items[:_DAILY_REPORT_CATEGORY_ITEM_CAP]
+    overflow = len(items) - len(displayed_items)
+
+    item_html_parts: list[str] = []
+    for summary in displayed_items:
+        safe_title = html.escape(summary.title)
+        safe_url = html.escape(summary.detail_url, quote=True)
+        safe_agency = html.escape(summary.agency or "-")
+        safe_deadline = html.escape(_format_daily_report_deadline(summary.deadline_at))
+        item_html_parts.append(
+            '<li style="margin:4px 0;font-size:14px;line-height:1.5;">'
+            f'<a href="{safe_url}" style="color:#333;text-decoration:underline;">'
+            f"{safe_title}</a>"
+            f' <span style="color:#888;">— {safe_agency} — '
+            f'마감일 {safe_deadline}</span></li>'
+        )
+
+    overflow_html = ""
+    if overflow > 0:
+        # 초과 안내는 list 내 마지막 li 로 노출 — 별도 블록 분리하지 않는다.
+        overflow_html = (
+            '<li style="margin:6px 0;font-size:13px;color:#888;'
+            'list-style:none;">'
+            f"… 외 {overflow}건 — 대시보드에서 확인"
+            "</li>"
+        )
+
+    # 라벨 옆에 카운트를 같이 노출 (text 본문과 1:1).
+    safe_label = html.escape(descriptor.label)
+    return (
+        '<div style="margin:20px 0;">'
+        '<h3 style="font-size:16px;margin:0 0 8px;color:#333;">'
+        f"{descriptor.emoji} {safe_label} ({len(items)}건)"
+        "</h3>"
+        '<ul style="margin:0;padding-left:20px;">'
+        f"{''.join(item_html_parts)}"
+        f"{overflow_html}"
+        "</ul></div>"
+    )
+
+
+def build_daily_report_html_body(
+    *,
+    window: AggregationWindow,
+    payload: AggregatedSnapshotPayload,
+) -> str:
+    """Daily report 의 text/html 본문을 만든다.
+
+    multipart/alternative 의 HTML 대체본용. forward 빌더의 grayscale 인라인 CSS
+    패턴 (텍스트 #333 / 메타 박스 #f5f5f5 / 보조 #888·#999) 을 그대로 모방한다.
+    외부 폰트/CDN 없음, 최대 너비 600px 1열 레이아웃, system-ui/sans-serif fallback.
+
+    구성 (위→아래):
+        1. h2 제목 ("Daily Report")
+        2. 메타 박스 — 구간(KST) / (옵션) 최초 발송 안내 / 누적 snapshot 수
+        3. 요약 줄 (text 본문과 동일 문자열)
+        4. 5종 카테고리 섹션 (빈 카테고리 자동 생략, 50건 cap + 외 N건)
+        5. footer — hr + 회색 보조 텍스트 2줄
+
+    모든 외부 입력은 ``html.escape`` 로 이스케이프된다 — 공고 제목 / 발주기관 /
+    detail_url (quote=True) / 마감일 문자열 모두.
+
+    Args:
+        window: ``compute_aggregation_window`` 의 반환값.
+        payload: ``aggregate_snapshots`` 의 반환값.
+
+    Returns:
+        인라인 CSS 가 적용된 완결 HTML 문서 문자열.
+    """
+    from_kst = format_kst(window.from_dt, _DAILY_REPORT_DATETIME_FORMAT)
+    to_kst = format_kst(window.to_dt, _DAILY_REPORT_DATETIME_FORMAT)
+
+    # ── 메타 박스 행 ───────────────────────────────────────────
+    meta_rows = [
+        _html_meta_row(
+            "구간 (KST)", html.escape(f"{from_kst} ~ {to_kst}"),
+        ),
+        _html_meta_row(
+            "누적 snapshot", html.escape(f"{window.snapshot_count}건"),
+        ),
+    ]
+    if window.is_first_send:
+        meta_rows.append(
+            _html_meta_row(
+                "최초 발송",
+                html.escape(f"직전 {window.fallback_days}일치 변화 포함"),
+            )
+        )
+
+    # ── 요약 줄 ──────────────────────────────────────────────
+    summary_line = html.escape(_build_daily_report_summary_line(payload))
+
+    # ── 5종 카테고리 섹션 — 빈 카테고리는 ``""`` 가 합쳐져 자연스럽게 사라진다.
+    section_htmls = [
+        _build_daily_report_category_section_html(
+            descriptor, getattr(payload, descriptor.field_name)
+        )
+        for descriptor in _DAILY_REPORT_CATEGORY_DESCRIPTORS
+    ]
+
+    return (
+        "<!DOCTYPE html>"
+        '<html lang="ko"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        "</head><body style=\"margin:0;padding:0;background:#ffffff;\">"
+        '<div style="max-width:600px;margin:0 auto;padding:24px;'
+        "font-family:system-ui,-apple-system,'Segoe UI',sans-serif;"
+        'color:#333;line-height:1.6;">'
+        # 1. 헤더 제목
+        '<h2 style="font-size:20px;margin:0 0 16px;">Daily Report</h2>'
+        # 2. 메타 박스
+        '<table style="width:100%;background:#f5f5f5;border-radius:6px;'
+        'padding:12px 16px;font-size:14px;border-collapse:collapse;">'
+        f"{''.join(meta_rows)}"
+        "</table>"
+        # 3. 요약 줄
+        '<div style="margin:16px 0;font-size:14px;color:#333;">'
+        f"{summary_line}</div>"
+        # 4. 5종 카테고리 섹션
+        f"{''.join(section_htmls)}"
+        # 5. footer
+        '<hr style="border:none;border-top:1px solid #e0e0e0;margin:24px 0;">'
+        '<div style="font-size:12px;color:#999;">'
+        "이 메일은 정부사업 모니터링 시스템에서 발송되었습니다.<br>"
+        "수신 거부는 시스템 관리자에게 문의해 주세요."
+        "</div>"
+        "</div></body></html>"
+    )
+
+
 def _html_meta_row(label: str, value_html: str) -> str:
     """HTML 메타 박스의 ``<tr>`` 한 행을 만든다.
 
@@ -647,6 +1048,9 @@ def _html_meta_row(label: str, value_html: str) -> str:
 
 __all__ = [
     "build_announcement_detail_url",
+    "build_daily_report_html_body",
+    "build_daily_report_subject",
+    "build_daily_report_text_body",
     "build_default_forward_subject",
     "build_forward_html_body",
     "build_forward_text_body",
