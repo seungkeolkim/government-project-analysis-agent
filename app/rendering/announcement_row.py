@@ -24,6 +24,21 @@
     제거하면 항목 사이 간격이 모두 사라지기 때문이다. ``<table>/<td>`` 는 메일
     클라이언트가 안정적으로 지원하며, 셀별 명시적 ``padding`` 으로 간격을 보장한다.
 
+컬럼 최소 너비 정책 (task 00140):
+    일부 메일 클라이언트가 ``<td>`` 의 ``white-space:nowrap`` 을 제거하면
+    title_cell 의 ``width:100%`` 가 나머지 셀을 최소 글자 폭까지 눌러 상태·날짜
+    문자가 세로로 한 글자씩 줄바꿈된다. 이를 방지하기 위해 상태 셀·날짜 셀에
+    ``min-width`` (px 절대 단위)를 추가했다:
+
+        - 상태 셀(status_cell): ``min-width:160px`` — 전이 행의 '배지 + → + 배지'
+          조합이 한 줄에 들어가도록 크기 산정 (12px 폰트 기준 '접수예정 → 접수중'
+          ≈ 150px + 여유). 변경 전: 한 글자씩 줄바꿈 / 변경 후: 한 줄 표시.
+        - 날짜 셀(dates_cell): ``min-width:185px`` — '접수 YYYY-MM-DD HH:MM:SS'
+          (ANNOUNCEMENT_ROW_DATETIME_FORMAT) 한 줄 기준 (≈ 163px + 여유).
+          변경 전: 날짜 문자열 줄바꿈 위험 / 변경 후: 한 줄 보장.
+        - 공고명 셀(title_cell): ``min-width:80px`` — 줄바꿈을 허용하면서 완전 붕괴만
+          방지. 상대 크기(``width:100%``)는 유지해 남은 공간을 차지한다.
+
 의존 방향:
     본 모듈은 ``app.timezone`` 과 표준 라이브러리만 import 한다. ``app.web`` /
     ``app.email`` 어느 쪽도 import 하지 않으므로 두 레이어 모두 순환 import
@@ -330,15 +345,17 @@ def render_announcement_row_html(
     else:
         status_inner = _render_status_badge(row.status_label, row.status_key)
 
+    # task 00140: min-width:160px 로 전이 행 '배지 → 배지' 조합까지 한 줄 보장
     status_cell = (
-        '<td style="padding:6px 4px;white-space:nowrap;vertical-align:middle;">'
+        '<td style="padding:6px 4px;white-space:nowrap;vertical-align:middle;min-width:160px;">'
         + status_inner
         + "</td>"
     )
 
-    # 3. 공고명 셀 — width:100% 로 남은 가변 폭을 차지한다.
+    # 3. 공고명 셀 — width:100% 로 남은 가변 폭을 차지하며, 줄바꿈을 허용한다.
+    #    min-width:80px 는 완전 붕괴(0px) 방지용 최소치이다.
     title_cell = (
-        '<td style="padding:6px 8px;width:100%;vertical-align:middle;">'
+        '<td style="padding:6px 8px;width:100%;vertical-align:middle;min-width:80px;">'
         + f'<span style="color:#111827;">{html.escape(row.title)}</span>'
         + "</td>"
     )
@@ -360,12 +377,13 @@ def render_announcement_row_html(
     else:
         duplicate_cell = ""
 
-    # 5. 접수·마감 일시 셀 — 우측 정렬, 줄바꿈 금지.
-    #    _render_dates_group 이 반환하는 두 <span> 사이 간격은 접수 span 의
-    #    margin-right 로 보장된다.
+    # 5. 접수·마감 일시 셀 — 우측 정렬.
+    #    _render_dates_group 이 반환하는 두 <span> 은 각각 white-space:nowrap 을
+    #    가지고, td 의 min-width:185px 가 날짜 문자열 한 줄('접수 YYYY-MM-DD
+    #    HH:MM:SS')이 줄바꿈 없이 들어가도록 최소 너비를 보장한다 (task 00140).
     dates_cell = (
         '<td style="padding:6px 6px;white-space:nowrap;vertical-align:middle;'
-        'text-align:right;">'
+        'text-align:right;min-width:185px;">'
         + _render_dates_group(row.received_at, row.deadline_at)
         + "</td>"
     )

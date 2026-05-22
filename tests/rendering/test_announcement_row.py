@@ -229,3 +229,40 @@ def test_row_element_order_matches_dashboard_expand_row() -> None:
         < html_fragment.index("순서 검증 공고")
         < html_fragment.index("접수 2026")
     )
+
+
+# ── (e) 컬럼 최소 너비 — task 00140 ─────────────────────────────
+
+
+def test_status_cell_has_min_width_px() -> None:
+    """상태 셀 <td> 에 px 절대단위 min-width:160px 가 인라인으로 지정된다 (task 00140).
+
+    일부 메일 클라이언트가 white-space:nowrap 을 <td> 에서 제거할 때 status_cell 이
+    최소 글자 폭까지 눌려 한 글자씩 줄바꿈되는 현상을 방지한다. min-width:160px 는
+    전이 행의 '배지 + → + 배지' 조합(약 150px)이 한 줄에 들어갈 수 있는 기준값이다.
+    """
+    html_fragment = render_announcement_row_html(_make_view())
+    assert "min-width:160px" in html_fragment
+
+
+def test_status_cell_transition_row_has_min_width_px() -> None:
+    """전이 행에서도 상태 셀 <td> 에 min-width:160px 가 유지된다 (task 00140)."""
+    html_fragment = render_announcement_row_html(
+        _make_view(
+            status_label="접수중",
+            status_key="receiving",
+            transition_from="접수예정",
+            transition_from_key="scheduled",
+        )
+    )
+    assert "min-width:160px" in html_fragment
+
+
+def test_dates_cell_has_min_width_px() -> None:
+    """날짜 셀 <td> 에 px 절대단위 min-width:185px 가 인라인으로 지정된다 (task 00140).
+
+    min-width:185px 는 '접수 YYYY-MM-DD HH:MM:SS' 형식(ANNOUNCEMENT_ROW_DATETIME_FORMAT)
+    한 줄이 12px 폰트 기준 줄바꿈 없이 표시될 수 있는 기준값이다.
+    """
+    html_fragment = render_announcement_row_html(_make_view())
+    assert "min-width:185px" in html_fragment
