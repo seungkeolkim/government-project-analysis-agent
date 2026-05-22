@@ -421,6 +421,62 @@ def test_put_daily_report_settings_disabled_with_empty_cron_ok(
     assert response.status_code == 200, response.text
 
 
+def test_put_daily_report_settings_enable_toggle_preserves_cron_and_recipient(
+    admin_client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[task 00144] '활성화' 토글 PUT 은 enabled 만 바꾸고 cron/test_recipient 를 보존한다.
+
+    FE 의 'Daily Report 활성화' 체크박스는 변경 즉시 현재 cron/test_recipient
+    값을 함께 실어 PUT 한다. 본 테스트는 그 흐름을 모사한다 — 먼저 cron 과
+    test_recipient 를 저장해 두고, enabled 만 True 로 바꾼 PUT 을 보낸 뒤
+    cron/test_recipient SystemSetting 이 그대로 유지되는지 확인한다.
+    """
+    monkeypatch.setattr(
+        "app.web.routes.admin_email.register_daily_report_cron_schedule",
+        lambda *args, **kwargs: None,
+    )
+
+    # 1. 비활성 상태로 cron + test_recipient 를 먼저 저장한다.
+    initial_response = admin_client.put(
+        "/api/admin/email/daily-report/settings",
+        json={
+            "enabled": False,
+            "cron_expression": "15 8 * * 1-5",
+            "test_recipient": "ops@example.com",
+        },
+    )
+    assert initial_response.status_code == 200, initial_response.text
+
+    # 2. FE 토글 모사 — 현재 cron/test_recipient 값을 그대로 싣고 enabled 만 True.
+    toggle_response = admin_client.put(
+        "/api/admin/email/daily-report/settings",
+        json={
+            "enabled": True,
+            "cron_expression": "15 8 * * 1-5",
+            "test_recipient": "ops@example.com",
+        },
+    )
+    assert toggle_response.status_code == 200, toggle_response.text
+    toggle_data = toggle_response.json()
+    assert toggle_data["enabled"] is True
+    # cron / test_recipient 는 토글 전 값 그대로 보존.
+    assert toggle_data["cron_expression"] == "15 8 * * 1-5"
+    assert toggle_data["test_recipient"] == "ops@example.com"
+
+    # SystemSetting DB 에도 enabled 만 바뀌고 나머지는 보존됐는지 확인.
+    db_session.expire_all()
+    assert get_setting(db_session, SETTING_KEY_DAILY_REPORT_ENABLED) == "true"
+    assert (
+        get_setting(db_session, SETTING_KEY_DAILY_REPORT_CRON) == "15 8 * * 1-5"
+    )
+    assert (
+        get_setting(db_session, SETTING_KEY_DAILY_REPORT_TEST_RECIPIENT)
+        == "ops@example.com"
+    )
+
+
 # ──────────────────────────────────────────────────────────────
 # 3-b. PUT /daily-report/settings — 실제 스케줄러 통합 (task 00128 회귀)
 # ──────────────────────────────────────────────────────────────

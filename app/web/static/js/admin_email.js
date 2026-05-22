@@ -919,7 +919,8 @@
      * 「Daily Report」 카드를 초기화한다.
      *
      * - 페이지 로드 시 GET /daily-report/settings 로 현재 값을 받아 카드를 채운다.
-     * - [저장] 클릭 → PUT /daily-report/settings (enabled / cron / test_recipient).
+     * - '활성화' 체크박스 change → 즉시 PUT /daily-report/settings (enabled 토글).
+     * - [저장] 클릭(폼 submit) → PUT /daily-report/settings — cron 표현식 저장용.
      * - [테스트 발송] 클릭 → POST /daily-report/test-send (현재 받는 사람 입력값).
      * - [지금 발송] 클릭 → window.confirm 후 POST /daily-report/send-now.
      *
@@ -957,9 +958,14 @@
         loadDailyReportSettings();
 
         // ── 이벤트 바인딩 ─────────────────────────────────────
+        // [저장] 버튼(폼 submit) — 사용자 관점에서는 cron 표현식 저장 버튼.
         form.addEventListener('submit', function (event) {
             event.preventDefault();
             saveDailyReportSettings();
+        });
+        // 'Daily Report 활성화' 체크박스 — change 즉시 PUT 으로 서버 반영.
+        enabledCheckbox.addEventListener('change', function () {
+            saveDailyReportEnabled(enabledCheckbox.checked);
         });
         testSendButton.addEventListener('click', function () {
             performDailyReportTestSend();
@@ -1235,6 +1241,65 @@
                 })
                 .then(function () {
                     saveButton.disabled = false;
+                });
+        }
+
+        /**
+         * 'Daily Report 활성화' 체크박스 변경 시 즉시 PUT /daily-report/settings
+         * 로 저장한다 ('메일 전송 기능 활성화' 토글의 saveSendEnabled 미러링).
+         *
+         * 현재 카드의 cron_expression / test_recipient 입력값을 그대로 함께
+         * 보내고 enabled 만 새 값으로 교체한다 — 토글로 바뀌는 값은 enabled
+         * 뿐이며, 다른 두 필드는 현재값 그대로라 덮어쓰기 부작용이 없다.
+         *
+         * 실패 시(특히 활성화하려는데 cron 이 비어 있어 서버 422 가 떨어지는
+         * 경우) 체크박스를 변경 전 상태로 되돌리고 error flash 로 사유를 보여
+         * 준다. 요청 중에는 체크박스를 disabled 로 막아 중복 토글을 방지한다.
+         *
+         * @param {boolean} newEnabledValue 저장할 새 활성화 여부.
+         */
+        function saveDailyReportEnabled(newEnabledValue) {
+            clearDailyReportFlash();
+            enabledCheckbox.disabled = true;
+
+            var requestBody = {
+                enabled: newEnabledValue,
+                cron_expression: cronInput.value.trim(),
+                test_recipient: testRecipientInput.value.trim()
+            };
+
+            fetch(DAILY_REPORT_SETTINGS_URL, {
+                method: 'PUT',
+                credentials: 'same-origin',
+                headers: {
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(requestBody)
+            })
+                .then(parseJsonResponse)
+                .then(function (result) {
+                    if (!result.resp.ok) {
+                        throw new Error(
+                            extractErrorMessage(result.resp, result.body)
+                        );
+                    }
+                    applyDailyReportSettings(result.body || {});
+                    var stateText = newEnabledValue ? '활성화' : '비활성화';
+                    showDailyReportFlash(
+                        'success', 'Daily Report 가 ' + stateText + '되었습니다.'
+                    );
+                })
+                .catch(function (error) {
+                    // PUT 실패 시 체크박스를 이전 상태로 복원.
+                    enabledCheckbox.checked = !newEnabledValue;
+                    showDailyReportFlash(
+                        'error',
+                        'Daily Report 설정 저장 실패: ' + (error.message || error)
+                    );
+                })
+                .then(function () {
+                    enabledCheckbox.disabled = false;
                 });
         }
 
