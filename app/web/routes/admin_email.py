@@ -74,7 +74,7 @@ from app.email.daily_report import (
     TRIGGER_MANUAL_ADMIN,
     TRIGGER_MANUAL_TEST,
     DailyReportRequest,
-    collect_admin_recipient_emails,
+    collect_recipient_emails,
     prepare_and_send_daily_report,
 )
 from app.email.gate import EmailSendingDisabledError, is_email_sending_enabled
@@ -669,13 +669,13 @@ def get_email_send_runs(
 #
 # 엔드포인트:
 #   GET  /api/admin/email/daily-report/settings
-#       → 현재 설정 + 다음 실행 시각 + admin 수신자 명단 (eligible 플래그 포함)
+#       → 현재 설정 + 다음 실행 시각 + 수신자 명단 (eligible 플래그 포함)
 #   PUT  /api/admin/email/daily-report/settings
 #       → 4 SystemSetting 저장 + APScheduler 잡 자동 등록/제거
 #   POST /api/admin/email/daily-report/test-send
 #       → 단일 임의 주소로 trigger=manual_test 발송 (last_sent_at 갱신 안 함)
 #   POST /api/admin/email/daily-report/send-now
-#       → 현재 시점 is_admin email 자동 수집 후 trigger=manual_admin 발송
+#       → 현재 시점 발송 대상 사용자 email 자동 수집 후 trigger=manual_admin 발송
 #   GET  /api/admin/email/daily-report/runs
 #       → EmailDailyReportRun 최근 N건 (default 50, max 200)
 #   GET  /api/admin/email/daily-report/runs/{run_id}/sends
@@ -723,11 +723,11 @@ def _validate_cron_expression(cron_expression: str) -> str:
     return stripped
 
 
-class AdminRecipientInfo(BaseModel):
-    """GET /daily-report/settings 응답의 admin 수신자 상세 1건.
+class RecipientInfo(BaseModel):
+    """GET /daily-report/settings 응답의 수신자 상세 1건.
 
     UI 의 "자세히 보기" expand 영역에 표시되며, 운영자가 누가 발송 대상인지
-    한눈에 확인할 수 있게 한다. ``eligible=False`` 인 admin 은 발송 명단에서
+    한눈에 확인할 수 있게 한다. ``eligible=False`` 인 사용자는 발송 명단에서
     제외된다 (이메일 미설정 또는 ``email_subscribed=False``).
     """
 
@@ -745,10 +745,10 @@ class DailyReportSettingsOut(BaseModel):
     last_sent_at: str | None
     test_recipient: str
     next_run_at: str | None
-    admin_emails: list[AdminRecipientInfo]
-    admin_count_eligible: int
-    admin_count_without_email: int
-    admin_count_unsubscribed: int
+    recipients: list[RecipientInfo]
+    recipient_count_eligible: int
+    recipient_count_without_email: int
+    recipient_count_unsubscribed: int
 
 
 class DailyReportSettingsIn(BaseModel):
@@ -867,32 +867,32 @@ def _load_daily_report_setting_values(session) -> dict[str, Any]:
     }
 
 
-def _build_admin_recipient_overview(
+def _build_recipient_overview(
     session,
-) -> tuple[list[AdminRecipientInfo], int, int, int]:
-    """``is_admin=True`` 사용자의 발송 적합성 매트릭스를 만든다.
+) -> tuple[list[RecipientInfo], int, int, int]:
+    """전체 사용자의 발송 적합성 매트릭스를 만든다.
 
-    디자인 노트 §5 결정 (eligible = email NOT NULL/'' AND email_subscribed=True)
-    을 응답 직렬화 직전에 한 번 더 평가한다. ``collect_admin_recipient_emails``
+    수신 대상 정책 (eligible = email NOT NULL/'' AND email_subscribed=True)
+    을 응답 직렬화 직전에 한 번 더 평가한다. ``collect_recipient_emails``
     가 실제 발송 대상 email list 만 반환하는 데 비해, 본 헬퍼는 운영자가 UI
-    에서 \"누가 빠지는지\" 까지 보기 위해 전수 admin 의 상태를 반환한다.
+    에서 \"누가 빠지는지\" 까지 보기 위해 전수 사용자의 상태를 반환한다.
 
     Returns:
-        ``(admin_emails, eligible_count, without_email_count, unsubscribed_count)``.
-        admin_emails 는 username 알파벳순으로 정렬돼 UI 표시 순서를 안정화한다.
+        ``(recipients, eligible_count, without_email_count, unsubscribed_count)``.
+        recipients 는 username 알파벳순으로 정렬돼 UI 표시 순서를 안정화한다.
     """
-    statement = select(User).where(User.is_admin.is_(True)).order_by(User.username.asc())
-    admin_users = list(session.execute(statement).scalars().all())
+    statement = select(User).order_by(User.username.asc())
+    users = list(session.execute(statement).scalars().all())
 
-    admin_emails: list[AdminRecipientInfo] = []
+    recipients: list[RecipientInfo] = []
     eligible_count = 0
     without_email_count = 0
     unsubscribed_count = 0
-    for admin in admin_users:
-        # email 컬럼은 nullable + 빈 문자열도 \"미설정\" 으로 간주 (collect_admin_recipient_emails
+    for user in users:
+        # email 컬럼은 nullable + 빈 문자열도 \"미설정\" 으로 간주 (collect_recipient_emails
         # 의 SQL 필터와 동일 시맨틱).
-        has_email = bool(admin.email and admin.email.strip())
-        subscribed = bool(admin.email_subscribed)
+        has_email = bool(user.email and user.email.strip())
+        subscribed = bool(user.email_subscribed)
         eligible = has_email and subscribed
         if eligible:
             eligible_count += 1
@@ -900,16 +900,16 @@ def _build_admin_recipient_overview(
             without_email_count += 1
         if has_email and not subscribed:
             unsubscribed_count += 1
-        admin_emails.append(
-            AdminRecipientInfo(
-                username=admin.username,
-                email=admin.email if has_email else None,
+        recipients.append(
+            RecipientInfo(
+                username=user.username,
+                email=user.email if has_email else None,
                 email_subscribed=subscribed,
                 eligible=eligible,
             )
         )
 
-    return admin_emails, eligible_count, without_email_count, unsubscribed_count
+    return recipients, eligible_count, without_email_count, unsubscribed_count
 
 
 def _next_run_at_iso() -> str | None:
@@ -926,24 +926,24 @@ def _next_run_at_iso() -> str | None:
 
 
 def _build_daily_report_settings_response(session) -> DailyReportSettingsOut:
-    """SystemSetting + admin 명단 + next_run_at 을 한 번에 묶어 GET 응답으로 직렬화."""
+    """SystemSetting + 수신자 명단 + next_run_at 을 한 번에 묶어 GET 응답으로 직렬화."""
     values = _load_daily_report_setting_values(session)
     (
-        admin_emails,
+        recipients,
         eligible_count,
         without_email_count,
         unsubscribed_count,
-    ) = _build_admin_recipient_overview(session)
+    ) = _build_recipient_overview(session)
     return DailyReportSettingsOut(
         enabled=values["enabled"],
         cron_expression=values["cron_expression"],
         last_sent_at=values["last_sent_at"],
         test_recipient=values["test_recipient"],
         next_run_at=_next_run_at_iso(),
-        admin_emails=admin_emails,
-        admin_count_eligible=eligible_count,
-        admin_count_without_email=without_email_count,
-        admin_count_unsubscribed=unsubscribed_count,
+        recipients=recipients,
+        recipient_count_eligible=eligible_count,
+        recipient_count_without_email=without_email_count,
+        recipient_count_unsubscribed=unsubscribed_count,
     )
 
 
@@ -1090,12 +1090,13 @@ def _result_to_response(result: Any) -> DailyReportRunResult:
 def get_daily_report_settings(
     current_user: User = Depends(admin_user_required),
 ) -> DailyReportSettingsOut:
-    """Daily Report 설정 + admin 수신자 명단 + 다음 실행 시각을 한 번에 반환한다.
+    """Daily Report 설정 + 수신자 명단 + 다음 실행 시각을 한 번에 반환한다.
 
-    응답 스키마는 디자인 노트 §9 / phase_a3_prompt.md §7 그대로:
+    응답 스키마는 디자인 노트 §9 / phase_a3_prompt.md §7 기준 (task 00144 에서
+    admin 한정 → 전체 사용자로 확장):
         - enabled / cron_expression / last_sent_at / test_recipient (SystemSetting)
         - next_run_at (APScheduler ``next_run_time``, KST tz-aware ISO-8601)
-        - admin_emails (전수 admin 의 username/email/email_subscribed/eligible)
+        - recipients (전수 사용자의 username/email/email_subscribed/eligible)
         - 카운터 3종 (eligible / without_email / unsubscribed)
     """
     logger.debug(
@@ -1306,14 +1307,14 @@ def post_daily_report_test_send(
 def post_daily_report_send_now(
     current_user: User = Depends(admin_user_required),
 ) -> DailyReportRunResult:
-    """현재 시점 ``is_admin=True`` 사용자 email 을 수집해 즉시 발송한다 (manual_admin).
+    """현재 시점 발송 대상 사용자 email 을 수집해 즉시 발송한다 (manual_admin).
 
-    수신자 명단은 ``collect_admin_recipient_emails`` (디자인 노트 §5: is_admin
-    AND email NOT NULL/'' AND email_subscribed=True). 발송 성공이면 last_sent_at
-    이 갱신되어 다음 scheduled 잡의 누적 구간 시작점이 \"방금\" 으로 당겨진다 —
-    같은 윈도우 중복 발송 방지.
+    수신자 명단은 ``collect_recipient_emails`` (email NOT NULL/'' AND
+    email_subscribed=True 인 전체 사용자 — task 00144 에서 admin 제약 제거).
+    발송 성공이면 last_sent_at 이 갱신되어 다음 scheduled 잡의 누적 구간
+    시작점이 \"방금\" 으로 당겨진다 — 같은 윈도우 중복 발송 방지.
 
-    빈 수신자 케이스 (이메일이 설정된 admin 0명) 는 ``prepare_and_send_daily_report``
+    빈 수신자 케이스 (수신 대상 사용자 0명) 는 ``prepare_and_send_daily_report``
     가 FAILED + ``error_message='발송 대상 수신자가 없습니다.'`` 로 commit + 200
     응답으로 받아낸다 (HTTP 422 가 아니라 200 + status=failed 인 이유: 사용자는
     이 시점에 \"발송 시도 이력\" 을 남기길 원할 수 있기 때문).
@@ -1324,8 +1325,8 @@ def post_daily_report_send_now(
     )
 
     with session_scope() as session:
-        # 1. 수신자 수집 — design note §5 정책 (eligible admin email 만).
-        recipients = collect_admin_recipient_emails(session)
+        # 1. 수신자 수집 — 유효 이메일 + 수신 동의 사용자 전체.
+        recipients = collect_recipient_emails(session)
 
         # 2. transport 구성 + max_retry_count.
         try:

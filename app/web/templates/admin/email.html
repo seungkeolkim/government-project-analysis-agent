@@ -45,7 +45,7 @@
 
 {# ── 섹션 1: Daily Report 카드 (Phase A-3 / task 00125-9) ──────
    마지막 발송 이후 누적된 공고 변화(snapshot diff)를 cron 으로 예약한
-   시각에 admin 사용자에게 자동 발송하는 기능의 운영 카드.
+   시각에 메일 수신에 동의한 사용자에게 자동 발송하는 기능의 운영 카드.
 
    admin_email.js 의 initDailyReportSection() 이 아래 endpoint 들을 호출한다:
      - GET  /api/admin/email/daily-report/settings   (진입 시 카드 채움)
@@ -58,8 +58,8 @@
     <h3 class="admin-section__heading">Daily Report</h3>
     <p class="admin-state__muted">
         마지막 발송 이후 누적된 공고 변화를 정리해, cron 으로 예약한 시각에
-        admin 사용자에게 자동으로 메일을 보냅니다. 위 「메일 발송 설정」 이
-        비활성화되어 있으면 예약 발송과 테스트 발송 모두 차단됩니다.
+        메일 수신에 동의한 사용자에게 자동으로 메일을 보냅니다. 위 「메일 발송
+        설정」 이 비활성화되어 있으면 예약 발송과 테스트 발송 모두 차단됩니다.
     </p>
 
     {# flash 박지 — initDailyReportSection 이 설정 저장/조회 결과를 그린다. #}
@@ -98,12 +98,12 @@
             마지막 발송: <span id="daily-report-last-sent">—</span>
         </p>
 
-        {# 수신자 요약 — admin 수 / 미설정 경고. JS 가 동적으로 그린다. #}
+        {# 수신자 요약 — 전체 사용자 수 / 미설정 경고. JS 가 동적으로 그린다. #}
         <div id="daily-report-recipients-summary"></div>
 
-        {# 수신자 admin 목록 자세히 보기 — 네이티브 details/summary expand. #}
+        {# 수신자 목록 자세히 보기 — 네이티브 details/summary expand. #}
         <details class="daily-report-recipients">
-            <summary>수신자 admin 목록 자세히 보기</summary>
+            <summary>수신자 목록 자세히 보기</summary>
             <div id="daily-report-recipients-detail"></div>
         </details>
 
@@ -131,11 +131,11 @@
             「테스트 발송」 은 현재 입력값으로 즉시 1통을 보냅니다.
         </p>
 
-        {# 지금 발송 + 저장 — 지금 발송은 admin 전원에게 즉시 발송(manual_admin). #}
+        {# 지금 발송 + 저장 — 지금 발송은 수신 대상 전원에게 즉시 발송(manual_admin). #}
         <div class="daily-report-actions">
             <button id="daily-report-send-now-button"
                     type="button"
-                    class="admin-button admin-button--secondary">📤 지금 admin 에게만 발송</button>
+                    class="admin-button admin-button--secondary">📤 지금 발송</button>
             <button id="daily-report-settings-save"
                     type="submit"
                     class="admin-button admin-button--primary">저장</button>

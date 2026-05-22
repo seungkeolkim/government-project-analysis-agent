@@ -1,10 +1,12 @@
-"""``prepare_and_send_daily_report`` + ``collect_admin_recipient_emails`` 단위 테스트.
+"""``prepare_and_send_daily_report`` + ``collect_recipient_emails`` 단위 테스트.
 
-검증 대상 (subtask 00125-6 의 acceptance_criteria + design note §5·§7 + prompt §5):
+검증 대상 (subtask 00125-6 의 acceptance_criteria + design note §7 + prompt §5,
+task 00144 에서 수신자 admin 제약 제거):
 
-    A. ``collect_admin_recipient_emails`` — admin email 수집 정책.
-        A-1. is_admin=True + email 정상 + email_subscribed=True 만 포함.
-        A-2. email NULL / 빈 문자열 / email_subscribed=False / is_admin=False 모두 제외.
+    A. ``collect_recipient_emails`` — 수신자 수집 정책 (admin 여부 무관).
+        A-1. email 정상 + email_subscribed=True 인 전체 사용자 포함
+             (비-admin 사용자도 포함, admin 이라도 미설정/수신거부면 제외).
+        A-2. email NULL / 빈 문자열 / email_subscribed=False 는 모두 제외.
         A-3. 중복 제거 + ASCII case-insensitive 정렬.
 
     B. ``prepare_and_send_daily_report`` — 트랜잭션 3단계 / 게이트 / 정책표.
@@ -62,7 +64,7 @@ from app.email.daily_report import (
     TRIGGER_MANUAL_TEST,
     TRIGGER_SCHEDULED,
     DailyReportRequest,
-    collect_admin_recipient_emails,
+    collect_recipient_emails,
     prepare_and_send_daily_report,
 )
 from app.email.gate import EmailSendingDisabledError
@@ -119,7 +121,7 @@ def _enable_email_sending(db_session: Session) -> None:
 # ──────────────────────────────────────────────────────────────
 
 
-def _insert_admin_user(
+def _insert_user(
     session: Session,
     *,
     username: str,
@@ -129,7 +131,7 @@ def _insert_admin_user(
 ) -> User:
     """테스트용 ``User`` row 1건을 생성한다.
 
-    is_admin / email / email_subscribed 의 조합으로 admin 수신자 정책의 다양한
+    is_admin / email / email_subscribed 의 조합으로 수신자 정책의 다양한
     케이스를 만든다. password_hash 는 placeholder.
     """
     user = User(
@@ -216,38 +218,41 @@ def _make_window_with_snapshots(
 
 
 # ──────────────────────────────────────────────────────────────
-# A. collect_admin_recipient_emails — 수신자 정책
+# A. collect_recipient_emails — 수신자 정책 (admin 여부 무관)
 # ──────────────────────────────────────────────────────────────
 
 
-def test_collect_admin_recipients_includes_only_eligible_admins(
+def test_collect_recipients_includes_all_eligible_users(
     db_session: Session,
 ) -> None:
-    """is_admin=True + email 정상 + email_subscribed=True 만 포함된다.
+    """email 정상 + email_subscribed=True 인 전체 사용자가 포함된다 (admin 여부 무관).
 
-    제외 케이스:
-        - is_admin=False (일반 사용자)
+    포함 케이스:
+        - admin 사용자 (email 정상 + 수신 동의)
+        - 비-admin 일반 사용자 (email 정상 + 수신 동의) — task 00144 에서 추가
+
+    제외 케이스 (admin 이라도 제외):
         - email IS NULL
         - email = '' (빈 문자열)
         - email_subscribed = False (옵트아웃)
     """
-    # 포함 대상.
-    _insert_admin_user(db_session, username="alice", email="alice@example.com")
-    _insert_admin_user(db_session, username="bob", email="bob@example.com")
+    # 포함 대상 — admin 사용자.
+    _insert_user(db_session, username="alice", email="alice@example.com")
+    _insert_user(db_session, username="bob", email="bob@example.com")
 
-    # 제외 — 일반 사용자.
-    _insert_admin_user(
+    # 포함 대상 — 비-admin 일반 사용자도 수신 대상이다 (task 00144).
+    _insert_user(
         db_session,
-        username="non_admin",
-        email="non_admin@example.com",
+        username="regular_user",
+        email="regular@example.com",
         is_admin=False,
     )
-    # 제외 — email NULL.
-    _insert_admin_user(db_session, username="no_email_admin", email=None)
+    # 제외 — email NULL (admin 이라도 제외).
+    _insert_user(db_session, username="no_email_admin", email=None)
     # 제외 — email 빈 문자열.
-    _insert_admin_user(db_session, username="empty_email_admin", email="")
-    # 제외 — email_subscribed=False (옵트아웃).
-    _insert_admin_user(
+    _insert_user(db_session, username="empty_email_admin", email="")
+    # 제외 — email_subscribed=False (옵트아웃, admin 이라도 제외).
+    _insert_user(
         db_session,
         username="unsub_admin",
         email="unsub@example.com",
@@ -255,26 +260,31 @@ def test_collect_admin_recipients_includes_only_eligible_admins(
     )
     db_session.commit()
 
-    emails = collect_admin_recipient_emails(db_session)
+    emails = collect_recipient_emails(db_session)
 
-    assert emails == ["alice@example.com", "bob@example.com"]
+    # admin 2명 + 비-admin 1명 모두 포함. admin 미설정/수신거부는 제외.
+    assert emails == [
+        "alice@example.com",
+        "bob@example.com",
+        "regular@example.com",
+    ]
 
 
-def test_collect_admin_recipients_dedups_and_sorts_case_insensitively(
+def test_collect_recipients_dedups_and_sorts_case_insensitively(
     db_session: Session,
 ) -> None:
     """동일 email 중복 제거 + ASCII case-insensitive 정렬.
 
-    운영 데이터에서 admin 가 같은 email 을 공유하는 (또는 대소문자만 다른) 비정상
+    운영 데이터에서 사용자가 같은 email 을 공유하는 (또는 대소문자만 다른) 비정상
     케이스에도 발송이 1번만 발생해야 한다.
     """
-    _insert_admin_user(db_session, username="a1", email="Charlie@example.com")
-    _insert_admin_user(db_session, username="a2", email="alice@example.com")
-    _insert_admin_user(db_session, username="a3", email="alice@example.com")
-    _insert_admin_user(db_session, username="a4", email="bob@example.com")
+    _insert_user(db_session, username="a1", email="Charlie@example.com")
+    _insert_user(db_session, username="a2", email="alice@example.com")
+    _insert_user(db_session, username="a3", email="alice@example.com")
+    _insert_user(db_session, username="a4", email="bob@example.com")
     db_session.commit()
 
-    emails = collect_admin_recipient_emails(db_session)
+    emails = collect_recipient_emails(db_session)
 
     # alice 중복 제거 + 소문자 비교 정렬: alice → bob → Charlie.
     assert emails == ["alice@example.com", "bob@example.com", "Charlie@example.com"]
@@ -685,8 +695,8 @@ def test_prepare_and_send_manual_admin_updates_last_sent_at_and_aggregation_colu
         now=now,
         payload={"new": [announcement.id]},
     )
-    # manual_admin 의 requested_by_user_id 검증을 위해 admin 1명 추가.
-    requesting_admin = _insert_admin_user(
+    # manual_admin 의 requested_by_user_id 검증을 위해 사용자 1명 추가.
+    requesting_admin = _insert_user(
         db_session, username="requesting_admin", email="ra@example.com"
     )
     db_session.commit()

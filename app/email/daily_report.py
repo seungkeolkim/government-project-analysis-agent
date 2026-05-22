@@ -1,7 +1,7 @@
 """단체 Daily Report 도메인 service (Phase A-3 / task 00125).
 
 본 모듈은 운영자가 cron 으로 예약한 시점에 \"마지막 발송 이후 누적된 공고 변화
-(snapshot diff)\" 를 정리해 admin 명단에게 메일로 발송하는 흐름의 핵심 로직을
+(snapshot diff)\" 를 정리해 발송 대상 사용자에게 메일로 발송하는 흐름의 핵심 로직을
 담는다. subtask 00125-3 / 00125-4 / 00125-6 단계별로 다음 함수 / 책임을 채웠다:
 
     - 공용 dataclass 3종 (``AggregationWindow`` / ``AnnouncementSummary`` /
@@ -9,7 +9,8 @@
       (``DailyReportRequest`` / ``DailyReportResult``).
     - 누적 구간 계산 ``compute_aggregation_window`` (subtask 00125-3).
     - reduce 머지 ``aggregate_snapshots`` (subtask 00125-4).
-    - admin 수신자 수집 ``collect_admin_recipient_emails`` (subtask 00125-6).
+    - 발송 대상 수신자 수집 ``collect_recipient_emails`` (subtask 00125-6,
+      task 00144 에서 admin 제약 제거).
     - 1회의 발송 흐름 통합 ``prepare_and_send_daily_report`` (subtask 00125-6).
 
 설계 노트 참조:
@@ -672,7 +673,7 @@ def _build_summaries(
 
 
 # ──────────────────────────────────────────────────────────────
-# 발송 서비스 — DailyReportRequest / DailyReportResult / collect_admin_recipient_emails /
+# 발송 서비스 — DailyReportRequest / DailyReportResult / collect_recipient_emails /
 # prepare_and_send_daily_report
 # ──────────────────────────────────────────────────────────────
 
@@ -721,8 +722,9 @@ class DailyReportRequest:
     Attributes:
         trigger: ``'scheduled'`` / ``'manual_admin'`` / ``'manual_test'``. 발송
             경로 식별자. last_sent_at 갱신 정책표가 이 값을 보고 분기한다.
-        recipients: 수신자 이메일 주소 목록. 빈 리스트도 허용 — admin 가 0명
-            이거나 모두 email 미설정인 환경을 방어한다 (FAILED 분기로 종료).
+        recipients: 수신자 이메일 주소 목록. 빈 리스트도 허용 — 발송 대상
+            사용자가 0명이거나 모두 email 미설정인 환경을 방어한다 (FAILED
+            분기로 종료).
         requested_by_user_id: manual 트리거 시 발송을 누른 사용자 PK. scheduled
             트리거이면 ``None``. EmailDailyReportRun.requested_by_user_id 컬럼에
             그대로 보관된다.
@@ -763,31 +765,34 @@ class DailyReportResult:
     error_message: str | None
 
 
-def collect_admin_recipient_emails(session: Session) -> list[str]:
-    """``is_admin=True`` + email 정상 + ``email_subscribed=True`` 인 admin email 목록.
+def collect_recipient_emails(session: Session) -> list[str]:
+    """email 정상 + ``email_subscribed=True`` 인 전체 사용자 중 발송 대상 email 목록.
 
-    design note §5 결정:
+    수신 대상 정책 (admin 여부와 무관 — task 00144 에서 admin 제약 제거):
         - ``email IS NOT NULL`` AND ``email != ''`` — 발송 가능한 주소만.
         - ``email_subscribed = True`` — settings 라우트의 사용자 옵트아웃 의지
-          존중 (admin 이라도 본인이 토글 OFF 했으면 제외).
+          존중 (본인이 토글 OFF 했으면 제외).
         - 중복 제거 + ASCII case-insensitive 정렬로 결정적 순서 반환 — 운영
           이력 / 디버깅 시 같은 환경이면 같은 순서.
+
+    '유효한(valid) 이메일' 은 위 not-null / non-empty 필터 시맨틱을 그대로
+    유지한다 — 형식 불량 주소는 ``send_with_retry`` 단계에서 해당 row 만 FAILED
+    처리되므로 별도 per-row 형식 검증을 추가하지 않는다.
 
     Args:
         session: 읽기 전용 ORM 세션. 본 함수는 commit / flush 하지 않는다.
 
     Returns:
-        발송 대상 admin email 주소 list. 후보가 0명이면 빈 list (호출자가 그
+        발송 대상 email 주소 list. 후보가 0명이면 빈 list (호출자가 그
         분기를 책임진다 — 본 함수는 silent skip).
     """
     statement = select(User.email).where(
-        User.is_admin.is_(True),
         User.email.is_not(None),
         User.email != "",
         User.email_subscribed.is_(True),
     )
     raw_emails = session.execute(statement).scalars().all()
-    # set 으로 중복 제거 후 정렬 — admin 이 같은 email 을 공유하는 비정상
+    # set 으로 중복 제거 후 정렬 — 여러 사용자가 같은 email 을 공유하는 비정상
     # 케이스에도 한 번만 발송된다.
     unique_emails = {email.strip() for email in raw_emails if email and email.strip()}
     return sorted(unique_emails, key=lambda value: value.lower())
@@ -914,9 +919,9 @@ def prepare_and_send_daily_report(
     run.snapshot_count = window.snapshot_count
 
     # ── 단계 2-c. 빈 수신자 방어 ──────────────────────────────────────
-    # admin 가 0명이거나 모두 email 미설정인 환경에서는 발송 자체를 시도할 수
-    # 없다. SKIPPED 가 아니라 FAILED 로 표시해 운영자가 \"왜 도착 안 했는지\"
-    # 를 즉시 알아챌 수 있게 한다 (게이트 차단과 동일 수준의 사전 단계 실패).
+    # 발송 대상 사용자가 0명이거나 모두 email 미설정인 환경에서는 발송 자체를
+    # 시도할 수 없다. SKIPPED 가 아니라 FAILED 로 표시해 운영자가 "왜 도착 안
+    # 했는지" 를 즉시 알아챌 수 있게 한다 (게이트 차단과 동일 수준의 사전 단계 실패).
     if not recipients:
         error_message = "발송 대상 수신자가 없습니다."
         run.status = EmailDailyReportStatus.FAILED
@@ -1106,7 +1111,7 @@ __all__ = [
     "TRIGGER_MANUAL_TEST",
     "TRIGGER_SCHEDULED",
     "aggregate_snapshots",
-    "collect_admin_recipient_emails",
+    "collect_recipient_emails",
     "compute_aggregation_window",
     "prepare_and_send_daily_report",
 ]
