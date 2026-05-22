@@ -5678,12 +5678,36 @@ details[open] .user-card__org-summary::before {
     border-color: #fde68a;
 }
 
-/* 「지금 발송」 + 「저장」 버튼을 한 줄에 배치한다. 좁은 화면에서는 wrap. */
+/* 「지금 발송」 버튼 영역. 좁은 화면에서도 안정적으로 배치되도록 wrap 허용. */
 .daily-report-actions {
     display: flex;
     gap: 10px;
     flex-wrap: wrap;
     margin-top: 4px;
+}
+
+/*
+ * Cron 표현식 입력 + 「저장」 버튼을 같은 행에 배치하기 위한 wrapper.
+ * .admin-email-secret-row 와 동일 패턴 — 입력이 가용 폭을 차지하고 버튼은
+ * 자기 크기로 우측에 자리한다. (input + 보조 버튼 패턴이 더 늘어나면 두
+ * 클래스를 .admin-input-with-action 등으로 일반화 검토.)
+ */
+.daily-report-cron-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.daily-report-cron-row .admin-schedule__input {
+    /* 가용 폭을 차지해 우측 버튼만 자기 크기로 자리하게 한다. */
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.daily-report-cron-row .admin-button {
+    flex: 0 0 auto;
+    padding: 6px 12px;
+    font-size: 13px;
 }
 
 /* 수신자 admin 목록 자세히 보기 — 네이티브 details/summary expand. */

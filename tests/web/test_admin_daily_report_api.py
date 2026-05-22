@@ -7,7 +7,8 @@
     3. PUT settings — 정상 저장 → SystemSetting 반영 + ``register_daily_report_cron_schedule``
        호출 검증 (mock).
     4. POST test-send — recipient body 우선 / SystemSetting fallback / 게이트 비활성 503.
-    5. POST send-now — admin email 자동 수집 + ``recipients`` 가 전달되는지 검증 (mock).
+    5. POST send-now — 수신 대상 사용자 email 자동 수집 + ``recipients`` 가 전달되는지
+       검증 (mock, admin 제약 없이 전체 사용자 — task 00144).
     6. GET runs / GET runs/{run_id}/sends — 응답 스키마 + 404 분기.
 
 fixture 패턴:
@@ -110,7 +111,7 @@ def _login(client: TestClient, username: str, password: str) -> None:
 def admin_client(client: TestClient, db_session: Session) -> TestClient:
     """관리자 (is_admin=True, email 정상) 로 로그인된 TestClient.
 
-    GET /daily-report/settings 응답의 ``admin_emails`` 가 본 admin 1명을 포함
+    GET /daily-report/settings 응답의 ``recipients`` 가 본 admin 1명을 포함
     하도록 email 까지 채운다. test-send / send-now 시 ``requested_by_user_id`` 도
     이 사용자 PK 로 기록된다.
     """
@@ -209,7 +210,7 @@ def test_daily_report_endpoints_require_login_401(client: TestClient) -> None:
 
 
 # ──────────────────────────────────────────────────────────────
-# 2. GET /daily-report/settings — 응답 스키마 + admin 명단
+# 2. GET /daily-report/settings — 응답 스키마 + 수신자 명단
 # ──────────────────────────────────────────────────────────────
 
 
@@ -220,7 +221,7 @@ def test_get_daily_report_settings_default_response(
 
     검증:
         - enabled=False (default), cron_expression=DEFAULT, last_sent_at=None,
-          test_recipient="", next_run_at=None (잡 미등록), admin_emails 1건 포함.
+          test_recipient="", next_run_at=None (잡 미등록), recipients 1건 포함.
     """
     response = admin_client.get("/api/admin/email/daily-report/settings")
     assert response.status_code == 200, response.text
@@ -232,30 +233,32 @@ def test_get_daily_report_settings_default_response(
     assert data["test_recipient"] == ""
     assert data["next_run_at"] is None
 
-    # admin_emails — admin_client fixture 가 dr_admin 1명을 만들었으므로 1건.
-    admin_emails = data["admin_emails"]
-    assert len(admin_emails) == 1
-    assert admin_emails[0]["username"] == "dr_admin"
-    assert admin_emails[0]["email"] == "dr_admin@example.com"
-    assert admin_emails[0]["email_subscribed"] is True
-    assert admin_emails[0]["eligible"] is True
+    # recipients — admin_client fixture 가 dr_admin 1명을 만들었으므로 1건.
+    recipients = data["recipients"]
+    assert len(recipients) == 1
+    assert recipients[0]["username"] == "dr_admin"
+    assert recipients[0]["email"] == "dr_admin@example.com"
+    assert recipients[0]["email_subscribed"] is True
+    assert recipients[0]["eligible"] is True
 
-    assert data["admin_count_eligible"] == 1
-    assert data["admin_count_without_email"] == 0
-    assert data["admin_count_unsubscribed"] == 0
+    assert data["recipient_count_eligible"] == 1
+    assert data["recipient_count_without_email"] == 0
+    assert data["recipient_count_unsubscribed"] == 0
 
 
-def test_get_daily_report_settings_with_ineligible_admins(
+def test_get_daily_report_settings_recipient_overview(
     admin_client: TestClient,
     db_session: Session,
 ) -> None:
-    """admin_emails 가 eligible / 미설정 / unsubscribed 3 케이스를 모두 노출.
+    """recipients 가 admin/비-admin 을 모두 포함하고 eligible/미설정/unsubscribed 를 분류.
 
-    디자인 노트 §5 분류 표가 응답 카운터에 그대로 반영되는지 검증.
+    task 00144 — admin 제약 제거 후, 비-admin 사용자도 수신 대상 명단에 포함되고
+    admin 이라도 email 미설정/수신거부면 제외(eligible=False)됨을 검증한다.
     """
     from app.auth.service import create_user
 
-    # admin_client fixture 의 dr_admin 외에 2명 추가 — email 미설정 / 옵트아웃.
+    # admin_client fixture 의 dr_admin 외에 추가:
+    #  - admin · email 미설정 → eligible=False (without_email).
     create_user(
         db_session,
         username="dr_no_email",
@@ -263,6 +266,7 @@ def test_get_daily_report_settings_with_ineligible_admins(
         email=None,
         is_admin=True,
     )
+    #  - admin · 수신거부 → eligible=False (unsubscribed).
     no_subscribe = create_user(
         db_session,
         username="dr_unsubscribed",
@@ -271,18 +275,37 @@ def test_get_daily_report_settings_with_ineligible_admins(
         is_admin=True,
     )
     no_subscribe.email_subscribed = False
+    #  - 비-admin · email 정상 + 수신 동의 → eligible=True (task 00144 신규 포함).
+    create_user(
+        db_session,
+        username="aa_regular_user",
+        password="X_pass_1!",
+        email="regular@example.com",
+        is_admin=False,
+    )
     db_session.commit()
 
     response = admin_client.get("/api/admin/email/daily-report/settings")
     assert response.status_code == 200, response.text
     data = response.json()
 
-    assert data["admin_count_eligible"] == 1
-    assert data["admin_count_without_email"] == 1
-    assert data["admin_count_unsubscribed"] == 1
-    usernames = [row["username"] for row in data["admin_emails"]]
-    # 정렬은 username 알파벳순 — d/r/u 순.
-    assert usernames == ["dr_admin", "dr_no_email", "dr_unsubscribed"]
+    # eligible 2명 = dr_admin + aa_regular_user (비-admin 도 포함).
+    assert data["recipient_count_eligible"] == 2
+    assert data["recipient_count_without_email"] == 1
+    assert data["recipient_count_unsubscribed"] == 1
+    usernames = [row["username"] for row in data["recipients"]]
+    # 정렬은 username 알파벳순.
+    assert usernames == [
+        "aa_regular_user",
+        "dr_admin",
+        "dr_no_email",
+        "dr_unsubscribed",
+    ]
+    # 비-admin 사용자가 eligible=True 로 발송 대상에 포함된다.
+    regular_row = next(
+        row for row in data["recipients"] if row["username"] == "aa_regular_user"
+    )
+    assert regular_row["eligible"] is True
 
 
 # ──────────────────────────────────────────────────────────────
@@ -396,6 +419,62 @@ def test_put_daily_report_settings_disabled_with_empty_cron_ok(
         },
     )
     assert response.status_code == 200, response.text
+
+
+def test_put_daily_report_settings_enable_toggle_preserves_cron_and_recipient(
+    admin_client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[task 00144] '활성화' 토글 PUT 은 enabled 만 바꾸고 cron/test_recipient 를 보존한다.
+
+    FE 의 'Daily Report 활성화' 체크박스는 변경 즉시 현재 cron/test_recipient
+    값을 함께 실어 PUT 한다. 본 테스트는 그 흐름을 모사한다 — 먼저 cron 과
+    test_recipient 를 저장해 두고, enabled 만 True 로 바꾼 PUT 을 보낸 뒤
+    cron/test_recipient SystemSetting 이 그대로 유지되는지 확인한다.
+    """
+    monkeypatch.setattr(
+        "app.web.routes.admin_email.register_daily_report_cron_schedule",
+        lambda *args, **kwargs: None,
+    )
+
+    # 1. 비활성 상태로 cron + test_recipient 를 먼저 저장한다.
+    initial_response = admin_client.put(
+        "/api/admin/email/daily-report/settings",
+        json={
+            "enabled": False,
+            "cron_expression": "15 8 * * 1-5",
+            "test_recipient": "ops@example.com",
+        },
+    )
+    assert initial_response.status_code == 200, initial_response.text
+
+    # 2. FE 토글 모사 — 현재 cron/test_recipient 값을 그대로 싣고 enabled 만 True.
+    toggle_response = admin_client.put(
+        "/api/admin/email/daily-report/settings",
+        json={
+            "enabled": True,
+            "cron_expression": "15 8 * * 1-5",
+            "test_recipient": "ops@example.com",
+        },
+    )
+    assert toggle_response.status_code == 200, toggle_response.text
+    toggle_data = toggle_response.json()
+    assert toggle_data["enabled"] is True
+    # cron / test_recipient 는 토글 전 값 그대로 보존.
+    assert toggle_data["cron_expression"] == "15 8 * * 1-5"
+    assert toggle_data["test_recipient"] == "ops@example.com"
+
+    # SystemSetting DB 에도 enabled 만 바뀌고 나머지는 보존됐는지 확인.
+    db_session.expire_all()
+    assert get_setting(db_session, SETTING_KEY_DAILY_REPORT_ENABLED) == "true"
+    assert (
+        get_setting(db_session, SETTING_KEY_DAILY_REPORT_CRON) == "15 8 * * 1-5"
+    )
+    assert (
+        get_setting(db_session, SETTING_KEY_DAILY_REPORT_TEST_RECIPIENT)
+        == "ops@example.com"
+    )
 
 
 # ──────────────────────────────────────────────────────────────
@@ -662,19 +741,25 @@ def test_post_daily_report_test_send_returns_503_when_gate_disabled(
 
 
 # ──────────────────────────────────────────────────────────────
-# 5. POST /daily-report/send-now — admin email 자동 수집
+# 5. POST /daily-report/send-now — 수신 대상 사용자 email 자동 수집
 # ──────────────────────────────────────────────────────────────
 
 
-def test_post_daily_report_send_now_collects_admin_recipients(
+def test_post_daily_report_send_now_collects_eligible_recipients(
     admin_client: TestClient,
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """admin 사용자 email 이 ``recipients`` 로 자동 수집되어 service 에 전달된다.
+    """수신 대상 사용자 email 이 ``recipients`` 로 자동 수집되어 service 에 전달된다.
 
-    fixture 의 dr_admin 외에 2명을 추가 — eligible 1명, opt-out 1명. 결과적으로
-    eligible 2명만 ``recipients`` 에 포함되어야 한다.
+    task 00144 — admin 제약이 제거되어, email 정상 + 수신 동의한 사용자는
+    admin 여부와 무관하게 모두 수집된다.
+
+    fixture 의 dr_admin 외에 3명을 추가:
+        - other_admin (admin, eligible) → 포함
+        - regular_user (비-admin, eligible) → 포함 (task 00144 신규)
+        - opt_out_admin (admin, 수신거부) → 제외
+    결과적으로 eligible 3명만 ``recipients`` 에 포함되어야 한다.
     """
     from app.auth.service import create_user
 
@@ -684,6 +769,14 @@ def test_post_daily_report_send_now_collects_admin_recipients(
         password="X_pass_1!",
         email="other@example.com",
         is_admin=True,
+    )
+    # 비-admin 일반 사용자도 수신 대상에 포함되어야 한다 (task 00144).
+    create_user(
+        db_session,
+        username="regular_user",
+        password="X_pass_1!",
+        email="regular@example.com",
+        is_admin=False,
     )
     opt_out = create_user(
         db_session,
@@ -703,8 +796,8 @@ def test_post_daily_report_send_now_collects_admin_recipients(
             run_id=100,
             status=EmailDailyReportStatus.SUCCESS,
             snapshot_count=5,
-            recipient_count=2,
-            success_count=2,
+            recipient_count=3,
+            success_count=3,
             failure_count=0,
             error_message=None,
         ),
@@ -717,14 +810,15 @@ def test_post_daily_report_send_now_collects_admin_recipients(
     data = response.json()
     assert data["run_id"] == 100
     assert data["status"] == "success"
-    assert data["recipient_count"] == 2
+    assert data["recipient_count"] == 3
 
-    # service 호출 인자 검증 — trigger=manual_admin + eligible 2명만 전달.
+    # service 호출 인자 검증 — trigger=manual_admin + eligible 3명 (admin+비-admin).
     assert len(captured) == 1
     assert captured[0]["trigger"] == "manual_admin"
     assert sorted(captured[0]["recipients"]) == [
         "dr_admin@example.com",
         "other@example.com",
+        "regular@example.com",
     ]
     # opt_out_admin (email_subscribed=False) 는 제외되어야 한다.
     assert "silent@example.com" not in captured[0]["recipients"]

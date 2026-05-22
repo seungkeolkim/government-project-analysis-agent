@@ -919,9 +919,10 @@
      * 「Daily Report」 카드를 초기화한다.
      *
      * - 페이지 로드 시 GET /daily-report/settings 로 현재 값을 받아 카드를 채운다.
-     * - [저장] 클릭 → PUT /daily-report/settings (enabled / cron / test_recipient).
+     * - '활성화' 체크박스 change → 즉시 PUT /daily-report/settings (enabled 토글).
+     * - [저장] 클릭(폼 submit) → PUT /daily-report/settings — cron 표현식 저장용.
      * - [테스트 발송] 클릭 → POST /daily-report/test-send (현재 받는 사람 입력값).
-     * - [지금 admin 에게만 발송] 클릭 → window.confirm 후 POST /daily-report/send-now.
+     * - [지금 발송] 클릭 → window.confirm 후 POST /daily-report/send-now.
      *
      * 페이지에 form 요소가 없으면 즉시 반환 — 멱등 안전.
      */
@@ -957,9 +958,14 @@
         loadDailyReportSettings();
 
         // ── 이벤트 바인딩 ─────────────────────────────────────
+        // [저장] 버튼(폼 submit) — 사용자 관점에서는 cron 표현식 저장 버튼.
         form.addEventListener('submit', function (event) {
             event.preventDefault();
             saveDailyReportSettings();
+        });
+        // 'Daily Report 활성화' 체크박스 — change 즉시 PUT 으로 서버 반영.
+        enabledCheckbox.addEventListener('change', function () {
+            saveDailyReportEnabled(enabledCheckbox.checked);
         });
         testSendButton.addEventListener('click', function () {
             performDailyReportTestSend();
@@ -1045,37 +1051,37 @@
         }
 
         /**
-         * 수신자 요약 줄 — admin 수 / 발송 대상 수 / 미설정·수신거부 경고.
+         * 수신자 요약 줄 — 전체 사용자 수 / 발송 대상 수 / 미설정·수신거부 경고.
          *
          * @param {object} settings DailyReportSettingsOut.
          */
         function renderRecipientsSummary(settings) {
             recipientsSummary.innerHTML = '';
 
-            var adminList = Array.isArray(settings.admin_emails)
-                ? settings.admin_emails
+            var recipientList = Array.isArray(settings.recipients)
+                ? settings.recipients
                 : [];
             var eligibleCount =
-                typeof settings.admin_count_eligible === 'number'
-                    ? settings.admin_count_eligible
+                typeof settings.recipient_count_eligible === 'number'
+                    ? settings.recipient_count_eligible
                     : 0;
             var withoutEmailCount =
-                typeof settings.admin_count_without_email === 'number'
-                    ? settings.admin_count_without_email
+                typeof settings.recipient_count_without_email === 'number'
+                    ? settings.recipient_count_without_email
                     : 0;
             var unsubscribedCount =
-                typeof settings.admin_count_unsubscribed === 'number'
-                    ? settings.admin_count_unsubscribed
+                typeof settings.recipient_count_unsubscribed === 'number'
+                    ? settings.recipient_count_unsubscribed
                     : 0;
 
             var summaryLine = document.createElement('p');
             summaryLine.className = 'admin-state__muted';
             summaryLine.textContent =
-                '수신자: admin 사용자 ' + adminList.length + '명 중 발송 대상 ' +
+                '수신자: 전체 사용자 ' + recipientList.length + '명 중 발송 대상 ' +
                 eligibleCount + '명';
             recipientsSummary.appendChild(summaryLine);
 
-            // 미설정 / 수신거부 admin 이 있으면 노란 경고 박스.
+            // 미설정 / 수신거부 사용자가 있으면 노란 경고 박스.
             if (withoutEmailCount > 0 || unsubscribedCount > 0) {
                 var warningParts = [];
                 if (withoutEmailCount > 0) {
@@ -1089,26 +1095,26 @@
                 warningBox.setAttribute('role', 'status');
                 warningBox.textContent =
                     '⚠️ ' + warningParts.join(' · ') +
-                    ' — 해당 admin 은 발송 대상에서 제외됩니다.';
+                    ' — 해당 사용자는 발송 대상에서 제외됩니다.';
                 recipientsSummary.appendChild(warningBox);
             }
         }
 
         /**
-         * 수신자 admin 목록 expand 영역에 상세 테이블을 그린다.
+         * 수신자 목록 expand 영역에 상세 테이블을 그린다.
          *
          * @param {object} settings DailyReportSettingsOut.
          */
         function renderRecipientsDetail(settings) {
             recipientsDetail.innerHTML = '';
 
-            var adminList = Array.isArray(settings.admin_emails)
-                ? settings.admin_emails
+            var recipientList = Array.isArray(settings.recipients)
+                ? settings.recipients
                 : [];
-            if (adminList.length === 0) {
+            if (recipientList.length === 0) {
                 var emptyText = document.createElement('p');
                 emptyText.className = 'admin-state__muted';
-                emptyText.textContent = 'admin 사용자가 없습니다.';
+                emptyText.textContent = '사용자가 없습니다.';
                 recipientsDetail.appendChild(emptyText);
                 return;
             }
@@ -1129,27 +1135,28 @@
             table.appendChild(thead);
 
             var tbody = document.createElement('tbody');
-            adminList.forEach(function (admin) {
+            recipientList.forEach(function (recipient) {
                 var row = document.createElement('tr');
-                // 발송 제외 admin 행은 흐리게 표시.
-                if (!admin.eligible) {
+                // 발송 제외 사용자 행은 흐리게 표시.
+                if (!recipient.eligible) {
                     row.className = 'daily-report-recipients__row--excluded';
                 }
 
                 var usernameTd = document.createElement('td');
-                usernameTd.textContent = admin.username || '';
+                usernameTd.textContent = recipient.username || '';
                 row.appendChild(usernameTd);
 
                 var emailTd = document.createElement('td');
-                emailTd.textContent = admin.email || '(미설정)';
+                emailTd.textContent = recipient.email || '(미설정)';
                 row.appendChild(emailTd);
 
                 var subscribedTd = document.createElement('td');
-                subscribedTd.textContent = admin.email_subscribed ? '동의' : '거부';
+                subscribedTd.textContent =
+                    recipient.email_subscribed ? '동의' : '거부';
                 row.appendChild(subscribedTd);
 
                 var eligibleTd = document.createElement('td');
-                eligibleTd.textContent = admin.eligible ? '✅ 포함' : '제외';
+                eligibleTd.textContent = recipient.eligible ? '✅ 포함' : '제외';
                 row.appendChild(eligibleTd);
 
                 tbody.appendChild(row);
@@ -1238,6 +1245,65 @@
         }
 
         /**
+         * 'Daily Report 활성화' 체크박스 변경 시 즉시 PUT /daily-report/settings
+         * 로 저장한다 ('메일 전송 기능 활성화' 토글의 saveSendEnabled 미러링).
+         *
+         * 현재 카드의 cron_expression / test_recipient 입력값을 그대로 함께
+         * 보내고 enabled 만 새 값으로 교체한다 — 토글로 바뀌는 값은 enabled
+         * 뿐이며, 다른 두 필드는 현재값 그대로라 덮어쓰기 부작용이 없다.
+         *
+         * 실패 시(특히 활성화하려는데 cron 이 비어 있어 서버 422 가 떨어지는
+         * 경우) 체크박스를 변경 전 상태로 되돌리고 error flash 로 사유를 보여
+         * 준다. 요청 중에는 체크박스를 disabled 로 막아 중복 토글을 방지한다.
+         *
+         * @param {boolean} newEnabledValue 저장할 새 활성화 여부.
+         */
+        function saveDailyReportEnabled(newEnabledValue) {
+            clearDailyReportFlash();
+            enabledCheckbox.disabled = true;
+
+            var requestBody = {
+                enabled: newEnabledValue,
+                cron_expression: cronInput.value.trim(),
+                test_recipient: testRecipientInput.value.trim()
+            };
+
+            fetch(DAILY_REPORT_SETTINGS_URL, {
+                method: 'PUT',
+                credentials: 'same-origin',
+                headers: {
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(requestBody)
+            })
+                .then(parseJsonResponse)
+                .then(function (result) {
+                    if (!result.resp.ok) {
+                        throw new Error(
+                            extractErrorMessage(result.resp, result.body)
+                        );
+                    }
+                    applyDailyReportSettings(result.body || {});
+                    var stateText = newEnabledValue ? '활성화' : '비활성화';
+                    showDailyReportFlash(
+                        'success', 'Daily Report 가 ' + stateText + '되었습니다.'
+                    );
+                })
+                .catch(function (error) {
+                    // PUT 실패 시 체크박스를 이전 상태로 복원.
+                    enabledCheckbox.checked = !newEnabledValue;
+                    showDailyReportFlash(
+                        'error',
+                        'Daily Report 설정 저장 실패: ' + (error.message || error)
+                    );
+                })
+                .then(function () {
+                    enabledCheckbox.disabled = false;
+                });
+        }
+
+        /**
          * POST /daily-report/test-send — [테스트 발송] 버튼 클릭 시 호출.
          *
          * 현재 받는 사람 입력값을 그대로 전송한다. 빈 값이면 서버가 SystemSetting
@@ -1296,24 +1362,24 @@
         }
 
         /**
-         * POST /daily-report/send-now — [지금 admin 에게만 발송] 클릭 시 호출.
+         * POST /daily-report/send-now — [지금 발송] 클릭 시 호출.
          *
          * 메일 발송은 외부 영향이 큰 액션이라 window.confirm 으로 우발 클릭을
-         * 막는다 (디자인 노트 §10). 확인 시 현재 시점 admin 수신자 전원에게
+         * 막는다 (디자인 노트 §10). 확인 시 현재 시점 발송 대상 사용자 전원에게
          * 즉시 발송한다 (trigger=manual_admin).
          */
         function performDailyReportSendNow() {
             // confirm 메시지 — 가장 최근 로드한 settings 의 발송 대상 명단 사용.
             var eligibleEmails = [];
-            if (latestSettings && Array.isArray(latestSettings.admin_emails)) {
-                latestSettings.admin_emails.forEach(function (admin) {
-                    if (admin.eligible && admin.email) {
-                        eligibleEmails.push(admin.email);
+            if (latestSettings && Array.isArray(latestSettings.recipients)) {
+                latestSettings.recipients.forEach(function (recipient) {
+                    if (recipient.eligible && recipient.email) {
+                        eligibleEmails.push(recipient.email);
                     }
                 });
             }
             var confirmMessage =
-                '현재 발송 대상 admin ' + eligibleEmails.length +
+                '현재 발송 대상 ' + eligibleEmails.length +
                 '명에게 즉시 Daily Report 를 발송합니다. 계속할까요?';
             if (eligibleEmails.length > 0) {
                 confirmMessage += '\n\n수신자: ' + eligibleEmails.join(', ');

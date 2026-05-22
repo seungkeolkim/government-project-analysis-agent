@@ -45,7 +45,7 @@
 
 {# ── 섹션 1: Daily Report 카드 (Phase A-3 / task 00125-9) ──────
    마지막 발송 이후 누적된 공고 변화(snapshot diff)를 cron 으로 예약한
-   시각에 admin 사용자에게 자동 발송하는 기능의 운영 카드.
+   시각에 메일 수신에 동의한 사용자에게 자동 발송하는 기능의 운영 카드.
 
    admin_email.js 의 initDailyReportSection() 이 아래 endpoint 들을 호출한다:
      - GET  /api/admin/email/daily-report/settings   (진입 시 카드 채움)
@@ -58,32 +58,46 @@
     <h3 class="admin-section__heading">Daily Report</h3>
     <p class="admin-state__muted">
         마지막 발송 이후 누적된 공고 변화를 정리해, cron 으로 예약한 시각에
-        admin 사용자에게 자동으로 메일을 보냅니다. 위 「메일 발송 설정」 이
-        비활성화되어 있으면 예약 발송과 테스트 발송 모두 차단됩니다.
+        메일 수신에 동의한 사용자에게 자동으로 메일을 보냅니다. 위 「메일 발송
+        설정」 이 비활성화되어 있으면 예약 발송과 테스트 발송 모두 차단됩니다.
     </p>
 
     {# flash 박지 — initDailyReportSection 이 설정 저장/조회 결과를 그린다. #}
     <div id="daily-report-flash-area"></div>
 
     <form id="daily-report-settings-form" class="admin-form" autocomplete="off">
-        {# 활성화 체크박스 — 켜려면 cron 표현식이 반드시 있어야 한다(서버 422 가드). #}
+        {# 활성화 체크박스 — change 이벤트 발생 즉시 PUT 으로 서버에 반영된다
+           ('메일 전송 기능 활성화' 토글과 동일 동작). 켜려면 cron 표현식이
+           반드시 있어야 한다(서버 422 가드). #}
         <label class="admin-checkbox admin-schedule__enabled">
             <input id="daily-report-enabled"
                    type="checkbox"
                    name="enabled">
             <span>Daily Report 활성화</span>
         </label>
+        <p class="admin-state__muted">
+            체크박스를 변경하면 즉시 저장됩니다. 활성화하려면 아래 Cron 표현식이
+            반드시 입력되어 있어야 합니다.
+        </p>
 
-        {# Cron 표현식 — 5필드 cron 문자열. APScheduler 가 KST 로 해석한다. #}
+        {# Cron 표현식 — 5필드 cron 문자열. APScheduler 가 KST 로 해석한다.
+           입력 필드 옆 「저장」 버튼이 폼을 submit 해 cron 표현식을 저장한다.
+           활성화 여부는 위 체크박스가 즉시 반영하므로, 사용자 관점에서 이
+           버튼으로 바뀌는 값은 cron 표현식 뿐이다. #}
         <label class="admin-schedule__text">
             <span>Cron 표현식 (KST 기준 · 5필드)</span>
-            <input id="daily-report-cron"
-                   name="cron_expression"
-                   type="text"
-                   class="admin-schedule__input"
-                   placeholder="0 9 * * 1-5"
-                   autocomplete="off"
-                   spellcheck="false">
+            <div class="daily-report-cron-row">
+                <input id="daily-report-cron"
+                       name="cron_expression"
+                       type="text"
+                       class="admin-schedule__input"
+                       placeholder="0 9 * * 1-5"
+                       autocomplete="off"
+                       spellcheck="false">
+                <button id="daily-report-settings-save"
+                        type="submit"
+                        class="admin-button admin-button--primary">저장</button>
+            </div>
         </label>
         <p class="admin-state__muted">
             예시: <code>0 9 * * 1-5</code> — 평일(월~금) 오전 9시.
@@ -98,17 +112,17 @@
             마지막 발송: <span id="daily-report-last-sent">—</span>
         </p>
 
-        {# 수신자 요약 — admin 수 / 미설정 경고. JS 가 동적으로 그린다. #}
+        {# 수신자 요약 — 전체 사용자 수 / 미설정 경고. JS 가 동적으로 그린다. #}
         <div id="daily-report-recipients-summary"></div>
 
-        {# 수신자 admin 목록 자세히 보기 — 네이티브 details/summary expand. #}
+        {# 수신자 목록 자세히 보기 — 네이티브 details/summary expand. #}
         <details class="daily-report-recipients">
-            <summary>수신자 admin 목록 자세히 보기</summary>
+            <summary>수신자 목록 자세히 보기</summary>
             <div id="daily-report-recipients-detail"></div>
         </details>
 
         {# 테스트 발송 박스 — 단일 임의 주소로 1통 발송 (manual_test 트리거).
-           받는 사람 주소는 카드 전역 [저장] 으로 함께 저장되며, [테스트 발송] 은
+           받는 사람 주소는 Cron 표현식 옆 [저장] 으로 함께 저장되며, [테스트 발송] 은
            현재 입력값으로 즉시 1통 보낸다 (last_sent_at 갱신 없음). #}
         <fieldset class="admin-fieldset daily-report-test-box">
             <legend class="admin-fieldset__legend">테스트 발송</legend>
@@ -127,18 +141,15 @@
                     class="admin-button admin-button--secondary">📤 테스트 발송</button>
         </fieldset>
         <p class="admin-state__muted">
-            받는 사람 주소는 아래 「저장」 버튼으로 함께 저장됩니다.
+            받는 사람 주소는 Cron 표현식 옆 「저장」 버튼으로 함께 저장됩니다.
             「테스트 발송」 은 현재 입력값으로 즉시 1통을 보냅니다.
         </p>
 
-        {# 지금 발송 + 저장 — 지금 발송은 admin 전원에게 즉시 발송(manual_admin). #}
+        {# 지금 발송 — 수신 대상 전원에게 즉시 발송(manual_admin). #}
         <div class="daily-report-actions">
             <button id="daily-report-send-now-button"
                     type="button"
-                    class="admin-button admin-button--secondary">📤 지금 admin 에게만 발송</button>
-            <button id="daily-report-settings-save"
-                    type="submit"
-                    class="admin-button admin-button--primary">저장</button>
+                    class="admin-button admin-button--secondary">📤 지금 발송</button>
         </div>
     </form>
 

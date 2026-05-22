@@ -231,7 +231,7 @@ def scheduled_daily_report_job() -> None:
 
     동작 흐름:
         1. ``session_scope()`` 로 ORM 세션 컨텍스트 진입.
-        2. ``collect_admin_recipient_emails(session)`` 로 발송 대상 admin 수집.
+        2. ``collect_recipient_emails(session)`` 로 발송 대상 사용자 수집.
         3. ``build_transport_from_settings(session)`` 으로 EmailTransport 빌드.
         4. ``DailyReportRequest(trigger='scheduled', ...)`` 생성.
         5. ``prepare_and_send_daily_report(...)`` 호출 — 게이트 / aggregate /
@@ -268,7 +268,7 @@ def scheduled_daily_report_job() -> None:
         from app.email.daily_report import (
             TRIGGER_SCHEDULED,
             DailyReportRequest,
-            collect_admin_recipient_emails,
+            collect_recipient_emails,
             prepare_and_send_daily_report,
         )
         from app.email.gate import EmailSendingDisabledError
@@ -276,10 +276,10 @@ def scheduled_daily_report_job() -> None:
         from app.backup.service import get_setting
 
         with session_scope() as session:
-            # 발송 대상 admin 수집 — design note §5 정책 (is_admin AND email AND
-            # email_subscribed). 빈 list 가 와도 prepare_and_send 가
-            # \"수신자 0 → FAILED\" 분기로 처리한다.
-            recipients = collect_admin_recipient_emails(session)
+            # 발송 대상 수집 — email 정상 + email_subscribed=True 인 전체 사용자
+            # (task 00144 에서 admin 제약 제거). 빈 list 가 와도 prepare_and_send
+            # 가 \"수신자 0 → FAILED\" 분기로 처리한다.
+            recipients = collect_recipient_emails(session)
 
             # max_retry_count 는 SystemSetting 에서 로드 — sender / forwarding 의
             # 동일 패턴. 파싱 실패 시 DEFAULT 로 안전 fallback.
