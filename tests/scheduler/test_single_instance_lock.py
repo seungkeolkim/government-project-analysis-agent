@@ -199,3 +199,72 @@ def test_start_scheduler_runs_when_lock_is_free_and_stop_releases_lock(
     # stop 이 스케줄러 정지와 함께 lock 을 해제했어야 한다.
     assert is_scheduler_running() is False
     assert holds_single_instance_lock() is False
+
+
+# ──────────────────────────────────────────────────────────────
+# task 00133 — ASGI lifespan startup 훅 회귀 가드
+# ──────────────────────────────────────────────────────────────
+#
+# 회귀 배경: ``app = create_app()`` 은 모듈 수준 코드라 import 마다 실행된다.
+# uvicorn ``--reload`` 환경에서는 reload 감시 부모 프로세스와 실제 요청을
+# 처리하는 worker 프로세스가 둘 다 ``app.web.main`` 을 import 한다. 예전처럼
+# create_app() 본문에서 start_scheduler() 를 호출하면, task 131 의 단일
+# 인스턴스 flock 을 reload 감시 부모가 worker 보다 먼저 쥐어 버려, 정작 HTTP
+# 를 처리하는 worker 의 스케줄러가 영구히 미기동 상태가 된다 (task 131 이후
+# 보고된 'APScheduler 가 기동되지 않았습니다' 회귀). 수정: 스케줄러 기동을
+# ASGI lifespan 의 startup 훅으로 옮겨, ASGI 서버가 실제로 가동되는 프로세스
+# (= worker) 에서만 기동되도록 한다.
+
+
+def test_create_app_does_not_start_scheduler_in_module_body(
+    test_engine: Engine,
+    _reset_single_instance_lock: None,
+) -> None:
+    """``create_app()`` 호출만으로는 스케줄러가 기동되지 않아야 한다 (task 00133).
+
+    스케줄러 기동은 ASGI lifespan 의 startup 훅으로 옮겨졌다. 누군가
+    실수로 start_scheduler() 를 다시 create_app() 본문으로 되돌리면 본
+    테스트가 깨져 회귀를 즉시 잡는다.
+    """
+    from app.web.main import create_app
+
+    # 직전 테스트가 남긴 _scheduler 싱글턴이 있을 수 있으니 먼저 리셋.
+    stop_scheduler(wait=False)
+
+    app = create_app()
+
+    # create_app() 본문은 더 이상 스케줄러를 기동하지 않는다 — startup 훅
+    # (TestClient with-블록 진입) 전까지는 미기동 상태여야 한다.
+    assert is_scheduler_running() is False
+    assert holds_single_instance_lock() is False
+    # app 객체 자체는 정상적으로 만들어져야 한다.
+    assert app is not None
+
+
+def test_asgi_startup_hook_starts_scheduler(
+    test_engine: Engine,
+    _reset_single_instance_lock: None,
+) -> None:
+    """ASGI lifespan startup 훅이 실행되면 스케줄러가 기동된다 (task 00133).
+
+    ``with TestClient(app)`` 진입은 FastAPI 의 startup 이벤트를 발생시킨다.
+    이는 실제 ASGI 서버가 가동되는 worker 프로세스의 동작을 그대로 모사한다 —
+    이 시점에 스케줄러가 기동되고 단일 인스턴스 lock 도 쥐어야 한다. with-블록
+    종료 시 shutdown 훅이 스케줄러를 정지하고 lock 을 해제해야 한다.
+    """
+    from fastapi.testclient import TestClient
+
+    from app.web.main import create_app
+
+    stop_scheduler(wait=False)
+    app = create_app()
+
+    # with-블록 진입 = startup 훅 발화 → 스케줄러 기동.
+    with TestClient(app):
+        assert is_scheduler_running() is True
+        # 기동에 성공한 프로세스는 단일 인스턴스 lock 도 쥐고 있어야 한다.
+        assert holds_single_instance_lock() is True
+
+    # with-블록 종료 = shutdown 훅 발화 → 스케줄러 정지 + lock 해제.
+    assert is_scheduler_running() is False
+    assert holds_single_instance_lock() is False
