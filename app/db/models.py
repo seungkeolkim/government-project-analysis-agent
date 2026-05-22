@@ -2968,6 +2968,99 @@ class EmailDailyReportRun(Base):
         )
 
 
+class SchedulerJobClaim(Base):
+    """스케줄 job 의 동일 주기 중복 실행을 막는 single-flight claim row (task 00131-2).
+
+    배경 (task 00131 — cron 중복 실행 버그):
+        subtask 00131-1 이 flock 으로 '컨테이너당 스케줄러 인스턴스 1개' 를
+        보장했지만, flock 이 어떤 이유로 실패하거나 좀비 worker 가 잠시 겹치는
+        구간에서는 동일 job 이 같은 trigger 시각에 2~3회 호출될 수 있다. 본
+        테이블은 그 경우에도 job 의 **부수효과**(메일 발송·scrape run 생성·백업)
+        가 단 1회만 일어나도록 하는 defense-in-depth 가드다.
+
+    동작:
+        - job 함수는 실제 작업에 들어가기 전에 ``(job_name, slot_key)`` 로 본
+          테이블에 row 를 INSERT 한다 (``app.scheduler.job_guard``).
+        - ``slot_key`` 는 현재 시각을 고정 길이 시간창(기본 60초)으로 내림한
+          버킷 문자열이다. 동일 trigger 시각에 거의 동시에 발사된 2~3개의
+          호출은 모두 같은 ``slot_key`` 를 계산한다.
+        - ``(job_name, slot_key)`` UNIQUE 제약 덕분에 **먼저 INSERT 에 성공한
+          단 한 호출만** claim 을 얻고, 나머지는 IntegrityError 로 거절돼
+          job 을 건너뛴다. SQLite 단일 writer 환경에서 원자적이다.
+
+    이력성:
+        claim row 는 누적되므로 ``job_guard`` 가 보관 기간(기본 7일) 이 지난
+        row 를 주기적으로 정리한다. 본 테이블은 '이 슬롯은 이미 처리됐다' 는
+        사실만 담는 휘발성 가드 데이터이며 운영 이력 용도가 아니다.
+
+    SQLite ↔ Postgres 이식성:
+        - ``DateTime(timezone=True)`` — 양쪽 호환, DB 저장은 UTC tz-aware.
+        - 모든 UNIQUE / INDEX constraint 이름 명시 (autogenerate diff 안정).
+    """
+
+    __tablename__ = "scheduler_job_claims"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # 가드 대상 job 식별자. APScheduler job_id 와는 별개의 논리적 이름이며
+    # app.scheduler.job_guard 의 JOB_NAME_* 상수가 single source of truth.
+    job_name: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        doc=(
+            "가드 대상 job 의 논리적 이름 (예: 'scheduled_scrape', "
+            "'scheduled_daily_report_job'). job_guard.JOB_NAME_* 상수와 일치."
+        ),
+    )
+
+    # 예정 fire-time 을 고정 시간창으로 내림한 버킷 키. 동일 trigger 주기에
+    # 발사된 중복 호출들이 같은 값을 갖도록 설계된 결정적 문자열이다.
+    slot_key: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        doc=(
+            "예정 fire-time 을 시간창(기본 60초)으로 내림한 버킷 키 "
+            "(ISO-8601 UTC 문자열). 동일 주기의 중복 호출은 같은 값을 계산한다."
+        ),
+    )
+
+    # claim 이 실제로 성사된 시각. 보관 기간 경과 row 정리(purge) 의 기준.
+    claimed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        server_default=text("CURRENT_TIMESTAMP"),
+        doc="claim 이 성사된 시각 (UTC tz-aware). 오래된 claim row 정리 기준.",
+    )
+
+    # claim 을 획득한 프로세스 pid. 진단용 — 어떤 worker 가 job 을 실제로
+    # 실행했는지 docker logs 와 대조할 수 있다.
+    claimed_by_pid: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        doc="claim 을 획득한 프로세스 pid (진단용).",
+    )
+
+    __table_args__ = (
+        # 동일 (job_name, slot_key) 는 단 1건만 — 이 제약이 single-flight 의
+        # 원자성을 보장한다. 두 번째 호출의 INSERT 는 IntegrityError 로 거절.
+        UniqueConstraint(
+            "job_name",
+            "slot_key",
+            name="uq_scheduler_job_claims_job_name_slot_key",
+        ),
+        # 보관 기간 경과 row 정리(claimed_at < cutoff) 를 빠르게 하기 위한 인덱스.
+        Index("ix_scheduler_job_claims_claimed_at", "claimed_at"),
+    )
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현을 반환한다."""
+        return (
+            f"<SchedulerJobClaim id={self.id} job_name={self.job_name!r} "
+            f"slot_key={self.slot_key!r} claimed_by_pid={self.claimed_by_pid}>"
+        )
+
+
 __all__ = [
     "Base",
     "Announcement",
@@ -2993,6 +3086,7 @@ __all__ = [
     "Organization",
     "RelevanceJudgment",
     "RelevanceJudgmentHistory",
+    "SchedulerJobClaim",
     "ScrapeRun",
     "ScrapeSnapshot",
     "SCRAPE_RUN_STATUSES",
