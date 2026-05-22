@@ -3319,10 +3319,33 @@ button.canonical-count-badge.siblings-toggle--open {
     border-radius: 3px;
 }
 
+/* 접수·마감 일시 묶음 — margin-left: auto 로 행 우측에 정렬한다.
+ * 과거에는 .dashboard-card__deadline 단독에 margin-left: auto 가 있었으나,
+ * 접수 일시가 추가되면서 두 span 을 한 컨테이너로 묶어 우측 정렬한다
+ * (접수 span 이 마감 span 왼쪽에 자연스럽게 붙도록). */
+.dashboard-card__dates {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+}
+
+/* 접수 일시 — 마감 일시와 동일한 회색 보조 톤. */
+.dashboard-card__received {
+    color: #6b7280;
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+/* 접수 일시 미상 — 마감 미정과 동일한 흐린 이탤릭 톤으로 통일. */
+.dashboard-card__received--unknown {
+    color: #9ca3af;
+    font-style: italic;
+}
+
 .dashboard-card__deadline {
     color: #6b7280;
     font-size: 12px;
-    margin-left: auto;
     white-space: nowrap;
 }
 
