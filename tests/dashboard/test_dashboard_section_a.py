@@ -668,7 +668,7 @@ class TestBuildAnnouncementRowView:
             agency="국토교통부",
             received_at=received,
             deadline_at=deadline,
-            duplicate_badges=["📝 내용 변경에도"],
+            duplicate_badges=["📝 내용 변경"],
         )
         view = build_announcement_row_view(item)
         assert view.title == "자율주행 R&D 공고"
@@ -678,7 +678,7 @@ class TestBuildAnnouncementRowView:
         assert view.agency == "국토교통부"
         assert view.received_at == received
         assert view.deadline_at == deadline
-        assert view.duplicate_badges == ["📝 내용 변경에도"]
+        assert view.duplicate_badges == ["📝 내용 변경"]
 
     def test_builds_detail_url_from_announcement_id(self) -> None:
         """``detail_url`` 이 기존 expand 행 href 와 동일한 경로로 조립된다."""
@@ -705,9 +705,9 @@ class TestBuildAnnouncementRowView:
 
     def test_duplicate_badges_list_is_copied(self) -> None:
         """중복 배지 list 는 원본과 같은 객체를 공유하지 않도록 복사된다."""
-        item = _make_expand_item(duplicate_badges=["🆕 신규에도"])
+        item = _make_expand_item(duplicate_badges=["🆕 신규"])
         view = build_announcement_row_view(item)
-        assert view.duplicate_badges == ["🆕 신규에도"]
+        assert view.duplicate_badges == ["🆕 신규"]
         assert view.duplicate_badges is not item.duplicate_badges
 
     def test_rendered_row_contains_dashboard_format_elements(self) -> None:

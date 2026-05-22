@@ -88,34 +88,32 @@ SECTION_A_CATEGORY_DESCRIPTORS: tuple[dict[str, str], ...] = (
     {
         "key": CATEGORY_NEW,
         "label": "신규",
-        "duplicate_badge": "🆕 신규에도",
+        "duplicate_badge": "🆕 신규",
         "is_transition": "false",
     },
     {
         "key": CATEGORY_CONTENT_CHANGED,
         "label": "내용 변경",
-        "duplicate_badge": "📝 내용 변경에도",
+        "duplicate_badge": "📝 내용 변경",
         "is_transition": "false",
     },
     {
         "key": _transition_key(TRANSITION_TO_LABELS[0]),  # 접수예정
         "label": f"(전이) {TRANSITION_TO_LABELS[0]}",
-        # 신규('🆕 신규에도')·내용 변경('📝 내용 변경에도') 배지와 어법을
-        # 통일하기 위해 조사 '에도' 를 사용한다. 과거 '...도' 형태는 상태명
-        # 뒤에 조사 '도' 가 직접 붙어 '접수중도' 처럼 한 단어로 잘못 읽혔다.
-        "duplicate_badge": f"🔄 전이→{TRANSITION_TO_LABELS[0]}에도",
+        # task 00137: postfix('에도') 전체 제거
+        "duplicate_badge": f"🔄 전이→{TRANSITION_TO_LABELS[0]}",
         "is_transition": "true",
     },
     {
         "key": _transition_key(TRANSITION_TO_LABELS[1]),  # 접수중
         "label": f"(전이) {TRANSITION_TO_LABELS[1]}",
-        "duplicate_badge": f"🔄 전이→{TRANSITION_TO_LABELS[1]}에도",
+        "duplicate_badge": f"🔄 전이→{TRANSITION_TO_LABELS[1]}",
         "is_transition": "true",
     },
     {
         "key": _transition_key(TRANSITION_TO_LABELS[2]),  # 마감
         "label": f"(전이) {TRANSITION_TO_LABELS[2]}",
-        "duplicate_badge": f"🔄 전이→{TRANSITION_TO_LABELS[2]}에도",
+        "duplicate_badge": f"🔄 전이→{TRANSITION_TO_LABELS[2]}",
         "is_transition": "true",
     },
 )
