@@ -16,6 +16,7 @@ Phase 1b 에서 자유 회원가입 기반 세션 인증이 추가되었으나, 
 from __future__ import annotations
 
 import mimetypes
+import os
 from collections.abc import Iterator
 from math import ceil
 from pathlib import Path
@@ -359,50 +360,30 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             type(exc).__name__, exc,
         )
 
-    # Phase 2(00025-6): APScheduler BackgroundScheduler 기동.
-    # stale cleanup 이 끝난 **뒤** 에 start 한다 — 스케줄 잡이 곧바로
-    # start_scrape_run 을 부르게 되면 방금 failed 로 정리한 lock 을 다시
-    # running 으로 올려야 하는데, cleanup 과 scheduler.start() 사이에 race
-    # 가 있으면 간헐적으로 lock 경합이 생길 수 있다. 순서 고정으로 방지.
+    # task 00133 — APScheduler 기동은 ASGI lifespan 의 startup 훅
+    # (아래 ``_startup_scheduler``) 으로 옮겼다. 더 이상 create_app() 본문에서
+    # start_scheduler() 를 호출하지 않는다.
     #
-    # 재시작 후 복원: SQLAlchemyJobStore 가 scheduler_jobs 테이블에서 잡을
-    # 자동 로드. misfire_grace_time(기본 300초) 안에 들어오는 놓친 잡은
-    # coalesce=True 로 한 번에 합쳐 실행된다.
+    # 회귀 배경: ``app = create_app()`` 은 모듈 수준 코드라, 모듈이 import 될 때
+    # 마다 실행된다. uvicorn ``--reload`` 환경에서는 (1) reload 를 감시하는 부모
+    # 프로세스와 (2) 실제 HTTP 요청을 처리하는 worker 프로세스가 **둘 다**
+    # ``app.web.main`` 을 import 한다. 예전처럼 create_app() 본문에서
+    # start_scheduler() 를 호출하면, task 131 이 도입한 단일 인스턴스 flock 을
+    # reload 감시 부모 프로세스가 worker 보다 먼저 쥐어 버린다. 그러면 정작
+    # HTTP 를 처리하는 worker 는 lock 을 얻지 못해 스케줄러를 띄우지 못하고,
+    # 사용자가 보는 [스케줄]/[시스템 백업] 탭은 영구히 'APScheduler 가
+    # 기동되지 않았습니다' 경고를 표시한다 — task 131 이후 보고된 회귀의
+    # 근본 원인이다.
     #
-    # 실패 시 정책: 수동 수집(/admin/scrape) 은 스케줄러가 없어도 동작해야
-    # 하므로 예외를 삼키고 웹 기동은 계속한다.
-    try:
-        start_scheduler()
-    except Exception as exc:
-        logger.exception(
-            "APScheduler 기동 실패(스킵, 수동 수집은 계속 가능): ({}: {})",
-            type(exc).__name__, exc,
-        )
-
-    # task 00094-2 — startup 시 백업 cron 잡이 없으면 자동 등록한다.
-    # APScheduler 가 jobstore 에서 자동 복원한 경우 no-op. 첫 실행 시 DB 설정
-    # (없으면 DEFAULT_BACKUP_CRON) 으로 등록한다. 스케줄러 기동 실패 시에도
-    # 이 호출은 내부에서 조용히 skip 하므로 웹 기동을 막지 않는다.
-    try:
-        ensure_backup_cron_registered()
-    except Exception as exc:
-        logger.warning(
-            "백업 cron startup 등록 실패(스킵, 웹 기동 계속): ({}: {})",
-            type(exc).__name__, exc,
-        )
-
-    # task 00125-7 (Phase A-3) — startup 시 Daily Report cron 잡을 SystemSetting
-    # 기반으로 복원한다. ``email.daily_report.enabled`` 가 True 면 cron 표현식으로
-    # 등록 (jobstore 에 복원된 잡이 있으면 reschedule), False 면 비활성화 분기
-    # (잡스토어 복원분도 함께 제거). 백업 패턴과 동일 try/except — startup 실패
-    # 시에도 웹 기동은 계속한다.
-    try:
-        ensure_daily_report_cron_registered()
-    except Exception as exc:
-        logger.warning(
-            "Daily report cron startup 등록 실패(스킵, 웹 기동 계속): ({}: {})",
-            type(exc).__name__, exc,
-        )
+    # ASGI lifespan 의 startup 훅은 ASGI 서버가 실제로 가동되는 프로세스, 즉
+    # 요청을 처리하는 worker 에서만 실행된다 (reload 감시 부모는 모듈을
+    # import 해 ``app`` 객체를 만들 뿐 ASGI 서버를 띄우지 않으므로 훅이
+    # 실행되지 않는다). 따라서 스케줄러를 기동하고 flock 을 쥐는 프로세스와
+    # HTTP 를 처리하는 프로세스가 항상 일치하게 된다.
+    #
+    # 또한 stale cleanup(바로 위 블록) 은 create_app() 본문에서 끝나고, startup
+    # 훅은 create_app() 이 완전히 끝난 뒤에야 실행되므로 'cleanup 먼저, 스케줄러
+    # 나중' 순서는 더 강하게 보장된다.
 
     # sources.yaml 에서 소스 목록을 한 번만 읽어 라우트 클로저에 공유한다.
     available_source_ids: list[str] = get_available_source_ids()
@@ -496,6 +477,76 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # task 00051-2: 건의사항 게시판 라우터(/suggestions, /suggestions/new) mount.
     # 비로그인도 목록·폼 진입 가능(폼은 안내만 표시), POST /suggestions 는 로그인 필수.
     fastapi_app.include_router(suggestions_router)
+
+    # task 00133 — APScheduler 기동을 ASGI lifespan 의 startup 훅으로 수행한다.
+    # 이 훅은 ASGI 서버가 실제로 가동되는 프로세스(요청을 처리하는 worker)에서
+    # 만 실행된다. uvicorn ``--reload`` 의 reload 감시 부모 프로세스는
+    # ``app.web.main`` 을 import 해 ``app`` 객체만 만들 뿐 ASGI 서버를 띄우지
+    # 않으므로 본 훅이 실행되지 않는다. 따라서 스케줄러를 기동하고 task 131 의
+    # 단일 인스턴스 flock 을 쥐는 프로세스가 항상 HTTP 를 처리하는 worker 와
+    # 일치한다 — create_app() 본문에서 직접 기동하던 예전 방식의 회귀(부모가
+    # lock 을 선점해 worker 스케줄러가 영구 미기동)를 근본적으로 차단한다.
+    @fastapi_app.on_event("startup")
+    def _startup_scheduler() -> None:  # noqa: D401 - FastAPI 훅
+        """FastAPI startup 훅 — APScheduler 기동 + cron 잡 자동 복원.
+
+        ASGI 서버가 실제 가동되는 프로세스(요청을 처리하는 worker)에서만
+        실행된다. uvicorn ``--reload`` 의 reload 감시 부모 프로세스는 모듈을
+        import 해 ``app`` 객체만 만들 뿐 ASGI 서버를 띄우지 않으므로 본 훅이
+        실행되지 않는다 — 따라서 task 131 의 단일 인스턴스 flock 은 항상
+        worker 가 쥔다.
+        """
+        # 어느 프로세스가 스케줄러 startup 을 수행하는지 운영자가 docker logs
+        # 만으로 즉시 분간할 수 있도록 pid 를 남긴다. uvicorn --reload 환경에서
+        # 이 로그의 pid 와 'APScheduler 기동' 로그의 pid 가 일치해야 정상이다.
+        logger.info(
+            "ASGI startup 훅 — APScheduler 기동 절차 시작 (pid={}).", os.getpid()
+        )
+
+        # Phase 2(00025-6): APScheduler BackgroundScheduler 기동.
+        # create_app() 본문의 stale cleanup 이 끝난 **뒤** 에 실행된다 — startup
+        # 훅은 create_app() 이 완전히 반환된 다음에야 호출되므로 'cleanup 먼저,
+        # 스케줄러 나중' 순서가 보장된다. 스케줄 잡이 곧바로 start_scrape_run 을
+        # 부를 때 방금 failed 로 정리한 lock 과 경합하지 않도록 한 순서 고정이다.
+        #
+        # 재시작 후 복원: SQLAlchemyJobStore 가 scheduler_jobs 테이블에서 잡을
+        # 자동 로드. misfire_grace_time(기본 300초) 안에 들어오는 놓친 잡은
+        # coalesce=True 로 한 번에 합쳐 실행된다.
+        #
+        # 실패 시 정책: 수동 수집(/admin/scrape) 은 스케줄러가 없어도 동작해야
+        # 하므로 예외를 삼키고 웹 기동은 계속한다.
+        try:
+            start_scheduler()
+        except Exception as exc:
+            logger.exception(
+                "APScheduler 기동 실패(스킵, 수동 수집은 계속 가능): ({}: {})",
+                type(exc).__name__, exc,
+            )
+
+        # task 00094-2 — startup 시 백업 cron 잡이 없으면 자동 등록한다.
+        # APScheduler 가 jobstore 에서 자동 복원한 경우 no-op. 첫 실행 시 DB 설정
+        # (없으면 DEFAULT_BACKUP_CRON) 으로 등록한다. 스케줄러 기동 실패 시에도
+        # 이 호출은 내부에서 조용히 skip 하므로 웹 기동을 막지 않는다.
+        try:
+            ensure_backup_cron_registered()
+        except Exception as exc:
+            logger.warning(
+                "백업 cron startup 등록 실패(스킵, 웹 기동 계속): ({}: {})",
+                type(exc).__name__, exc,
+            )
+
+        # task 00125-7 (Phase A-3) — startup 시 Daily Report cron 잡을
+        # SystemSetting 기반으로 복원한다. ``email.daily_report.enabled`` 가
+        # True 면 cron 표현식으로 등록 (jobstore 에 복원된 잡이 있으면
+        # reschedule), False 면 비활성화 분기 (잡스토어 복원분도 함께 제거).
+        # 백업 패턴과 동일 try/except — startup 실패 시에도 웹 기동은 계속한다.
+        try:
+            ensure_daily_report_cron_registered()
+        except Exception as exc:
+            logger.warning(
+                "Daily report cron startup 등록 실패(스킵, 웹 기동 계속): ({}: {})",
+                type(exc).__name__, exc,
+            )
 
     # Phase 2(00025-6): shutdown 시 APScheduler 정지.
     # docker-compose 의 `restart: unless-stopped` 와 결합해, 웹 프로세스가 정상

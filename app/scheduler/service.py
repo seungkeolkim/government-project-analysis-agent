@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import uuid
 from dataclasses import dataclass
@@ -303,17 +304,23 @@ def start() -> None:
     # lock 을 쥔 다른 프로세스가 이미 job 을 실행하므로, 이 프로세스까지 띄우면
     # 동일 job 이 중복 실행된다.
     if not try_acquire_single_instance_lock():
+        # pid 를 남겨 운영자가 single_instance 의 'lock 획득/실패' 로그와
+        # 짝지어 어느 프로세스가 lock 을 쥐었는지 docker logs 만으로 추적할 수
+        # 있게 한다. uvicorn --reload 환경에서 이 로그가 worker pid 로 찍히면
+        # 비정상(=task 00133 회귀) 이다 — startup 훅으로 옮긴 뒤에는 worker 가
+        # 항상 lock 을 쥐어야 한다.
         logger.warning(
             "APScheduler 기동 생략 — 단일 인스턴스 lock 을 다른 프로세스가 "
             "점유 중이다. 이 프로세스에서는 스케줄 job 이 실행되지 않는다 "
-            "(cron 중복 실행 방지).",
+            "(cron 중복 실행 방지, pid={}).",
+            os.getpid(),
         )
         return
 
     scheduler.start()
     logger.info(
-        "APScheduler 기동: tablename={} misfire_grace_time={}s max_instances=1 coalesce=True timezone=KST",
-        SCHEDULER_JOBS_TABLENAME, DEFAULT_MISFIRE_GRACE_TIME_SEC,
+        "APScheduler 기동: pid={} tablename={} misfire_grace_time={}s max_instances=1 coalesce=True timezone=KST",
+        os.getpid(), SCHEDULER_JOBS_TABLENAME, DEFAULT_MISFIRE_GRACE_TIME_SEC,
     )
 
     # jobstore 의 기존 잡 trigger 를 KST 기준으로 자동 재해석.
