@@ -690,6 +690,10 @@ DAILY_REPORT_RUNS_LIMIT_MAX: int = 200
 # 정합 (recipient 컬럼이 String(320) 인 EmailSendRun 과 일치).
 DAILY_REPORT_TEST_RECIPIENT_MAX_LENGTH: int = 320
 
+# POST /daily-report/test-send 의 recipient 입력 최대 길이.
+# 콤마 구분 다중 주소를 수용하기 위해 320자보다 큰 값으로 설정.
+DAILY_REPORT_TEST_SEND_MULTI_RECIPIENT_MAX_LENGTH: int = 2000
+
 
 def _validate_cron_expression(cron_expression: str) -> str:
     """5필드 cron 표현식을 ``CronTrigger.from_crontab`` 으로 파싱해 유효성을 확인한다.
@@ -807,7 +811,7 @@ class DailyReportTestSendIn(BaseModel):
 
     recipient: str | None = Field(
         default=None,
-        max_length=DAILY_REPORT_TEST_RECIPIENT_MAX_LENGTH,
+        max_length=DAILY_REPORT_TEST_SEND_MULTI_RECIPIENT_MAX_LENGTH,
     )
 
 
@@ -1008,37 +1012,62 @@ def _serialize_daily_report_send_run(send_run: EmailSendRun) -> dict[str, Any]:
     }
 
 
-def _resolve_test_send_recipient(session, body_recipient: str | None) -> str:
-    """``POST /daily-report/test-send`` 의 수신자 결정 + 형식 검증.
+def _resolve_test_send_recipients(
+    session, body_recipient: str | None
+) -> list[str]:
+    """``POST /daily-report/test-send`` 의 수신자 목록 결정 + 형식 검증.
 
     우선순위:
-        1. body 의 ``recipient`` 가 비어 있지 않으면 사용.
-        2. 그 외에는 SystemSetting ``test_recipient`` 값을 fallback.
+        1. body 의 ``recipient`` 가 비어 있지 않으면 콤마로 분리해 각 주소를 사용.
+        2. 비어 있으면 SystemSetting ``test_recipient`` 를 fallback 단일 주소로 사용.
         3. 둘 다 빈 값이면 422 (HTTPException) raise.
 
-    결정된 값은 ``email_validator.validate_email`` 로 형식 검증해 잘못된 주소를
-    422 로 거부한다 (Pydantic ``EmailStr`` 이 빈 문자열을 거부해 fallback 분기를
-    만들기 어려운 점 회피).
+    입력이 있는 경우 콤마 분리 후 각 항목 strip → 빈 문자열 제거 → 개별 형식 검증
+    (``email_validator.validate_email``) 순서로 처리한다. 하나라도 형식 오류가 있으면
+    해당 주소와 오류 메시지를 포함해 422 로 거부한다.
 
     Args:
         session: SystemSetting fallback 조회용 ORM 세션.
-        body_recipient: 라우터가 받은 PUT body 의 ``recipient`` 값.
+        body_recipient: 라우터가 받은 body 의 ``recipient`` 값 (콤마 구분 가능).
 
     Returns:
-        검증을 통과한 단일 이메일 주소. 정규화된 값(``normalized``)을 반환해
-        EmailStr 의 case-folding 정책과 일치하게 한다.
+        검증을 통과한 정규화된(normalized) 이메일 주소 리스트.
 
     Raises:
-        HTTPException(422): 받는 사람을 결정할 수 없거나 형식이 잘못됨.
+        HTTPException(422): 받는 사람을 결정할 수 없거나 하나 이상의 주소 형식이 잘못됨.
     """
+    from email_validator import EmailNotValidError, validate_email
+
     candidate = (body_recipient or "").strip()
+
+    # 입력이 비어 있으면 SystemSetting fallback — 단일 주소로 리스트 반환.
     if not candidate:
         stored = (
             get_setting(session, SETTING_KEY_DAILY_REPORT_TEST_RECIPIENT)
             or DEFAULT_DAILY_REPORT_TEST_RECIPIENT
         )
-        candidate = (stored or "").strip()
-    if not candidate:
+        fallback = (stored or "").strip()
+        if not fallback:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "받는 사람을 입력하거나, 「Daily Report」 카드에서 기본 받는 "
+                    "사람을 먼저 저장해 주세요."
+                ),
+            )
+        try:
+            validated = validate_email(fallback, check_deliverability=False)
+        except EmailNotValidError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"저장된 기본 받는 사람 주소 형식이 올바르지 않습니다: {exc}",
+            ) from exc
+        return [validated.normalized]
+
+    # 콤마로 분리 → 각 항목 strip → 빈 문자열 제거.
+    parts = [p.strip() for p in candidate.split(",")]
+    parts = [p for p in parts if p]
+    if not parts:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=(
@@ -1047,18 +1076,19 @@ def _resolve_test_send_recipient(session, body_recipient: str | None) -> str:
             ),
         )
 
-    # email_validator 는 EmailStr 가 내부적으로 쓰는 라이브러리 — 같은 정책으로
-    # 형식 검증해 결과의 normalized 주소를 사용한다.
-    from email_validator import EmailNotValidError, validate_email
+    # 각 주소 형식 검증 — 하나라도 오류이면 해당 주소와 함께 422.
+    normalized_addresses: list[str] = []
+    for address in parts:
+        try:
+            validated = validate_email(address, check_deliverability=False)
+            normalized_addresses.append(validated.normalized)
+        except EmailNotValidError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"이메일 주소 형식이 올바르지 않습니다 ({address!r}): {exc}",
+            ) from exc
 
-    try:
-        validated = validate_email(candidate, check_deliverability=False)
-    except EmailNotValidError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"이메일 주소 형식이 올바르지 않습니다: {exc}",
-        ) from exc
-    return validated.normalized
+    return normalized_addresses
 
 
 def _result_to_response(result: Any) -> DailyReportRunResult:
@@ -1225,7 +1255,7 @@ def post_daily_report_test_send(
     body: DailyReportTestSendIn,
     current_user: User = Depends(admin_user_required),
 ) -> DailyReportRunResult:
-    """단일 수신자에게 daily report 본 발송 동작을 그대로 시도한다 (manual_test).
+    """콤마 구분 다중 수신자에게 daily report 본 발송 동작을 그대로 시도한다 (manual_test).
 
     ``trigger=manual_test`` 라 발송 성공해도 ``last_sent_at`` 은 갱신되지 않는다
     (정책표). 게이트 미통과 시 503 — A-1 의 ``/test-send`` 와 달리 daily report
@@ -1233,14 +1263,15 @@ def post_daily_report_test_send(
     (디자인 노트 §7).
     """
     logger.info(
-        "POST /api/admin/email/daily-report/test-send 진입: user_id={} recipient={!r}",
+        "POST /api/admin/email/daily-report/test-send 진입: user_id={} recipients={!r}",
         current_user.id,
         body.recipient,
     )
 
     with session_scope() as session:
-        # 1. recipient 결정 + 형식 검증 (body 우선, 빈 값이면 SystemSetting).
-        recipient = _resolve_test_send_recipient(session, body.recipient)
+        # 1. recipients 결정 + 형식 검증 (body 우선, 빈 값이면 SystemSetting fallback).
+        #    콤마 구분 다중 주소를 지원한다.
+        recipients = _resolve_test_send_recipients(session, body.recipient)
 
         # 2. transport 구성 — admin_email 의 test-send 와 동일 정책. 미지원 값
         #    → 422 (운영자에게 SystemSetting 입력 오류임을 알린다).
@@ -1262,7 +1293,7 @@ def post_daily_report_test_send(
 
         request_dto = DailyReportRequest(
             trigger=TRIGGER_MANUAL_TEST,
-            recipients=[recipient],
+            recipients=recipients,
             requested_by_user_id=current_user.id,
         )
 
@@ -1286,10 +1317,11 @@ def post_daily_report_test_send(
             ) from exc
 
     logger.info(
-        "Daily Report 테스트 발송 완료: user_id={} run_id={} status={}",
+        "Daily Report 테스트 발송 완료: user_id={} run_id={} status={} recipients={}",
         current_user.id,
         result.run_id,
         result.status.value if result.status is not None else None,
+        recipients,
     )
     return _result_to_response(result)
 
