@@ -196,42 +196,17 @@
                                 <ul class="dashboard-card__expand-list">
                                     {% for item in card.items %}
                                         <li class="dashboard-card__expand-row">
-                                            {# 행 전체가 클릭 영역 (<a href>). 가운데 클릭 시 새 창 표준 동작. #}
-                                            <a class="dashboard-card__expand-link"
-                                               href="/announcements/{{ item.announcement_id }}">
-                                                <span class="source-badge source-{{ item.source_type | lower }}">{{ item.source_type }}</span>
-                                                {% if item.transition_from and item.transition_from_key %}
-                                                    <span class="status-badge status-{{ item.transition_from_key }}">{{ item.transition_from }}</span>
-                                                    <span class="dashboard-card__transition-arrow">→</span>
-                                                {% endif %}
-                                                <span class="status-badge status-{{ item.status_key }}">{{ item.status_label }}</span>
-                                                <span class="dashboard-card__expand-title">{{ item.title }}</span>
-                                                {% for badge_text in item.duplicate_badges %}
-                                                    <span class="dashboard-card__duplicate-badge">{{ badge_text }}</span>
-                                                {% endfor %}
-                                                {# 접수·마감 일시를 한 묶음으로 우측 정렬. 접수 span 이
-                                                   마감 span 왼쪽에 오도록 순서를 고정한다. #}
-                                                <span class="dashboard-card__dates">
-                                                    {% if item.received_at %}
-                                                        <span class="dashboard-card__received">
-                                                            접수 {{ item.received_at | kst_date }}
-                                                        </span>
-                                                    {% else %}
-                                                        <span class="dashboard-card__received dashboard-card__received--unknown">
-                                                            접수일 미정
-                                                        </span>
-                                                    {% endif %}
-                                                    {% if item.deadline_at %}
-                                                        <span class="dashboard-card__deadline">
-                                                            마감 {{ item.deadline_at | kst_date }}
-                                                        </span>
-                                                    {% else %}
-                                                        <span class="dashboard-card__deadline dashboard-card__deadline--unknown">
-                                                            마감 미정
-                                                        </span>
-                                                    {% endif %}
-                                                </span>
-                                            </a>
+                                            {# task 00136-3: expand 행을 대시보드·데일리 리포트 메일이
+                                               공유하는 렌더러로 전환. render_announcement_row 글로벌이
+                                               SectionAExpandItem 을 공유 view-model 로 변환해 인라인
+                                               CSS <a href> 행(출처 배지 → 전이/현재 상태 배지 →
+                                               공고명 → 중복 배지 → 접수·마감 일시)을 렌더한다.
+                                               공유 렌더러(app.rendering.announcement_row) 한 곳을
+                                               고치면 대시보드와 메일 양쪽 공고 표현이 동시에 바뀐다.
+                                               행 전체가 클릭 영역(<a href>)이며 가운데 클릭 새 창
+                                               동작도 그대로 유지된다. 렌더러가 모든 동적 값을
+                                               html.escape 하므로 | safe 로 출력해도 안전하다. #}
+                                            {{ render_announcement_row(item) | safe }}
                                         </li>
                                     {% endfor %}
                                 </ul>

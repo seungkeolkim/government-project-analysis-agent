@@ -31,8 +31,14 @@ from app.db.snapshot import (
     merge_snapshot_payload,
     normalize_payload,
 )
+from app.rendering.announcement_row import (
+    AnnouncementRowView,
+    render_announcement_row_html,
+)
 from app.web.dashboard_section_a import (
     SECTION_A_CATEGORY_DESCRIPTORS,
+    SectionAExpandItem,
+    build_announcement_row_view,
     build_section_a,
 )
 
@@ -604,3 +610,131 @@ class TestSectionACategoryDescriptors:
             assert descriptor["label"].startswith("(전이) "), (
                 f"전이 라벨이 '(전이) X' 형식이어야 함: {descriptor['label']!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# build_announcement_row_view — SectionAExpandItem → 공유 view-model 어댑터 (00136-3)
+# ---------------------------------------------------------------------------
+
+
+def _make_expand_item(
+    *,
+    announcement_id: int = 100,
+    title: str = "테스트 공고",
+    source_type: str = "IRIS",
+    status_label: str = "접수중",
+    status_key: str = "receiving",
+    agency: str | None = "테스트기관",
+    received_at: datetime | None = None,
+    deadline_at: datetime | None = None,
+    transition_from: str | None = None,
+    transition_from_key: str | None = None,
+    duplicate_badges: list[str] | None = None,
+) -> SectionAExpandItem:
+    """어댑터 테스트용 ``SectionAExpandItem`` 헬퍼 — 키워드로 필드만 골라 채운다."""
+    return SectionAExpandItem(
+        announcement_id=announcement_id,
+        title=title,
+        source_type=source_type,
+        status_label=status_label,
+        status_key=status_key,
+        agency=agency,
+        received_at=received_at,
+        deadline_at=deadline_at,
+        canonical_group_id=None,
+        transition_from=transition_from,
+        transition_from_key=transition_from_key,
+        duplicate_badges=duplicate_badges if duplicate_badges is not None else [],
+    )
+
+
+class TestBuildAnnouncementRowView:
+    """``build_announcement_row_view`` — 대시보드 expand 행 → 공유 view-model 변환 (00136-3)."""
+
+    def test_returns_announcement_row_view(self) -> None:
+        """변환 결과 타입이 공유 ``AnnouncementRowView`` 다."""
+        view = build_announcement_row_view(_make_expand_item())
+        assert isinstance(view, AnnouncementRowView)
+
+    def test_maps_all_common_fields(self) -> None:
+        """공통 필드(출처/상태/공고명/기관/날짜/중복 배지)가 1:1 로 옮겨진다."""
+        received = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+        deadline = datetime(2026, 5, 20, 18, 0, tzinfo=UTC)
+        item = _make_expand_item(
+            title="자율주행 R&D 공고",
+            source_type="NTIS",
+            status_label="접수중",
+            status_key="receiving",
+            agency="국토교통부",
+            received_at=received,
+            deadline_at=deadline,
+            duplicate_badges=["📝 내용 변경에도"],
+        )
+        view = build_announcement_row_view(item)
+        assert view.title == "자율주행 R&D 공고"
+        assert view.source_type == "NTIS"
+        assert view.status_label == "접수중"
+        assert view.status_key == "receiving"
+        assert view.agency == "국토교통부"
+        assert view.received_at == received
+        assert view.deadline_at == deadline
+        assert view.duplicate_badges == ["📝 내용 변경에도"]
+
+    def test_builds_detail_url_from_announcement_id(self) -> None:
+        """``detail_url`` 이 기존 expand 행 href 와 동일한 경로로 조립된다."""
+        view = build_announcement_row_view(_make_expand_item(announcement_id=4242))
+        assert view.detail_url == "/announcements/4242"
+
+    def test_preserves_transition_fields(self) -> None:
+        """전이 행은 ``transition_from`` / ``transition_from_key`` 가 보존된다."""
+        item = _make_expand_item(
+            status_label="접수중",
+            status_key="receiving",
+            transition_from="접수예정",
+            transition_from_key="scheduled",
+        )
+        view = build_announcement_row_view(item)
+        assert view.transition_from == "접수예정"
+        assert view.transition_from_key == "scheduled"
+
+    def test_non_transition_row_has_none_transition(self) -> None:
+        """비전이 행은 ``transition_from`` 이 None 으로 그대로 넘어간다."""
+        view = build_announcement_row_view(_make_expand_item())
+        assert view.transition_from is None
+        assert view.transition_from_key is None
+
+    def test_duplicate_badges_list_is_copied(self) -> None:
+        """중복 배지 list 는 원본과 같은 객체를 공유하지 않도록 복사된다."""
+        item = _make_expand_item(duplicate_badges=["🆕 신규에도"])
+        view = build_announcement_row_view(item)
+        assert view.duplicate_badges == ["🆕 신규에도"]
+        assert view.duplicate_badges is not item.duplicate_badges
+
+    def test_rendered_row_contains_dashboard_format_elements(self) -> None:
+        """변환된 view-model 을 공유 렌더러에 넘기면 대시보드 포맷 행이 렌더된다.
+
+        출처 배지·전이/현재 상태 배지·공고명·접수/마감 일시·상세 링크가 모두
+        한 ``<a href>`` 행에 포함되는지(00136-3 전환의 핵심) 확인한다.
+        """
+        item = _make_expand_item(
+            announcement_id=777,
+            title="전이 검증 공고",
+            source_type="IRIS",
+            status_label="접수중",
+            status_key="receiving",
+            received_at=datetime(2026, 5, 1, 0, 0, tzinfo=UTC),
+            deadline_at=datetime(2026, 5, 31, 0, 0, tzinfo=UTC),
+            transition_from="접수예정",
+            transition_from_key="scheduled",
+        )
+        html_fragment = render_announcement_row_html(
+            build_announcement_row_view(item)
+        )
+        assert 'href="/announcements/777"' in html_fragment
+        assert "IRIS" in html_fragment
+        assert "접수예정" in html_fragment  # 전이 이전 상태 배지
+        assert "→" in html_fragment  # 전이 화살표
+        assert "접수중" in html_fragment  # 현재 상태 배지
+        assert "전이 검증 공고" in html_fragment
+        assert "접수 " in html_fragment
+        assert "마감 " in html_fragment
