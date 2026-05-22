@@ -955,15 +955,20 @@ def _build_daily_report_category_section_html(
 ) -> str:
     """HTML 본문에서 1개 카테고리 섹션을 만든다.
 
-    빈 list 이면 ``""`` 반환 — 호출자가 빈 문자열 그대로 본문에 붙여 섹션이
-    자연스럽게 사라지게 한다. 50건 cap 적용 + overflow 안내문은 회색 텍스트
-    한 줄로 표시.
+    빈 list 이면 ``""`` 반환 — 호출자가 빈 문자열 그대로 본문에 붙여 섹션(테두리
+    박스 포함)이 자연스럽게 사라지게 한다. 50건 cap 적용 + overflow 안내문은 회색
+    텍스트 한 줄로 박스 안에 표시.
 
-    공고 1건은 더 이상 메일 전용 ``<li>`` 마크업으로 그리지 않고, 대시보드와
-    공유하는 렌더러 :func:`render_announcement_row_html` 로 렌더한다
-    (task 00136-2). 공유 렌더러 한 곳을 고치면 대시보드·메일 양쪽 공고 표현이
-    동시에 바뀐다. 출처 배지·현재 상태 또는 이전→현재 상태 전이·공고명·접수/
-    마감 일시가 대시보드 Section A expand 행과 동일한 포맷으로 표시된다.
+    섹션 전체를 단일 셀 ``<table>/<td>`` 로 감싸고 ``<td>`` 에
+    ``border:1px solid #e0e0e0;border-radius:6px`` 를 인라인으로 지정해 메일
+    클라이언트에서 옅은 테두리 카드처럼 표시된다 (task 00139-2). ``<div>`` border
+    도 대부분 지원되지만, ``<td>`` border 는 Outlook·Gmail 에서 더 안정적으로
+    렌더된다.
+
+    공고 1건은 대시보드와 공유하는 렌더러 :func:`render_announcement_row_html` 로
+    렌더하며 (task 00136-2), 해당 렌더러도 ``<table>/<td>`` 기반(task 00139-1)이라
+    섹션 표 안에 행 표들이 중첩되는 구조가 된다 — 중첩 table 은 메일 클라이언트가
+    안정적으로 지원한다.
 
     이스케이프(공고명·출처·상태·detail_url)는 공유 렌더러가 내부에서 모두
     처리하므로 본 함수는 별도 escape 를 하지 않는다 — 고정 라벨(카테고리명)만
@@ -989,24 +994,25 @@ def _build_daily_report_category_section_html(
 
     overflow_html = ""
     if overflow > 0:
-        # 초과 안내는 행 묶음 끝에 회색 텍스트 한 줄로 노출.
+        # 초과 안내는 박스 안 행 묶음 끝에 회색 텍스트 한 줄로 노출.
         overflow_html = (
             '<div style="margin:6px 4px;font-size:13px;color:#888;">'
             f"… 외 {overflow}건 — 대시보드에서 확인"
             "</div>"
         )
 
+    # 섹션 전체를 단일 셀 <table>/<td> 로 감싸 옅은 테두리 박스를 그린다.
     # 라벨 옆에 카운트를 같이 노출 (text 본문과 1:1).
     safe_label = html.escape(descriptor.label)
     return (
-        '<div style="margin:20px 0;">'
+        '<table style="width:100%;border-collapse:collapse;margin:20px 0;">'
+        '<tr><td style="border:1px solid #e0e0e0;border-radius:6px;padding:12px 16px;">'
         '<h3 style="font-size:16px;margin:0 0 8px;color:#333;">'
         f"{descriptor.emoji} {safe_label} ({len(items)}건)"
         "</h3>"
-        '<div style="display:flex;flex-direction:column;gap:2px;">'
         f"{''.join(row_html_parts)}"
         f"{overflow_html}"
-        "</div></div>"
+        "</td></tr></table>"
     )
 
 

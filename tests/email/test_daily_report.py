@@ -1780,6 +1780,79 @@ def test_build_html_body_renders_received_at_datetime() -> None:
 
 
 # ──────────────────────────────────────────────────────────────
+# U. html body — 카테고리 섹션이 옅은 테두리 박스로 감싸진다 (task 00139-2)
+# ──────────────────────────────────────────────────────────────
+
+
+def test_build_html_body_category_section_wrapped_in_border_box() -> None:
+    """각 카테고리 섹션이 옅은 테두리(#e0e0e0) 박스 ``<td>`` 로 감싸진다.
+
+    task 00139-2 — 사용자 원문 \"각 섹션마다 대시보드처럼 매우 옅은 테두리를
+    가진 표로 감싸서 읽기 편하게 해줘\".
+
+    검증:
+        - ``<td>`` 에 ``border:1px solid #e0e0e0;border-radius:6px`` 가 인라인.
+        - 섹션이 2개이면 그 패턴도 2회 이상 등장한다.
+        - 섹션 박스 안에 내부 padding(``12px 16px``)이 적용된다.
+        - 헤더(h3)·공고 행·overflow 안내가 모두 박스 안에 들어간다.
+    """
+    from app.email.message_builder import build_daily_report_html_body
+
+    payload = AggregatedSnapshotPayload(
+        new=[_build_announcement_summary(announcement_id=1, title="신규 공고")],
+        content_changed=[_build_announcement_summary(announcement_id=2, title="변경 공고")],
+        transitioned_to_received_scheduled=[],
+        transitioned_to_receiving=[],
+        transitioned_to_closed=[],
+        total_count=2,
+    )
+    html_body = build_daily_report_html_body(
+        window=_window_for_body(), payload=payload
+    )
+
+    # <td> 에 border:1px solid #e0e0e0;border-radius:6px 가 인라인으로 붙어야 함.
+    # (footer <hr> 의 border:1px solid #e0e0e0 과는 구분되는 패턴)
+    section_box_pattern = "border:1px solid #e0e0e0;border-radius:6px"
+    assert section_box_pattern in html_body, (
+        "섹션 박스 <td> 에 border:1px solid #e0e0e0;border-radius:6px 가 없음"
+    )
+    # 섹션 2개이므로 패턴도 2회 이상.
+    assert html_body.count(section_box_pattern) >= 2, (
+        f"섹션이 2개인데 박스 패턴이 {html_body.count(section_box_pattern)}회 — 2 이상이어야 함"
+    )
+    # 박스 내부 padding.
+    assert "padding:12px 16px" in html_body
+
+    # 빈 카테고리(3종)는 박스가 없으므로 패턴 횟수 == 2.
+    assert html_body.count(section_box_pattern) == 2
+
+
+def test_build_html_body_empty_category_has_no_border_box() -> None:
+    """빈 카테고리는 테두리 박스를 포함해 섹션 전체가 사라진다.
+
+    task 00139-2 — items 가 빈 list 이면 ``""`` 를 반환해 섹션(테두리 박스 포함)이
+    통째로 생략됨을 검증한다.
+    """
+    from app.email.message_builder import build_daily_report_html_body
+
+    payload = AggregatedSnapshotPayload(
+        new=[_build_announcement_summary(title="단독 신규")],
+        content_changed=[],
+        transitioned_to_received_scheduled=[],
+        transitioned_to_receiving=[],
+        transitioned_to_closed=[],
+        total_count=1,
+    )
+    html_body = build_daily_report_html_body(
+        window=_window_for_body(), payload=payload
+    )
+
+    section_box_pattern = "border:1px solid #e0e0e0;border-radius:6px"
+    # 섹션이 1개(신규 공고)이므로 박스 패턴도 정확히 1회.
+    assert html_body.count(section_box_pattern) == 1
+
+
+# ──────────────────────────────────────────────────────────────
 # fixed_lookback_hours — 테스트 발송 전용 고정 구간
 # ──────────────────────────────────────────────────────────────
 
