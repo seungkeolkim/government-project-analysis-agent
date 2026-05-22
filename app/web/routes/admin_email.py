@@ -714,12 +714,13 @@ def _validate_cron_expression(cron_expression: str) -> str:
     stripped = cron_expression.strip()
     if not stripped:
         return ""
-    # lazy import — apscheduler 의 호환성 문제를 런타임에만 노출 (service.py 와
-    # 동일 정책). cron 형식만 검증하므로 timezone 은 부가 정보로만 쓰인다.
-    from apscheduler.triggers.cron import CronTrigger
+    # task 00147 — service.py 의 등록 경로와 동일하게 요일 규약 보정 헬퍼를
+    # 거쳐 검증한다. 헬퍼가 표준 crontab 요일 표기를 APScheduler 규약으로 보정한
+    # 뒤 CronTrigger 를 만들므로, 검증 시점과 등록 시점의 파싱 동작이 일치한다.
+    from app.scheduler.cron import build_cron_trigger
 
     try:
-        CronTrigger.from_crontab(stripped, timezone=KST)
+        build_cron_trigger(stripped, timezone=KST)
     except Exception as exc:
         raise ValueError(
             f"cron 표현식이 올바르지 않습니다: {exc}"
