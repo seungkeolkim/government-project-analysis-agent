@@ -51,6 +51,7 @@ from app.db.snapshot import (
     merge_snapshot_payload,
     normalize_payload,
 )
+from app.rendering.announcement_row import AnnouncementRowView
 
 
 # ──────────────────────────────────────────────────────────────
@@ -170,6 +171,43 @@ class SectionAExpandItem:
     transition_from: str | None
     transition_from_key: str | None
     duplicate_badges: list[str] = field(default_factory=list)
+
+
+def build_announcement_row_view(item: SectionAExpandItem) -> AnnouncementRowView:
+    """``SectionAExpandItem`` 을 공유 렌더러용 ``AnnouncementRowView`` 로 변환한다.
+
+    대시보드 Section A expand 행과 데일리 리포트 메일 공고 항목이 같은 공유
+    렌더러(``app.rendering.announcement_row.render_announcement_row_html``)를
+    쓰도록 하기 위한 어댑터다 (task 00136-3). ``SectionAExpandItem`` 은 공유
+    view-model 이 요구하는 필드(source_type / status_label / status_key /
+    transition_from / transition_from_key / title / agency / received_at /
+    deadline_at / duplicate_badges)를 모두 보유하고 있어 대부분 1:1 필드 매핑
+    이며, ``detail_url`` 만 ``announcement_id`` 로부터 공고 상세 페이지 경로
+    (``/announcements/<id>``)를 조립한다 — 기존 expand 행 템플릿의 ``href`` 와
+    동일한 경로다.
+
+    Args:
+        item: 변환할 Section A expand 행 데이터.
+
+    Returns:
+        공유 렌더러 :func:`render_announcement_row_html` 에 그대로 넘길 수 있는
+        ``AnnouncementRowView``.
+    """
+    return AnnouncementRowView(
+        source_type=item.source_type,
+        status_label=item.status_label,
+        status_key=item.status_key,
+        transition_from=item.transition_from,
+        transition_from_key=item.transition_from_key,
+        title=item.title,
+        detail_url=f"/announcements/{item.announcement_id}",
+        agency=item.agency,
+        received_at=item.received_at,
+        deadline_at=item.deadline_at,
+        # frozen dataclass 의 기본값 list 가 view-model 로 그대로 새 나가지
+        # 않도록 방어적으로 복사해 넘긴다.
+        duplicate_badges=list(item.duplicate_badges),
+    )
 
 
 @dataclass(frozen=True)
@@ -712,5 +750,6 @@ __all__ = [
     "SectionAData",
     "SectionAExpandItem",
     "SectionAFallback",
+    "build_announcement_row_view",
     "build_section_a",
 ]

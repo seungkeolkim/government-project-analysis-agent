@@ -3278,6 +3278,14 @@ button.canonical-count-badge.siblings-toggle--open {
     border-bottom: none;
 }
 
+/* task 00136-3: expand 행이 공유 렌더러(인라인 CSS <a>)로 전환되면서
+   .dashboard-card__expand-link:hover 가 더 이상 적용되지 않는다. 인라인
+   CSS 로는 :hover 를 표현할 수 없으므로, 행 단위 hover 배경을 여전히
+   살아 있는 <li> 클래스에 직접 둬 기존 호버 UX(연한 파랑 배경)를 유지한다. */
+.dashboard-card__expand-row:hover {
+    background: #eff6ff;
+}
+
 .dashboard-card__expand-link {
     display: flex;
     flex-wrap: wrap;

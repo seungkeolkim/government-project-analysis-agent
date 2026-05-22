@@ -41,13 +41,18 @@ from app.auth.dependencies import current_user_optional
 from app.db.models import User
 from app.db.repository import list_available_snapshot_dates
 from app.db.session import SessionLocal
+from app.rendering.announcement_row import render_announcement_row_html
 from app.timezone import now_kst
 from app.web.dashboard_compare import (
     COMPARE_MODE_VALUES,
     CompareMode,
     resolve_compare_range,
 )
-from app.web.dashboard_section_a import build_section_a
+from app.web.dashboard_section_a import (
+    SectionAExpandItem,
+    build_announcement_row_view,
+    build_section_a,
+)
 from app.web.dashboard_section_b import build_section_b
 from app.web.dashboard_trend_chart import (
     build_trend_chart,
@@ -67,6 +72,43 @@ _templates: Jinja2Templates = Jinja2Templates(directory=str(_DASHBOARD_TEMPLATES
 # task 00040-3 — KST 표시 필터 (kst_format / kst_date) 등록.
 # 본 라우터의 모든 timestamp 표시는 이 필터를 거친다 (사용자 원문 컨벤션).
 register_kst_filters(_templates)
+
+
+def _render_announcement_row(item: SectionAExpandItem) -> str:
+    """Section A expand 행 1개를 공유 렌더러로 렌더한 HTML 조각을 반환한다.
+
+    ``dashboard.html`` 의 ``{{ render_announcement_row(item) | safe }}`` 호출에
+    바인딩되는 Jinja 글로벌이다 (task 00136-3).
+
+    동작:
+        ``SectionAExpandItem`` 을 :func:`build_announcement_row_view` 로 공유
+        view-model 로 변환한 뒤, 공유 렌더러
+        :func:`render_announcement_row_html` 를 ``wrap_with_link=True`` 로
+        호출한다. 행 전체가 ``<a href>`` 로 감싸지므로 기존 expand 행과
+        동일하게 행 전체가 클릭 영역이 되고, 가운데 클릭 시 새 창으로 여는
+        브라우저 표준 동작도 그대로 유지된다.
+
+    의의:
+        대시보드 expand 행과 데일리 리포트 메일 공고 항목이 모두 이 공유
+        렌더러를 거치므로, 공유 렌더러(``app.rendering.announcement_row``)
+        한 곳을 고치면 양쪽 공고 표현이 동시에 바뀐다 (사용자 원문 3번 요구).
+
+    Args:
+        item: 렌더할 Section A expand 행 데이터.
+
+    Returns:
+        공고 1행의 인라인 CSS ``<a href>`` HTML 조각 문자열. 템플릿에서는
+        ``| safe`` 필터로 escape 없이 출력한다 (렌더러가 모든 동적 값을
+        ``html.escape`` 처리하므로 안전하다).
+    """
+    row_view = build_announcement_row_view(item)
+    return render_announcement_row_html(row_view, wrap_with_link=True)
+
+
+# Jinja 글로벌 등록 — 템플릿이 ``render_announcement_row(item)`` 으로 호출한다.
+# kst_format / kst_date 와 달리 '값 변환 필터' 가 아니라 '항목 → HTML 조각'
+# 렌더 함수라 filters 가 아닌 globals 에 등록한다.
+_templates.env.globals["render_announcement_row"] = _render_announcement_row
 
 
 # ──────────────────────────────────────────────────────────────
