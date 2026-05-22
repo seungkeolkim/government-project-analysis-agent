@@ -57,6 +57,11 @@ from app.scheduler.single_instance import (
     try_acquire_single_instance_lock,
 )
 
+# task 00147 — 표준 crontab 요일 표기를 APScheduler 요일 규약으로 보정하는 헬퍼.
+# CronTrigger.from_crontab 은 요일 숫자를 변환 없이 넘겨 '1-5'(월~금) 가 화~토로
+# 어긋나므로, 모든 cron trigger 생성은 이 헬퍼를 거치도록 통일한다.
+from app.scheduler.cron import build_cron_trigger
+
 # ──────────────────────────────────────────────────────────────
 # 예외
 # ──────────────────────────────────────────────────────────────
@@ -230,7 +235,11 @@ def _reinterpret_existing_jobs_to_kst(scheduler: Any) -> int:
                 )
                 continue
             try:
-                new_trigger = CronTrigger.from_crontab(cron_expression, timezone=KST)
+                # task 00147 — 요일 규약 보정 헬퍼를 거쳐 재해석한다. startup 시
+                # jobstore 에 잘못된 요일로 저장돼 있던 기존 잡들도 이 경로를
+                # 타면서 다음 기동 때 올바른 요일로 자동 reschedule 된다 —
+                # 별도 마이그레이션 스크립트가 필요 없다.
+                new_trigger = build_cron_trigger(cron_expression, timezone=KST)
             except Exception as exc:
                 logger.warning(
                     "tz 재해석 스킵 — cron 표현식 재파싱 실패: job_id={} expr={!r} err={}",
@@ -529,15 +538,15 @@ def add_cron_schedule(
     if not cron_expression:
         raise ScheduleValidationError("cron 표현식이 비어 있습니다.")
 
-    from apscheduler.triggers.cron import CronTrigger
-
     try:
         # task 00040-4 — cron 표현식은 KST 기준으로 파싱한다. APScheduler 는
         # 새 잡의 다음 실행 시각을 trigger.timezone 과 scheduler.timezone 양쪽을
         # 종합해 계산하므로 trigger 자체에 KST 를 명시해 둔다.
-        trigger = CronTrigger.from_crontab(cron_expression, timezone=KST)
+        # task 00147 — build_cron_trigger 가 요일 필드를 APScheduler 규약으로
+        # 보정한 뒤 CronTrigger 를 만든다.
+        trigger = build_cron_trigger(cron_expression, timezone=KST)
     except Exception as exc:
-        # from_crontab 은 잘못된 표현식에 대해 ValueError 또는 다른 예외를 던진다.
+        # build_cron_trigger 는 잘못된 표현식에 대해 ValueError 등을 그대로 던진다.
         raise ScheduleValidationError(
             f"cron 표현식 파싱 실패: {exc}"
         ) from exc
@@ -696,13 +705,10 @@ def add_gc_orphan_cron_schedule(
     if not cron_expression:
         raise ScheduleValidationError("GC cron 표현식이 비어 있습니다.")
 
-    # Lazy import — apscheduler 의 호환성 문제를 런타임에만 노출한다 (다른 add_*
-    # 함수들과 동일 패턴).
-    from apscheduler.triggers.cron import CronTrigger
-
     try:
         # task 00040-4 의 KST 컨벤션 그대로 — trigger 자체에 timezone 명시.
-        trigger = CronTrigger.from_crontab(cron_expression, timezone=KST)
+        # task 00147 — 요일 규약 보정 헬퍼를 거쳐 trigger 를 만든다.
+        trigger = build_cron_trigger(cron_expression, timezone=KST)
     except Exception as exc:
         raise ScheduleValidationError(
             f"GC cron 표현식 파싱 실패: {exc}"
@@ -773,10 +779,9 @@ def register_backup_cron_schedule(*, cron_expression: str) -> ScheduleSummary:
     if not cron_expression:
         raise ScheduleValidationError("백업 cron 표현식이 비어 있습니다.")
 
-    from apscheduler.triggers.cron import CronTrigger
-
     try:
-        trigger = CronTrigger.from_crontab(cron_expression, timezone=KST)
+        # task 00147 — 요일 규약 보정 헬퍼를 거쳐 trigger 를 만든다.
+        trigger = build_cron_trigger(cron_expression, timezone=KST)
     except Exception as exc:
         raise ScheduleValidationError(
             f"백업 cron 표현식 파싱 실패: {exc}"
@@ -966,12 +971,11 @@ def register_daily_report_cron_schedule(
         return None
 
     # ── 3. 활성화 분기 — cron 표현식 파싱 + add or reschedule ───────────
-    from apscheduler.triggers.cron import CronTrigger
-
     try:
         # cron 표현식은 KST 기준으로 파싱한다 (task 00040-4 의 KST 컨벤션).
         # BackgroundScheduler.timezone 이 이미 KST 라 trigger 도 명시적으로 KST.
-        trigger = CronTrigger.from_crontab(cron_expression, timezone=KST)
+        # task 00147 — 요일 규약 보정 헬퍼를 거쳐 trigger 를 만든다.
+        trigger = build_cron_trigger(cron_expression, timezone=KST)
     except Exception as exc:
         raise ScheduleValidationError(
             f"Daily report cron 표현식 파싱 실패: {exc}"
