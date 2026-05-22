@@ -1334,10 +1334,17 @@
                     var resp = result.resp;
                     var body = result.body || {};
                     if (resp.ok) {
+                        // 다중 수신자 발송 결과: 수신자 수 / 성공 수 / 실패 수 표시.
+                        var recipientSummary = '';
+                        if (typeof body.recipient_count === 'number') {
+                            recipientSummary = ' — 수신자 ' + body.recipient_count + '명' +
+                                ' (성공: ' + (body.success_count || 0) + '명' +
+                                ', 실패: ' + (body.failure_count || 0) + '명)';
+                        }
                         showDailyReportResult('success', [
                             '테스트 발송 완료 (run_id: ' + body.run_id +
                                 ', 상태: ' + formatDailyReportStatus(body.status) +
-                                ').',
+                                recipientSummary + ').',
                             '수신함과 정크메일 폴더를 모두 확인해주세요.'
                         ]);
                     } else {
