@@ -146,8 +146,30 @@ class AnnouncementSummary:
             빌더가 KST 변환해 표시한다.
         detail_url: 메일에 박힐 공고 상세 페이지 URL. ``aggregate_snapshots``
             가 ``build_announcement_detail_url`` 로 사전 생성해 채운다.
+        status_label: 현재 접수 상태 한글값 (``"접수중"`` / ``"접수예정"`` /
+            ``"마감"``). ``Announcement.status`` 에서 가져온다. 메일 항목을
+            대시보드 expand 행과 동일하게 상태 배지로 표시하기 위한 값
+            (task 00136-2). 상태를 알 수 없으면 ``"-"``.
+        status_key: 현재 상태의 CSS status key — ``AnnouncementStatus`` enum
+            name 의 lowercase (``receiving`` / ``scheduled`` / ``closed``).
+            공유 렌더러(``app.rendering.announcement_row``)의 배지 색상 키.
+            알 수 없으면 None.
+        transition_from: 전이 카테고리(접수예정/접수중/마감 전이) 항목에서만
+            의미 있는 이전 상태 한글값 (예: ``"접수예정"``). 전이 항목이
+            아니면(new / content_changed) None — 메일에서 ``이전→현재`` 화살표
+            표시 여부를 결정한다 (task 00136-2).
+        transition_from_key: ``transition_from`` 에 대응하는 CSS status key.
+            ``transition_from`` 이 None 이거나 매핑에 없으면 None.
+        received_at: 접수 시작 시각. UTC tz-aware datetime. 공고에 명시되지
+            않았으면 None. ``Announcement.received_at`` 에서 가져온다 — 대시보드
+            expand 행과 동일하게 마감 일시 왼쪽에 접수 일시를 표시한다.
 
     frozen 정책: ``@dataclass(frozen=False)`` (default). 동일 사유.
+
+    추가 필드 정책:
+        ``status_label`` 이하 5개 필드는 task 00136-2 에서 추가됐다. 기존
+        호출/테스트 코드가 7개 필드만으로 인스턴스를 만드는 경우가 있어
+        모두 기본값을 가지며 dataclass 필드 정의의 끝에 위치한다.
     """
 
     announcement_id: int
@@ -157,6 +179,11 @@ class AnnouncementSummary:
     agency: str | None
     deadline_at: datetime | None
     detail_url: str
+    status_label: str = "-"
+    status_key: str | None = None
+    transition_from: str | None = None
+    transition_from_key: str | None = None
+    received_at: datetime | None = None
 
 
 @dataclass
@@ -359,6 +386,41 @@ _TRANSITION_PAYLOAD_KEY_TO_FIELD: dict[str, str] = {
 }
 
 
+# 상태 한글 라벨(``"접수중"`` 등) → CSS status key(``receiving`` 등) 매핑.
+# ``AnnouncementStatus`` enum 의 value(한글)를 name.lower() 로 변환한 single
+# source of truth 다. 공유 렌더러(``app.rendering.announcement_row``)의
+# ``STATUS_BADGE_COLORS`` 키 표기(대시보드 ``status-{key}`` CSS 와 동일)에
+# 1:1 대응한다. transition payload 의 ``from`` 값(한글 라벨)을 CSS key 로
+# 옮길 때 사용한다.
+_STATUS_LABEL_TO_KEY: dict[str, str] = {
+    status.value: status.name.lower() for status in AnnouncementStatus
+}
+
+
+def _resolve_status_label_and_key(status: Any) -> tuple[str, str | None]:
+    """``Announcement.status`` 를 (한글 라벨, CSS status key) 쌍으로 변환한다.
+
+    ``Announcement.status`` 는 ``AnnouncementStatus`` enum 이며 그 ``value`` 가
+    한글 원문('접수중' 등), ``name`` 이 영문('RECEIVING' 등)이다. 메일 항목의
+    상태 배지를 대시보드 expand 행과 동일하게 표시하기 위해 한글 라벨과 CSS
+    key 를 함께 돌려준다. enum 이 아닌 값이 들어와도 문자열로 안전하게 떨어진다.
+
+    Args:
+        status: ``Announcement.status`` (``AnnouncementStatus`` enum 또는 None).
+
+    Returns:
+        ``(status_label, status_key)`` 쌍. status 가 None 이면 ``("-", None)``.
+        status_key 는 매핑에 없으면 None.
+    """
+    if status is None:
+        return "-", None
+    label = getattr(status, "value", str(status))
+    name = getattr(status, "name", "")
+    # enum 이면 name.lower() 가 곧 CSS key. enum 이 아니면 한글 라벨로 역매핑.
+    status_key = name.lower() if name else _STATUS_LABEL_TO_KEY.get(label)
+    return label, status_key
+
+
 def aggregate_snapshots(
     session: Session,
     window: AggregationWindow,
@@ -433,28 +495,35 @@ def aggregate_snapshots(
     )
 
     # 6. plain 카테고리 (new / content_changed) — payload 의 int list 그대로 사용.
+    #    전이가 아니므로 transition_from 은 모두 None 으로 넘긴다.
     new_items = _build_summaries(
-        announcement_ids=(int(aid) for aid in merged_payload.get(CATEGORY_NEW, [])),
+        announcement_entries=(
+            (int(aid), None) for aid in merged_payload.get(CATEGORY_NEW, [])
+        ),
         announcement_meta_map=announcement_meta_map,
         public_base_url=public_base_url,
     )
     content_changed_items = _build_summaries(
-        announcement_ids=(
-            int(aid) for aid in merged_payload.get(CATEGORY_CONTENT_CHANGED, [])
+        announcement_entries=(
+            (int(aid), None)
+            for aid in merged_payload.get(CATEGORY_CONTENT_CHANGED, [])
         ),
         announcement_meta_map=announcement_meta_map,
         public_base_url=public_base_url,
     )
 
-    # 7. transition 3종 — payload 의 [{id, from}, ...] 에서 id 만 추출.
-    #    field_name 별로 결과 list 를 채운 뒤 이름으로 dispatch.
+    # 7. transition 3종 — payload 의 [{id, from}, ...] 에서 id 와 from(이전 상태)
+    #    을 함께 추출한다. 'from' 을 버리지 않고 summary 의 transition_from 으로
+    #    넘겨야 메일에서 '이전상태 → 현재상태' 전이가 표시된다 (task 00136-2).
     transition_field_to_items: dict[str, list[AnnouncementSummary]] = {
         field_name: [] for field_name in _TRANSITION_PAYLOAD_KEY_TO_FIELD.values()
     }
     for payload_key, field_name in _TRANSITION_PAYLOAD_KEY_TO_FIELD.items():
         entries = merged_payload.get(payload_key, [])
         transition_field_to_items[field_name] = _build_summaries(
-            announcement_ids=(int(entry["id"]) for entry in entries),
+            announcement_entries=(
+                (int(entry["id"]), str(entry["from"])) for entry in entries
+            ),
             announcement_meta_map=announcement_meta_map,
             public_base_url=public_base_url,
         )
@@ -514,23 +583,28 @@ def _collect_announcement_id_union(merged_payload: dict[str, Any]) -> set[int]:
 
 def _build_summaries(
     *,
-    announcement_ids,
+    announcement_entries,
     announcement_meta_map: dict[int, Announcement],
     public_base_url: str,
 ) -> list[AnnouncementSummary]:
-    """announcement_id iterable → ``AnnouncementSummary`` list.
+    """``(announcement_id, transition_from)`` 쌍 iterable → ``AnnouncementSummary`` list.
+
+    각 쌍의 ``transition_from`` 은 전이 카테고리 항목이면 이전 상태 한글 라벨,
+    비전이 카테고리(new / content_changed) 항목이면 None 이다. 호출자가 이미
+    카테고리별로 None / 이전 상태를 채워 넘긴다.
 
     메타가 ``announcement_meta_map`` 에 없는 id 는 silent skip (DB 에서 삭제된
     공고 등 — dashboard ``_build_expand_items_for_category`` 와 같은 정책). 표시할
     수 있는 메타가 있는 row 만 본문에 들어가야 의미가 있어서, 누락분은 자연스럽게
     빠진다.
 
-    ``announcement_id`` 의 입력 순서를 그대로 유지한다 — payload 가 이미 id ASC
-    로 정렬돼 있으므로 결과 list 도 id ASC 가 된다.
+    입력 쌍의 순서를 그대로 유지한다 — payload 가 이미 id ASC 로 정렬돼 있으므로
+    결과 list 도 id ASC 가 된다.
 
     Args:
-        announcement_ids: 변환 대상 id iterable. 정렬 / 중복 제거는 호출자가
-            payload 의 정규형에 맡긴다.
+        announcement_entries: ``(announcement_id, transition_from)`` 쌍의
+            iterable. transition_from 은 전이 항목이면 이전 상태 한글 라벨,
+            비전이 항목이면 None.
         announcement_meta_map: ``list_announcements_by_ids`` 결과 (id → ORM row).
         public_base_url: ``build_announcement_detail_url`` 의 base.
 
@@ -538,11 +612,19 @@ def _build_summaries(
         ``AnnouncementSummary`` list — 입력 순서 그대로. 메타 누락분은 제외.
     """
     summaries: list[AnnouncementSummary] = []
-    for announcement_id in announcement_ids:
+    for announcement_id, transition_from in announcement_entries:
         announcement = announcement_meta_map.get(int(announcement_id))
         if announcement is None:
             # 메타 없는 row 는 본문에 표시할 수 없으므로 조용히 건너뛴다.
             continue
+        # 현재 상태 — 대시보드 expand 행과 동일하게 status 배지로 표시한다.
+        status_label, status_key = _resolve_status_label_and_key(announcement.status)
+        # 전이 항목이면 이전 상태 라벨을 CSS key 로도 변환해 둔다 (배지 색상용).
+        transition_from_key = (
+            _STATUS_LABEL_TO_KEY.get(transition_from)
+            if transition_from is not None
+            else None
+        )
         summaries.append(
             AnnouncementSummary(
                 announcement_id=announcement.id,
@@ -554,7 +636,14 @@ def _build_summaries(
                 # detail_url 은 본 row 의 PK 기준 (history row 라도 그 row 의
                 # 자체 URL 로 — prompt §3 주의사항 \"detail_url 은 그 row 가
                 # 가리키는 announcement 자체로\").
-                detail_url=build_announcement_detail_url(public_base_url, announcement.id),
+                detail_url=build_announcement_detail_url(
+                    public_base_url, announcement.id
+                ),
+                status_label=status_label,
+                status_key=status_key,
+                transition_from=transition_from,
+                transition_from_key=transition_from_key,
+                received_at=announcement.received_at,
             )
         )
     return summaries

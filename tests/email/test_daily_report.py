@@ -689,6 +689,19 @@ def test_aggregate_single_snapshot_extracts_all_five_categories(
     assert result.transitioned_to_receiving[0].announcement_id == ann_to_receiving.id
     assert result.transitioned_to_closed[0].announcement_id == ann_to_closed.id
 
+    # task 00136-2 — 비전이(신규) 항목은 현재 상태만 채워지고 transition_from 은 None.
+    assert new_summary.status_label == "접수예정"  # ann_new 는 SCHEDULED.
+    assert new_summary.status_key == "scheduled"
+    assert new_summary.transition_from is None
+    assert new_summary.transition_from_key is None
+
+    # task 00136-2 — 전이 항목은 payload 의 'from'(이전 상태)이 보존된다.
+    receiving_summary = result.transitioned_to_receiving[0]
+    assert receiving_summary.status_label == "접수중"  # ann_to_receiving 는 RECEIVING.
+    assert receiving_summary.status_key == "receiving"
+    assert receiving_summary.transition_from == "접수예정"  # payload 의 from.
+    assert receiving_summary.transition_from_key == "scheduled"
+
 
 # ──────────────────────────────────────────────────────────────
 # B. 2개 snapshot 머지 → new ID set union
@@ -918,6 +931,60 @@ def test_aggregate_includes_history_rows_with_is_current_false(
 
 
 # ──────────────────────────────────────────────────────────────
+# F-2. 전이 summary 는 transition_from / status / received_at 보존 (task 00136-2)
+# ──────────────────────────────────────────────────────────────
+
+
+def test_aggregate_transition_summary_preserves_from_status_received_at(
+    db_session: Session,
+) -> None:
+    """전이 카테고리 summary 가 transition_from·상태·received_at 을 모두 보존한다.
+
+    task 00136-2: ``aggregate_snapshots`` 가 transition payload 의 ``from``
+    (이전 상태)을 버리지 않고 ``AnnouncementSummary.transition_from`` 으로
+    넘겨야 메일에서 '이전상태 → 현재상태' 전이가 표시된다. 현재 상태
+    (status_label/status_key)·접수 일시(received_at)도 함께 보존되는지 확인한다.
+    """
+    announcement = _insert_announcement(
+        db_session,
+        source_announcement_id="TR",
+        status=AnnouncementStatus.RECEIVING,
+    )
+    # received_at 은 헬퍼가 채우지 않으므로 직접 설정한다.
+    announcement.received_at = datetime(2026, 5, 18, 0, 0, 0, tzinfo=UTC)
+    db_session.flush()
+
+    _insert_snapshot_with_created_at(
+        db_session,
+        created_at=datetime(2026, 5, 18, 12, 0, 0, tzinfo=UTC),
+        snapshot_date_iso="2026-05-18",
+        payload={
+            "transitioned_to_접수중": [
+                {"id": announcement.id, "from": "접수예정"}
+            ],
+        },
+    )
+    db_session.commit()
+
+    window = _aggregation_window(
+        from_dt=datetime(2026, 5, 18, 0, 0, 0, tzinfo=UTC),
+        to_dt=datetime(2026, 5, 19, 0, 0, 0, tzinfo=UTC),
+    )
+    result = aggregate_snapshots(db_session, window)
+
+    assert len(result.transitioned_to_receiving) == 1
+    summary = result.transitioned_to_receiving[0]
+    # 이전 상태(payload 의 from) 가 보존된다.
+    assert summary.transition_from == "접수예정"
+    assert summary.transition_from_key == "scheduled"
+    # 현재 상태 — Announcement.status 에서.
+    assert summary.status_label == "접수중"
+    assert summary.status_key == "receiving"
+    # 접수 일시 — Announcement.received_at 에서.
+    assert summary.received_at == datetime(2026, 5, 18, 0, 0, 0, tzinfo=UTC)
+
+
+# ──────────────────────────────────────────────────────────────
 # G. detail_url — public_base_url SystemSetting 없을 때 default 사용
 # ──────────────────────────────────────────────────────────────
 
@@ -1091,11 +1158,21 @@ def _build_announcement_summary(
     deadline_at: datetime | None = None,
     detail_url: str = "https://example.com/announcements/1",
     canonical_project_id: int | None = None,
+    status_label: str = "접수중",
+    status_key: str | None = "receiving",
+    transition_from: str | None = None,
+    transition_from_key: str | None = None,
+    received_at: datetime | None = None,
 ) -> AnnouncementSummary:
     """본문 빌더 테스트용 ``AnnouncementSummary`` 인스턴스 빌더.
 
     DB 를 거치지 않고 dataclass 만으로 빌더 동작을 검증한다 — 본문 빌더는
     AggregatedSnapshotPayload 만 보고 동작하므로 ORM row 가 필요 없다.
+
+    task 00136-2 에서 추가된 ``status_label`` / ``status_key`` /
+    ``transition_from`` / ``transition_from_key`` / ``received_at`` 도 인자로
+    받는다. 비전이 항목 기본값은 현재 상태 '접수중' 이고, 전이 항목 테스트는
+    ``transition_from`` 을 명시해 호출한다.
     """
     return AnnouncementSummary(
         announcement_id=announcement_id,
@@ -1105,6 +1182,11 @@ def _build_announcement_summary(
         agency=agency,
         deadline_at=deadline_at,
         detail_url=detail_url,
+        status_label=status_label,
+        status_key=status_key,
+        transition_from=transition_from,
+        transition_from_key=transition_from_key,
+        received_at=received_at,
     )
 
 
@@ -1133,6 +1215,10 @@ def _build_full_payload() -> AggregatedSnapshotPayload:
                 announcement_id=13,
                 title="접수예정 사업",
                 detail_url="https://example.com/announcements/13",
+                status_label="접수예정",
+                status_key="scheduled",
+                transition_from="접수중",
+                transition_from_key="receiving",
             )
         ],
         transitioned_to_receiving=[
@@ -1140,6 +1226,10 @@ def _build_full_payload() -> AggregatedSnapshotPayload:
                 announcement_id=14,
                 title="접수중 사업",
                 detail_url="https://example.com/announcements/14",
+                status_label="접수중",
+                status_key="receiving",
+                transition_from="접수예정",
+                transition_from_key="scheduled",
             )
         ],
         transitioned_to_closed=[
@@ -1147,6 +1237,10 @@ def _build_full_payload() -> AggregatedSnapshotPayload:
                 announcement_id=15,
                 title="마감 사업",
                 detail_url="https://example.com/announcements/15",
+                status_label="마감",
+                status_key="closed",
+                transition_from="접수중",
+                transition_from_key="receiving",
             )
         ],
         total_count=5,
@@ -1217,11 +1311,13 @@ def test_build_subject_does_not_change_for_first_send() -> None:
 def test_build_text_body_includes_all_five_section_headers_and_lines() -> None:
     """5종 카테고리가 모두 채워지면 모든 섹션 헤더 + 공고 1줄 모두 노출.
 
-    검증:
+    검증 (task 00136-2 — text 본문 공고 1줄 포맷 통일):
         - 5종 섹션 헤더 각각 ``"{emoji} {label} ({N}건)"`` 형식 포함.
-        - 공고 1줄에 ``title`` / ``detail_url`` / ``agency`` / 마감일 포함.
+        - 공고 1줄에 출처 ``[IRIS]`` / 상태 / ``title`` / ``detail_url`` /
+          ``agency`` / 접수·마감 일시 포함.
         - agency 가 None 이면 ``-`` 으로 표시.
-        - deadline_at 이 None 이면 마감일에 ``-`` 표시.
+        - received_at / deadline_at 이 None 이면 ``-`` 표시.
+        - 전이 항목은 ``이전상태→현재상태`` 로 표시.
     """
     from app.email.message_builder import build_daily_report_text_body
 
@@ -1237,15 +1333,23 @@ def test_build_text_body_includes_all_five_section_headers_and_lines() -> None:
     assert "▶ 접수중 전이 (1건)" in text
     assert "🚫 마감 전이 (1건)" in text
 
-    # 공고 1줄 (신규) — title / url / agency / 마감일 모두 포함.
-    assert "- 신규 사업 (https://example.com/announcements/11)" in text
+    # 공고 1줄 (신규) — 출처 배지 / 상태 / title / url / agency 모두 포함.
+    assert (
+        "- [IRIS] 접수중 | 신규 사업 (https://example.com/announcements/11)" in text
+    )
     assert "새기관" in text
     # 마감일 — KST 변환 (UTC 18:00 → KST 03:00 익일이지만 datetime 변환 검증).
     # UTC 2026-06-01 18:00 → KST 2026-06-02 03:00.
     assert "마감일 2026-06-02 03:00" in text
 
-    # agency=None 인 변경 사업 → ``-`` 로 표시.
-    assert "- 변경된 사업 (https://example.com/announcements/12) — - — 마감일 -" in text
+    # agency=None 인 변경 사업 → ``-`` 로 표시. received/deadline 도 None → ``-``.
+    assert (
+        "- [IRIS] 접수중 | 변경된 사업 (https://example.com/announcements/12) "
+        "— - — 접수 - — 마감일 -"
+    ) in text
+
+    # 전이 항목은 '이전상태→현재상태' 로 표시 (접수중→마감 전이 사업).
+    assert "접수중→마감 | 마감 사업" in text
 
 
 def test_build_text_body_summary_line_includes_all_five_zero_counts() -> None:
@@ -1374,9 +1478,9 @@ def test_build_text_body_caps_category_at_50_and_appends_overflow_notice() -> No
 
     # 섹션 헤더는 원본 60건 그대로.
     assert "🆕 신규 공고 (60건)" in text
-    # 공고 1줄 (``- {title}`` 시작) 개수 — 정확히 50.
+    # 공고 1줄 (``- [출처] 상태 | {title}`` 형식) 개수 — 정확히 50.
     item_line_count = sum(
-        1 for line in text.splitlines() if line.startswith("- 공고 ")
+        1 for line in text.splitlines() if line.startswith("- ") and "| 공고 " in line
     )
     assert item_line_count == 50
     # 초과 안내 — 60 - 50 = 10 건.
@@ -1526,10 +1630,11 @@ def test_build_html_body_caps_at_50_and_appends_overflow_li() -> None:
 
 
 def test_build_html_body_escapes_announcement_fields() -> None:
-    """공고 제목 / 발주기관에 HTML 특수문자가 들어와도 안전하게 escape 된다.
+    """공고 제목 / detail_url 에 HTML 특수문자가 들어와도 안전하게 escape 된다.
 
     HTML injection 방어 — ``<script>`` 가 그대로 본문에 나오면 안 되고,
-    ``&lt;script&gt;`` 로 escape 되어야 한다.
+    ``&lt;script&gt;`` 로 escape 되어야 한다. 공유 렌더러가 공고명·detail_url
+    을 ``html.escape`` 처리한다.
     """
     from app.email.message_builder import build_daily_report_html_body
 
@@ -1553,12 +1658,125 @@ def test_build_html_body_escapes_announcement_fields() -> None:
 
     # script 태그 원문이 직접 들어가면 안 된다.
     assert "<script>alert(1)</script>" not in html_body
-    # 이스케이프된 형태로 등장해야 한다.
+    # 이스케이프된 형태로 등장해야 한다 (공유 렌더러가 공고명을 escape).
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html_body
-    # & 도 &amp; 로 이스케이프.
-    assert "기관 &amp; 부서" in html_body
     # detail_url 의 & 도 href 에서 &amp; 로 escape (quote=True).
+    # 발주기관(agency)은 공유 렌더러의 행 마크업에 출력되지 않으므로
+    # (대시보드 expand 행과 동일 — 출처/상태/공고명/날짜만 노출) escape
+    # 검증 대상에서 제외한다.
     assert 'href="https://example.com/x?a=1&amp;b=2"' in html_body
+
+
+# ──────────────────────────────────────────────────────────────
+# T. html body — 폭 ~2배 확장 + 공유 렌더러 적용 (task 00136-2)
+# ──────────────────────────────────────────────────────────────
+
+
+def test_build_html_body_uses_widened_max_width() -> None:
+    """HTML 본문 컨테이너의 max-width 가 600px 대비 약 2배(1160px)로 확장된다.
+
+    task 00136-2 — 사용자 원문 \"폭을 옆으로 두 배 정도는 늘려줘\".
+    """
+    from app.email.message_builder import build_daily_report_html_body
+
+    html_body = build_daily_report_html_body(
+        window=_window_for_body(), payload=_build_full_payload()
+    )
+
+    # 확장된 max-width 값이 본문에 포함된다.
+    assert "max-width:1160px" in html_body
+    # 기존 600px 는 더 이상 데일리 리포트 본문에 남아 있지 않다.
+    assert "max-width:600px" not in html_body
+
+
+def test_build_html_body_renders_source_badge_via_shared_renderer() -> None:
+    """각 공고 항목이 공유 렌더러의 출처 배지 마크업으로 렌더된다.
+
+    task 00136-2 — 메일 항목을 대시보드와 같은 출처 배지([IRIS] 등) 포맷으로
+    통일한다. 공유 렌더러(``app.rendering.announcement_row``)의 출처 배지는
+    ``text-transform:uppercase`` 인라인 CSS 와 출처 문자열을 가진다.
+    """
+    from app.email.message_builder import build_daily_report_html_body
+
+    payload = AggregatedSnapshotPayload(
+        new=[_build_announcement_summary(title="IRIS 공고", source_type="IRIS")],
+        content_changed=[],
+        transitioned_to_received_scheduled=[],
+        transitioned_to_receiving=[],
+        transitioned_to_closed=[],
+        total_count=1,
+    )
+    html_body = build_daily_report_html_body(
+        window=_window_for_body(), payload=payload
+    )
+
+    # 공유 렌더러 출처 배지 — uppercase 변환 인라인 CSS + 출처 문자열.
+    assert "text-transform:uppercase" in html_body
+    assert ">IRIS</span>" in html_body
+
+
+def test_build_html_body_renders_transition_prev_and_current_status() -> None:
+    """전이 카테고리 항목은 이전→현재 상태 배지 + 화살표가 함께 노출된다.
+
+    task 00136-2 — 사용자 원문 \"어디서 어디로 바뀌었는지\" 를 메일에서도 보여
+    준다. 공유 렌더러는 transition_from 이 있으면 이전 상태 배지와 ``→``
+    화살표를 현재 상태 배지 앞에 렌더한다.
+    """
+    from app.email.message_builder import build_daily_report_html_body
+
+    payload = AggregatedSnapshotPayload(
+        new=[],
+        content_changed=[],
+        transitioned_to_received_scheduled=[],
+        transitioned_to_receiving=[
+            _build_announcement_summary(
+                title="전이 공고",
+                status_label="접수중",
+                status_key="receiving",
+                transition_from="접수예정",
+                transition_from_key="scheduled",
+            )
+        ],
+        transitioned_to_closed=[],
+        total_count=1,
+    )
+    html_body = build_daily_report_html_body(
+        window=_window_for_body(), payload=payload
+    )
+
+    # 이전 상태 배지 + 화살표 + 현재 상태 배지.
+    assert ">접수예정</span>" in html_body
+    assert ">접수중</span>" in html_body
+    assert "→</span>" in html_body
+
+
+def test_build_html_body_renders_received_at_datetime() -> None:
+    """공고 항목에 접수 일시가 KST 문자열로 노출된다.
+
+    task 00136-2 — 사용자 원문 \"각종 날짜정보\". 공유 렌더러는 접수 일시를
+    ``접수 YYYY-MM-DD HH:MM:SS`` (KST) 로 마감 일시 왼쪽에 표시한다.
+    UTC 2026-05-20 00:00 → KST 2026-05-20 09:00:00.
+    """
+    from app.email.message_builder import build_daily_report_html_body
+
+    payload = AggregatedSnapshotPayload(
+        new=[
+            _build_announcement_summary(
+                title="접수 일시 공고",
+                received_at=datetime(2026, 5, 20, 0, 0, 0, tzinfo=UTC),
+            )
+        ],
+        content_changed=[],
+        transitioned_to_received_scheduled=[],
+        transitioned_to_receiving=[],
+        transitioned_to_closed=[],
+        total_count=1,
+    )
+    html_body = build_daily_report_html_body(
+        window=_window_for_body(), payload=payload
+    )
+
+    assert "접수 2026-05-20 09:00:00" in html_body
 
 
 # ──────────────────────────────────────────────────────────────

@@ -52,6 +52,10 @@ from email.message import EmailMessage
 from email.utils import formataddr
 from typing import TYPE_CHECKING, Any
 
+from app.rendering.announcement_row import (
+    AnnouncementRowView,
+    render_announcement_row_html,
+)
 from app.timezone import format_kst, now_kst, to_kst
 
 if TYPE_CHECKING:
@@ -760,21 +764,58 @@ def build_daily_report_subject(window: AggregationWindow) -> str:
     return f"{_DAILY_REPORT_SUBJECT_PREFIX}{from_kst} ~ {to_kst}"
 
 
-def _format_daily_report_deadline(deadline_at: Any) -> str:
-    """``AnnouncementSummary.deadline_at`` 을 본문 한 줄용 문자열로 변환.
+def _format_daily_report_optional_datetime(value: Any) -> str:
+    """접수/마감 등 ``datetime | None`` 값을 text 본문 한 줄용 문자열로 변환.
 
     ``None`` 이면 ``"-"`` 를 반환해 본문에서 빈 칸을 피한다. 값이 있으면 KST
     변환 후 ``YYYY-MM-DD HH:mm`` 으로 표기 (guidance 의 한국어 날짜 표기 컨벤션).
+    접수 일시·마감 일시 양쪽에 공통으로 쓰인다.
 
     Args:
-        deadline_at: UTC tz-aware ``datetime`` 또는 ``None``.
+        value: UTC tz-aware ``datetime`` 또는 ``None``.
 
     Returns:
         ``"2026-06-01 12:00"`` 같은 문자열, 또는 ``"-"``.
     """
-    if deadline_at is None:
+    if value is None:
         return "-"
-    return format_kst(deadline_at, _DAILY_REPORT_DATETIME_FORMAT)
+    return format_kst(value, _DAILY_REPORT_DATETIME_FORMAT)
+
+
+def _build_announcement_row_view(summary: AnnouncementSummary) -> AnnouncementRowView:
+    """``AnnouncementSummary`` 를 공유 렌더러용 ``AnnouncementRowView`` 로 변환한다.
+
+    데일리 리포트 메일의 공고 항목을 대시보드 Section A expand 행과 동일한
+    포맷으로 렌더하기 위한 어댑터다 (task 00136-2). 공유 렌더러
+    (``app.rendering.announcement_row``) 한 곳을 고치면 대시보드·메일 양쪽
+    공고 표현이 동시에 바뀐다.
+
+    중복 배지(``duplicate_badges``)는 대시보드 '내용 변경' 행 전용 표시이며
+    메일에서는 계산하지 않으므로 항상 빈 list 로 넘긴다 — 사용자 원문이 메일
+    항목에 요구한 것은 출처·상태·공고명·날짜이고 중복 배지는 포함되지 않는다.
+
+    Args:
+        summary: 변환 대상 ``AnnouncementSummary``.
+
+    Returns:
+        공유 렌더러 :func:`render_announcement_row_html` 에 넘길
+        ``AnnouncementRowView``.
+    """
+    return AnnouncementRowView(
+        source_type=summary.source_type,
+        status_label=summary.status_label,
+        # AnnouncementRowView.status_key 는 str 필드 — None 이면 빈 문자열로
+        # 넘겨 공유 렌더러가 fallback 색상으로 안전하게 떨어지게 한다.
+        status_key=summary.status_key or "",
+        transition_from=summary.transition_from,
+        transition_from_key=summary.transition_from_key,
+        title=summary.title,
+        detail_url=summary.detail_url,
+        agency=summary.agency,
+        received_at=summary.received_at,
+        deadline_at=summary.deadline_at,
+        duplicate_badges=[],
+    )
 
 
 def _build_daily_report_summary_line(payload: AggregatedSnapshotPayload) -> str:
@@ -799,6 +840,44 @@ def _build_daily_report_summary_line(payload: AggregatedSnapshotPayload) -> str:
     return " · ".join(parts)
 
 
+def _build_daily_report_text_item_line(summary: AnnouncementSummary) -> str:
+    """text/plain 본문의 공고 1줄을 만든다.
+
+    HTML 본문은 공유 렌더러로 대시보드 expand 행과 동일한 인라인 CSS 배지를
+    그리지만, text 본문은 배지를 표현할 수 없다. 대신 같은 정보(출처·현재
+    상태 또는 상태 전이·공고명·접수/마감 일시)를 한 줄에 텍스트로 노출한다
+    (task 00136-2 — 사용자 원문 \"각종 날짜정보 등 대시보드와 같은 포맷\").
+
+    형식::
+
+        - [IRIS] 접수예정→접수중 | {제목} ({url}) — {발주기관} — 접수 {접수일시} — 마감일 {마감일시}
+
+    - 출처는 ``[IRIS]`` / ``[NTIS]`` 처럼 대괄호로 표기한다 (대문자 정규화).
+    - 전이 항목이면 ``이전상태→현재상태`` , 비전이 항목이면 현재 상태만.
+    - 접수/마감 일시는 KST ``YYYY-MM-DD HH:mm`` , 값이 없으면 ``-`` .
+
+    Args:
+        summary: 렌더할 공고 ``AnnouncementSummary``.
+
+    Returns:
+        공고 1줄 문자열 (앞에 ``- `` 글머리 포함).
+    """
+    source_text = f"[{summary.source_type.upper()}]"
+    # 전이 항목이면 '이전→현재' , 아니면 현재 상태만.
+    if summary.transition_from:
+        status_text = f"{summary.transition_from}→{summary.status_label}"
+    else:
+        status_text = summary.status_label
+    agency_text = summary.agency or "-"
+    received_text = _format_daily_report_optional_datetime(summary.received_at)
+    deadline_text = _format_daily_report_optional_datetime(summary.deadline_at)
+    return (
+        f"- {source_text} {status_text} | {summary.title} "
+        f"({summary.detail_url}) — {agency_text} — "
+        f"접수 {received_text} — 마감일 {deadline_text}"
+    )
+
+
 def build_daily_report_text_body(
     *,
     window: AggregationWindow,
@@ -813,8 +892,10 @@ def build_daily_report_text_body(
            빈 카테고리는 섹션 자체 생략. 50건 초과 시 끝에 ``외 N건`` 안내.
         4. footer — 시스템 안내 + 수신 거부 안내
 
-    공고 1줄 형식 (prompt §4):
-        ``- {제목} ({detail_url}) — {발주기관 or '-'} — 마감일 {YYYY-MM-DD HH:mm or '-'}``
+    공고 1줄 형식 (task 00136-2 — 대시보드 포맷 통일):
+        ``- [출처] {현재상태 or 이전→현재} | {제목} ({detail_url}) — {발주기관 or '-'}
+        — 접수 {YYYY-MM-DD HH:mm or '-'} — 마감일 {YYYY-MM-DD HH:mm or '-'}``
+        실제 조립은 :func:`_build_daily_report_text_item_line` 가 담당한다.
 
     Args:
         window: ``compute_aggregation_window`` 의 반환값.
@@ -851,12 +932,7 @@ def build_daily_report_text_body(
         lines.append(f"{descriptor.emoji} {descriptor.label} ({len(items)}건)")
         displayed_items = items[:_DAILY_REPORT_CATEGORY_ITEM_CAP]
         for summary in displayed_items:
-            agency_text = summary.agency or "-"
-            deadline_text = _format_daily_report_deadline(summary.deadline_at)
-            lines.append(
-                f"- {summary.title} ({summary.detail_url}) — "
-                f"{agency_text} — 마감일 {deadline_text}"
-            )
+            lines.append(_build_daily_report_text_item_line(summary))
         overflow = len(items) - len(displayed_items)
         if overflow > 0:
             lines.append(f"  ... 외 {overflow}건 — 대시보드에서 확인")
@@ -880,12 +956,18 @@ def _build_daily_report_category_section_html(
     """HTML 본문에서 1개 카테고리 섹션을 만든다.
 
     빈 list 이면 ``""`` 반환 — 호출자가 빈 문자열 그대로 본문에 붙여 섹션이
-    자연스럽게 사라지게 한다. 50건 cap 적용 + overflow 안내문은 ``<li>``
-    한 줄 + 회색 텍스트로 표시.
+    자연스럽게 사라지게 한다. 50건 cap 적용 + overflow 안내문은 회색 텍스트
+    한 줄로 표시.
 
-    모든 동적 값 (title / agency / detail_url / deadline 문자열) 은
-    ``html.escape`` 로 이스케이프된다. ``detail_url`` 은 href 속성에도 들어가므로
-    ``quote=True`` 까지 적용.
+    공고 1건은 더 이상 메일 전용 ``<li>`` 마크업으로 그리지 않고, 대시보드와
+    공유하는 렌더러 :func:`render_announcement_row_html` 로 렌더한다
+    (task 00136-2). 공유 렌더러 한 곳을 고치면 대시보드·메일 양쪽 공고 표현이
+    동시에 바뀐다. 출처 배지·현재 상태 또는 이전→현재 상태 전이·공고명·접수/
+    마감 일시가 대시보드 Section A expand 행과 동일한 포맷으로 표시된다.
+
+    이스케이프(공고명·출처·상태·detail_url)는 공유 렌더러가 내부에서 모두
+    처리하므로 본 함수는 별도 escape 를 하지 않는다 — 고정 라벨(카테고리명)만
+    방어적으로 escape 한다.
 
     Args:
         descriptor: 본 카테고리의 표시 메타.
@@ -899,28 +981,19 @@ def _build_daily_report_category_section_html(
     displayed_items = items[:_DAILY_REPORT_CATEGORY_ITEM_CAP]
     overflow = len(items) - len(displayed_items)
 
-    item_html_parts: list[str] = []
-    for summary in displayed_items:
-        safe_title = html.escape(summary.title)
-        safe_url = html.escape(summary.detail_url, quote=True)
-        safe_agency = html.escape(summary.agency or "-")
-        safe_deadline = html.escape(_format_daily_report_deadline(summary.deadline_at))
-        item_html_parts.append(
-            '<li style="margin:4px 0;font-size:14px;line-height:1.5;">'
-            f'<a href="{safe_url}" style="color:#333;text-decoration:underline;">'
-            f"{safe_title}</a>"
-            f' <span style="color:#888;">— {safe_agency} — '
-            f'마감일 {safe_deadline}</span></li>'
-        )
+    # 공유 렌더러로 공고 1행씩 렌더 — 대시보드 expand 행과 동일 포맷.
+    row_html_parts = [
+        render_announcement_row_html(_build_announcement_row_view(summary))
+        for summary in displayed_items
+    ]
 
     overflow_html = ""
     if overflow > 0:
-        # 초과 안내는 list 내 마지막 li 로 노출 — 별도 블록 분리하지 않는다.
+        # 초과 안내는 행 묶음 끝에 회색 텍스트 한 줄로 노출.
         overflow_html = (
-            '<li style="margin:6px 0;font-size:13px;color:#888;'
-            'list-style:none;">'
+            '<div style="margin:6px 4px;font-size:13px;color:#888;">'
             f"… 외 {overflow}건 — 대시보드에서 확인"
-            "</li>"
+            "</div>"
         )
 
     # 라벨 옆에 카운트를 같이 노출 (text 본문과 1:1).
@@ -930,10 +1003,10 @@ def _build_daily_report_category_section_html(
         '<h3 style="font-size:16px;margin:0 0 8px;color:#333;">'
         f"{descriptor.emoji} {safe_label} ({len(items)}건)"
         "</h3>"
-        '<ul style="margin:0;padding-left:20px;">'
-        f"{''.join(item_html_parts)}"
+        '<div style="display:flex;flex-direction:column;gap:2px;">'
+        f"{''.join(row_html_parts)}"
         f"{overflow_html}"
-        "</ul></div>"
+        "</div></div>"
     )
 
 
@@ -946,13 +1019,17 @@ def build_daily_report_html_body(
 
     multipart/alternative 의 HTML 대체본용. forward 빌더의 grayscale 인라인 CSS
     패턴 (텍스트 #333 / 메타 박스 #f5f5f5 / 보조 #888·#999) 을 그대로 모방한다.
-    외부 폰트/CDN 없음, 최대 너비 600px 1열 레이아웃, system-ui/sans-serif fallback.
+    외부 폰트/CDN 없음, 1열 레이아웃, system-ui/sans-serif fallback. 컨테이너
+    최대 너비는 task 00136-2 에서 600px → 1160px (약 2배) 로 확장됐다.
 
     구성 (위→아래):
         1. h2 제목 ("Daily Report")
         2. 메타 박스 — 구간(KST) / (옵션) 최초 발송 안내 / 누적 snapshot 수
         3. 요약 줄 (text 본문과 동일 문자열)
-        4. 5종 카테고리 섹션 (빈 카테고리 자동 생략, 50건 cap + 외 N건)
+        4. 5종 카테고리 섹션 — 공고 1건은 대시보드와 공유하는 렌더러
+           (``app.rendering.announcement_row``) 로 그려 출처 배지·상태/전이·
+           공고명·접수/마감 일시를 대시보드 expand 행과 동일 포맷으로 표시.
+           빈 카테고리 자동 생략, 50건 cap + 외 N건.
         5. footer — hr + 회색 보조 텍스트 2줄
 
     모든 외부 입력은 ``html.escape`` 로 이스케이프된다 — 공고 제목 / 발주기관 /
@@ -1001,7 +1078,11 @@ def build_daily_report_html_body(
         '<html lang="ko"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         "</head><body style=\"margin:0;padding:0;background:#ffffff;\">"
-        '<div style="max-width:600px;margin:0 auto;padding:24px;'
+        # 컨테이너 max-width — 기존 600px 대비 약 2배(1160px)로 확장한다
+        # (task 00136-2 — 사용자 원문 \"폭을 옆으로 두 배 정도 늘려줘\").
+        # 공고 항목이 출처 배지·상태 전이·공고명·접수/마감 일시를 한 행에
+        # 나란히 보여 주므로 좁은 폭에서는 줄바꿈이 잦았다.
+        '<div style="max-width:1160px;margin:0 auto;padding:24px;'
         "font-family:system-ui,-apple-system,'Segoe UI',sans-serif;"
         'color:#333;line-height:1.6;">'
         # 1. 헤더 제목
