@@ -37,6 +37,7 @@ from app.db.models import (
     EmailSendRun,
     EmailSendRunStatus,
     User,
+    as_utc,
 )
 from app.db.session import session_scope
 from app.email.constants import (
@@ -959,12 +960,12 @@ def _serialize_daily_report_run(run: EmailDailyReportRun) -> dict[str, Any]:
         "trigger": run.trigger,
         "status": run.status.value if run.status is not None else None,
         "aggregation_from": (
-            run.aggregation_from.isoformat()
+            as_utc(run.aggregation_from).isoformat()
             if run.aggregation_from is not None
             else None
         ),
         "aggregation_to": (
-            run.aggregation_to.isoformat()
+            as_utc(run.aggregation_to).isoformat()
             if run.aggregation_to is not None
             else None
         ),
@@ -974,10 +975,10 @@ def _serialize_daily_report_run(run: EmailDailyReportRun) -> dict[str, Any]:
         "failure_count": run.failure_count,
         "error_message": run.error_message,
         "started_at": (
-            run.started_at.isoformat() if run.started_at is not None else None
+            as_utc(run.started_at).isoformat() if run.started_at is not None else None
         ),
         "completed_at": (
-            run.completed_at.isoformat() if run.completed_at is not None else None
+            as_utc(run.completed_at).isoformat() if run.completed_at is not None else None
         ),
         "requested_by": (
             {
@@ -1002,7 +1003,7 @@ def _serialize_daily_report_send_run(send_run: EmailSendRun) -> dict[str, Any]:
         "attempt_count": send_run.attempt_count,
         "error_message": send_run.error_message,
         "sent_at": (
-            send_run.sent_at.isoformat() if send_run.sent_at is not None else None
+            as_utc(send_run.sent_at).isoformat() if send_run.sent_at is not None else None
         ),
     }
 
