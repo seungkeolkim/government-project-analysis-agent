@@ -1045,7 +1045,7 @@ INFO  apply_delta_to_main 트랜잭션 commit 완료: status=completed
 | 증상 | 원인 / 조치 |
 |------|------------|
 | `Permission denied on /var/run/docker.sock` (수동 시작 클릭 시) | `HOST_DOCKER_GID` 가 빠지거나 잘못된 값. `getent group docker | cut -d: -f3` 결과로 `.env` 갱신 → `./run_compose.sh up` 재기동 |
-| `ComposeEnvironmentError` flash | `HOST_PROJECT_DIR` 미설정. `pwd` 결과를 `.env` 에 추가 |
+| `ComposeEnvironmentError` flash (`HOST_PROJECT_DIR 가 설정되지 않았습니다`) | `.env` 의 `HOST_PROJECT_DIR` 미설정 → `pwd` 결과를 `.env` 에 추가. **`.env` 에 값이 있는데도 에러가 난다면** app 컨테이너가 이 값을 빈 상태로 생성된 것 — `./run_compose.sh down && ./run_compose.sh up` 으로 컨테이너를 재생성하면 `env_file` 의 `.env` 값이 다시 주입된다 |
 | `./data/` 하위 파일이 root:root 소유 | `HOST_UID`/`HOST_GID` 빠진 채 기동된 적이 있음. `sudo chown -R "$(id -u):$(id -g)" ./data/` + `.env` 보강 + 재빌드 |
 | 컨테이너 안에서 사용자명이 `I have no name!` | UID 변경 후 재빌드 안 됨. `docker compose build` 다시 |
 | 코드 변경이 자동 반영 안 됨 | 컨테이너가 실행 중인지 확인. `./run_compose.sh logs -f app` 으로 uvicorn reload 로그 확인 |
