@@ -33,9 +33,9 @@
         - 상태 셀(status_cell): ``min-width:160px`` — 전이 행의 '배지 + → + 배지'
           조합이 한 줄에 들어가도록 크기 산정 (12px 폰트 기준 '접수예정 → 접수중'
           ≈ 150px + 여유). 변경 전: 한 글자씩 줄바꿈 / 변경 후: 한 줄 표시.
-        - 날짜 셀(dates_cell): ``min-width:185px`` — '접수 YYYY-MM-DD HH:MM:SS'
-          (ANNOUNCEMENT_ROW_DATETIME_FORMAT) 한 줄 기준 (≈ 163px + 여유).
-          변경 전: 날짜 문자열 줄바꿈 위험 / 변경 후: 한 줄 보장.
+        - 날짜 셀(dates_cell): ``min-width:400px`` — '접수 YYYY-MM-DD HH:MM:SS 마감 YYYY-MM-DD HH:MM:SS'
+          접수·마감 두 날짜가 한 줄에 표시될 수 있도록 확장 (task 00141).
+          변경 전: 185px(날짜 1개 기준) / 변경 후: 400px(날짜 2개 한 줄 기준).
         - 공고명 셀(title_cell): ``min-width:80px`` — 줄바꿈을 허용하면서 완전 붕괴만
           방지. 상대 크기(``width:100%``)는 유지해 남은 공간을 차지한다.
 
@@ -379,11 +379,11 @@ def render_announcement_row_html(
 
     # 5. 접수·마감 일시 셀 — 우측 정렬.
     #    _render_dates_group 이 반환하는 두 <span> 은 각각 white-space:nowrap 을
-    #    가지고, td 의 min-width:185px 가 날짜 문자열 한 줄('접수 YYYY-MM-DD
-    #    HH:MM:SS')이 줄바꿈 없이 들어가도록 최소 너비를 보장한다 (task 00140).
+    #    가지고, td 의 min-width:400px 가 '접수 YYYY-MM-DD HH:MM:SS 마감 YYYY-MM-DD
+    #    HH:MM:SS' 두 날짜가 한 줄에 들어가도록 최소 너비를 보장한다 (task 00141).
     dates_cell = (
         '<td style="padding:6px 6px;white-space:nowrap;vertical-align:middle;'
-        'text-align:right;min-width:185px;">'
+        'text-align:right;min-width:400px;">'
         + _render_dates_group(row.received_at, row.deadline_at)
         + "</td>"
     )
