@@ -331,6 +331,35 @@ services:
     --profile scrape run --rm scraper
   ```
   구체 명령 포맷은 §9 runner 시그니처에서 재확인한다.
+- **inner `docker compose` 의 `.env` 마운트 — `./.env:${HOST_PROJECT_DIR}/.env:ro` (task 00143)**:
+  `docker-compose.yml` 의 app 서비스는 호스트 `.env` 를 일반적인
+  `./.env:/app/.env:ro` 형태가 아니라 `./.env:${HOST_PROJECT_DIR}/.env:ro`
+  로 마운트한다. 이는 **의도된 정상 설정** 이다. 근거:
+  - app 컨테이너는 위 subprocess 명령을 호스트 docker.sock 으로 호출할 때
+    `--project-directory $HOST_PROJECT_DIR` 를 명시한다(`build_compose_command`).
+    docker CLI 는 app 컨테이너 **내부** 에서 실행되므로, compose 가 `${VAR}`
+    보간에 사용하는 `.env` 파일을 `--project-directory` 인
+    `$HOST_PROJECT_DIR/.env` 경로 — 즉 **app 컨테이너 파일시스템 안의 그
+    경로** — 에서 탐색한다.
+  - 따라서 호스트 `.env` 를 컨테이너 안의 정확히 `$HOST_PROJECT_DIR/.env`
+    위치에 노출해야 inner compose 의 보간(기본값이 없는 `${HOST_UID}`·
+    `${HOST_GID}` 등 포함)이 성공한다. `./.env:${HOST_PROJECT_DIR}/.env:ro`
+    마운트가 바로 이 일을 한다.
+  - `./.env:/app/.env:ro` 로 바꾸면 `.env` 는 `/app/.env` 에 놓이지만 inner
+    compose 는 여전히 `$HOST_PROJECT_DIR/.env` 를 보므로 `.env` 를 찾지
+    못한다 → `${HOST_UID}` 등이 빈 값으로 평가돼 scraper 컨테이너 기동이
+    깨진다. 즉 `/app/.env` 형태는 이 아키텍처에서 **틀린 설정** 이다.
+- **`HOST_PROJECT_DIR` fail-fast 검증(task 00143)**: 위 구조상
+  `HOST_PROJECT_DIR` 는 수집 기능의 **필수** 환경변수이며 삭제할 수 없다.
+  값이 빈/미설정인 채로 app 컨테이너가 떠 있으면 스케줄 수집이 매 주기
+  `ComposeEnvironmentError` 로 조용히 실패만 반복하는 silent-failure 가
+  된다. 이를 막기 위해 app(웹+스케줄러) 의 ASGI startup 훅이
+  `start_scheduler()` 호출 직전에 `validate_host_project_dir()` 로
+  검증하고, 빈 값이면 CRITICAL 로그를 남긴 뒤 예외를 startup 훅 밖으로
+  전파해 app 부팅 자체를 중단한다(`docker logs iris-agent-web` 에 원인이
+  즉시 드러난다). `env_file` 은 컨테이너 **생성 시점** 에 1회 평가되므로,
+  `.env` 를 고친 뒤에는 `./run_compose.sh down && ./run_compose.sh up` 으로
+  컨테이너를 재생성해야 새 값이 반영된다.
 
 ### §5.4 운영 시 재빌드 조건
 

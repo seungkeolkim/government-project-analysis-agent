@@ -1045,11 +1045,23 @@ INFO  apply_delta_to_main 트랜잭션 commit 완료: status=completed
 | 증상 | 원인 / 조치 |
 |------|------------|
 | `Permission denied on /var/run/docker.sock` (수동 시작 클릭 시) | `HOST_DOCKER_GID` 가 빠지거나 잘못된 값. `getent group docker | cut -d: -f3` 결과로 `.env` 갱신 → `./run_compose.sh up` 재기동 |
-| `ComposeEnvironmentError` flash (`HOST_PROJECT_DIR 가 설정되지 않았습니다`) | `.env` 의 `HOST_PROJECT_DIR` 미설정 → `pwd` 결과를 `.env` 에 추가. **`.env` 에 값이 있는데도 에러가 난다면** app 컨테이너가 이 값을 빈 상태로 생성된 것 — `./run_compose.sh down && ./run_compose.sh up` 으로 컨테이너를 재생성하면 `env_file` 의 `.env` 값이 다시 주입된다 |
+| `HOST_PROJECT_DIR 가 설정되지 않았습니다` (수집 실패 / app 컨테이너 재시작 반복) | `.env` 의 `HOST_PROJECT_DIR` 미설정 → `pwd` 결과를 `.env` 에 추가. **`.env` 에 값이 있는데도 에러가 난다면** app 컨테이너가 이 값을 빈 상태로 생성된 것 — `env_file` 은 컨테이너 **생성 시점** 에 1회만 평가되므로 `.env` 수정만으로는 반영되지 않는다. `./run_compose.sh down && ./run_compose.sh up` 으로 컨테이너를 재생성해야 `env_file` 의 `.env` 값이 다시 주입된다. (task 00143 부터 빈/미설정 상태에서는 app 부팅이 startup 단계에서 fail-fast 로 중단된다 — `docker logs iris-agent-web` 에 CRITICAL 로그가 남고 컨테이너가 재시작 루프에 빠지므로, 수집 이력에서 뒤늦게 발견되던 silent-failure 가 사라졌다.) |
 | `./data/` 하위 파일이 root:root 소유 | `HOST_UID`/`HOST_GID` 빠진 채 기동된 적이 있음. `sudo chown -R "$(id -u):$(id -g)" ./data/` + `.env` 보강 + 재빌드 |
 | 컨테이너 안에서 사용자명이 `I have no name!` | UID 변경 후 재빌드 안 됨. `docker compose build` 다시 |
 | 코드 변경이 자동 반영 안 됨 | 컨테이너가 실행 중인지 확인. `./run_compose.sh logs -f app` 으로 uvicorn reload 로그 확인 |
 | 기동 시 `sources.yaml 마운트 없음 — template 기본값으로 기동합니다` 경고 | 호스트에 `sources.yaml` 부재. `sh ./bootstrap_sources.sh` 후 편집 → `docker compose restart app` |
+
+> **참고 — `docker-compose.yml` 의 `./.env:${HOST_PROJECT_DIR}/.env:ro` 마운트.**
+> app 서비스의 `.env` 마운트 타겟이 흔한 `/app/.env` 가 아니라
+> `${HOST_PROJECT_DIR}/.env` 인 것은 의도된 정상 설정이다. app 컨테이너는
+> 호스트 docker.sock 으로 inner `docker compose` 를 호출하면서
+> `--project-directory $HOST_PROJECT_DIR` 를 명시하는데, compose 는 변수
+> 보간용 `.env` 를 이 project-directory 기준으로 찾고 그 탐색은 app 컨테이너
+> **내부 파일시스템** 에서 일어난다. 따라서 호스트 `.env` 를 컨테이너 안의
+> `$HOST_PROJECT_DIR/.env` 경로에 그대로 노출해야 inner compose 의 변수
+> 보간(`${HOST_UID}`·`${HOST_GID}` 등)이 성공한다. `/app/.env` 로 바꾸면
+> inner compose 가 `.env` 를 찾지 못해 수집 컨테이너 기동이 깨진다. 자세한
+> 근거는 [`docs/scrape_control_design.md` §5.3](docs/scrape_control_design.md) 참조.
 
 ### 수집
 
