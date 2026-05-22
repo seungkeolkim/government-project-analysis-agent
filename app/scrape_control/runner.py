@@ -179,6 +179,43 @@ def _resolve_docker_binary() -> str:
     )
 
 
+def validate_host_project_dir() -> str:
+    """HOST_PROJECT_DIR 환경변수를 검증하고 정규화된 값을 반환한다.
+
+    app 컨테이너는 docker-in-docker 가 아니라 마운트된 호스트 docker.sock 으로
+    호스트 dockerd 를 원격 조작한다 (docs/scrape_control_design.md §5.3). 따라서
+    inner ``docker compose --project-directory`` 인자는 **호스트의 절대경로** 여야
+    하며, 그래야 compose 파일의 ``./data``·``./app`` 같은 상대 바인드마운트가
+    호스트 기준으로 일관되게 해석된다. 이 값은 ``HOST_PROJECT_DIR`` 환경변수로
+    주입되며, 수집 기능이 동작하기 위한 **필수** 환경변수다 (삭제 불가).
+
+    이 헬퍼는 'HOST_PROJECT_DIR 미설정 → 명확한 에러' 라는 단일 계약을 두 경로가
+    공유하기 위해 추출됐다:
+        - :func:`build_compose_command` — 매 수집 호출 직전 검증.
+        - app(웹+스케줄러) 부팅 경로 — HOST_PROJECT_DIR 가 빈 값인 채로 app 이
+          기동되면 스케줄 수집이 매 주기 조용히 실패하는 silent-failure 구조가
+          되므로, 부팅 시점에 이 헬퍼로 fail-fast 검증한다 (task 00143).
+
+    Returns:
+        앞뒤 공백을 제거한 HOST_PROJECT_DIR 값.
+
+    Raises:
+        ComposeEnvironmentError: 환경변수가 미설정이거나 빈 값/공백뿐일 때.
+            운영자가 docker logs / UI 에서 곧바로 원인을 알 수 있도록, 설정
+            예시와 설계 문서 참조를 포함한 안내 메시지를 담는다.
+    """
+    host_project_dir = os.environ.get(HOST_PROJECT_DIR_ENV_VAR, "").strip()
+    if not host_project_dir:
+        raise ComposeEnvironmentError(
+            f"환경변수 {HOST_PROJECT_DIR_ENV_VAR} 가 설정되지 않았습니다. "
+            "호스트의 프로젝트 루트 절대경로를 .env 에 설정해야 합니다 "
+            "(예: HOST_PROJECT_DIR=/home/user/workspace/iris-agent). "
+            "이 값은 docker compose 가 compose 파일의 상대경로를 호스트 기준으로 "
+            "해석하는 데 쓰입니다 — docs/scrape_control_design.md §5.3 참조."
+        )
+    return host_project_dir
+
+
 def build_compose_command(
     active_sources: list[str],
     *,
@@ -236,15 +273,11 @@ def build_compose_command(
     # '로그' 컬럼에 노출한다.
     docker_binary = _resolve_docker_binary()
 
-    host_project_dir = os.environ.get(HOST_PROJECT_DIR_ENV_VAR, "").strip()
-    if not host_project_dir:
-        raise ComposeEnvironmentError(
-            f"환경변수 {HOST_PROJECT_DIR_ENV_VAR} 가 설정되지 않았습니다. "
-            "호스트의 프로젝트 루트 절대경로를 .env 에 설정해야 합니다 "
-            "(예: HOST_PROJECT_DIR=/home/user/workspace/iris-agent). "
-            "이 값은 docker compose 가 compose 파일의 상대경로를 호스트 기준으로 "
-            "해석하는 데 쓰입니다 — docs/scrape_control_design.md §5.3 참조."
-        )
+    # HOST_PROJECT_DIR 검증은 공용 헬퍼로 위임한다 — app 부팅 시점 fail-fast
+    # 검증(task 00143)과 동일한 'HOST_PROJECT_DIR 없으면 ComposeEnvironmentError'
+    # 계약·메시지를 단일 출처로 공유하기 위함이다. 'HOST_PROJECT_DIR' 문자열을
+    # 새로 하드코딩하지 않도록 build_compose_command 의 인라인 체크를 제거했다.
+    host_project_dir = validate_host_project_dir()
 
     project_name = os.environ.get(
         COMPOSE_PROJECT_NAME_ENV_VAR, DEFAULT_COMPOSE_PROJECT_NAME
@@ -511,4 +544,5 @@ __all__ = [
     "StartResult",
     "build_compose_command",
     "start_scrape_run",
+    "validate_host_project_dir",
 ]
