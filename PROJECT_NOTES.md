@@ -131,6 +131,7 @@ Docker Compose. `app` (FastAPI UI) · `scraper` (1회성 배치, `profiles: [scr
 - **subprocess 규약**: `subprocess.Popen(..., start_new_session=True)` 새 프로세스 그룹(`os.setsid`) → 중단은 `os.killpg(pgid, SIGTERM)` 로 그룹 전체 전파 → compose v2 가 관리 컨테이너 PID 1 로 릴레이. detach 금지. stdout/stderr 는 **파일 redirect** (PIPE 는 버퍼 가득 차면 자식이 블로킹).
 - **entrypoint 설정 주입**: `docker/entrypoint.sh` 가 마운트된 `sources.yaml` 을 per-run 임시 디렉터리(`mktemp`)로 복사하고 `SOURCES_CONFIG_PATH` 환경변수를 주입한 뒤 `python -m app.cli` exec. **sources.yaml 우선순위**: (1) bind mount → (2) 이미지 내 `sources.yaml.template` 폴백. 웹/스케줄러가 "이번 run 만 특정 소스" 로 제한할 때는 `SCRAPE_ACTIVE_SOURCES` (쉼표 연결 문자열) 환경변수로 전달 — 파일을 수정하지 않고 per-run 복사본 격리를 유지.
 - **동시성 lock**: `create_scrape_run` 이 단일 트랜잭션 안에서 SELECT(running 존재 검사) → INSERT 해 race 방지. running row 가 곧 "실행 중 flag". 웹 startup 의 `cleanup_stale_running_runs()` 가 pid 없는 / 사라진 running row 를 failed 로 정리해 lock 자동 해제 → 이후 `start_scheduler()`.
+- **스케줄러 단일 인스턴스 (00131)**: cron 중복 실행 버그의 근본 원인 — OS crontab 이 아니라 웹 프로세스 내부 APScheduler `BackgroundScheduler` 의 다중 인스턴스다. uvicorn `--reload` 가 항상 켜져 있어 코드 변경/재기동마다 worker 프로세스가 교체되는데, 이전 worker 의 `BackgroundScheduler` 가 깨끗이 정리되지 못하고 살아남으면 같은 `scheduler_jobs` 테이블을 보는 스케줄러가 N개가 되어 동일 job 이 trigger 시각마다 N회 실행된다(`scheduler_jobs` row 중복이 아니라 멀티-인스턴스 — '2번→3번' 점증 증상과 일치). 대책: `app/scheduler/single_instance.py` 의 고정 경로 flock(`<DB 디렉터리>/scheduler-single-instance.lock`) 으로 '컨테이너당 job 을 실행하는 스케줄러는 1개' 불변식을 강제 — lock 획득에 성공한 프로세스만 `start_scheduler()` 가 스케줄러를 띄우고, 실패한 프로세스는 띄우지 않는다. `stop_scheduler()` 가 정지와 함께 lock 을 해제해 다음 worker 가 승계한다.
 - **중단 시 atomic 보장**: SIGTERM handler 가 `_cancel_flag` 만 세움. break 는 공고 / 소스 루프 시작 지점에서만. 현재 처리 중 공고는 끝까지 마무리. ScrapeRun.status 도메인: `running/completed/cancelled/failed/partial`.
 
 ### 초기 설정 / 개발 환경
@@ -343,6 +344,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
+- [00131] Cron 중복 실행 버그 수정 (스케줄러 단일 인스턴스 보장) — uvicorn `--reload` 환경에서 worker 교체 시 이전 `BackgroundScheduler` 가 정리되지 못하고 누적돼 동일 job 이 2~3회 중복 실행되던 버그를 수정; `app/scheduler/single_instance.py` 신설(고정 경로 flock 기반 프로세스 단일화), `start_scheduler` 가 lock 획득 실패 시 스케줄러를 띄우지 않고 `stop_scheduler` 가 lock 을 해제하도록 변경 — 2026-05-22
 - [00130] Daily Report 발송 이력 API datetime 직렬화 수정 — `_serialize_daily_report_run`·`_serialize_daily_report_send_run` 에서 SQLite naive datetime 에 UTC tzinfo 부착 후 `.isoformat()` 해 응답에 `+00:00` 포함; 프론트엔드 KST 변환이 정상 동작하도록 수정 — 2026-05-22
 - [00129] 관리자 사용자 관리 화면에 이메일 주소·이메일 수신 여부 변경 기능 추가 — `POST /admin/users/{id}/email`·`/email-subscription` 엔드포인트 신설(기존 `change_email`/`change_email_subscribed` 서비스 함수 재사용, DB 마이그레이션 없음) — 2026-05-21
 - [00128] Daily Report 활성화 저장 미반영·다음 실행 예측 오표시 버그 수정 — APScheduler SQLAlchemyJobStore 가 같은 SQLite 파일에 별도 커넥션으로 write 해 `session_scope` write 트랜잭션과 SQLite 단일 writer 충돌("database is locked")이 원인; 스케줄 잡 갱신을 `session_scope` 밖에서 먼저 수행하는 순서로 수정 — 2026-05-21
