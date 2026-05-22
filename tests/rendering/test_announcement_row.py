@@ -259,10 +259,10 @@ def test_status_cell_transition_row_has_min_width_px() -> None:
 
 
 def test_dates_cell_has_min_width_px() -> None:
-    """날짜 셀 <td> 에 px 절대단위 min-width:185px 가 인라인으로 지정된다 (task 00140).
+    """날짜 셀 <td> 에 px 절대단위 min-width:400px 가 인라인으로 지정된다 (task 00141).
 
-    min-width:185px 는 '접수 YYYY-MM-DD HH:MM:SS' 형식(ANNOUNCEMENT_ROW_DATETIME_FORMAT)
-    한 줄이 12px 폰트 기준 줄바꿈 없이 표시될 수 있는 기준값이다.
+    min-width:400px 는 '접수 YYYY-MM-DD HH:MM:SS 마감 YYYY-MM-DD HH:MM:SS' 형식으로
+    접수·마감 두 날짜가 한 줄에 줄바꿈 없이 표시될 수 있는 기준값이다.
     """
     html_fragment = render_announcement_row_html(_make_view())
-    assert "min-width:185px" in html_fragment
+    assert "min-width:400px" in html_fragment

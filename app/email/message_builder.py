@@ -1084,11 +1084,11 @@ def build_daily_report_html_body(
         '<html lang="ko"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         "</head><body style=\"margin:0;padding:0;background:#ffffff;\">"
-        # 컨테이너 max-width — 기존 600px 대비 약 2배(1160px)로 확장한다
-        # (task 00136-2 — 사용자 원문 \"폭을 옆으로 두 배 정도 늘려줘\").
-        # 공고 항목이 출처 배지·상태 전이·공고명·접수/마감 일시를 한 행에
-        # 나란히 보여 주므로 좁은 폭에서는 줄바꿈이 잦았다.
-        '<div style="max-width:1160px;margin:0 auto;padding:24px;'
+        # 컨테이너 max-width — 1160px → 1375px 로 확장한다 (task 00141).
+        # 날짜 셀(dates_cell)을 185px → 400px 로 늘린 만큼(+215px) 전체 폭도 늘려
+        # 다른 컬럼(출처·상태·공고명)이 눌리지 않도록 한다.
+        # (task 00136-2 에서 기존 600px → 1160px 로 먼저 확장됐음.)
+        '<div style="max-width:1375px;margin:0 auto;padding:24px;'
         "font-family:system-ui,-apple-system,'Segoe UI',sans-serif;"
         'color:#333;line-height:1.6;">'
         # 1. 헤더 제목

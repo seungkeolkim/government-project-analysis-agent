@@ -1673,9 +1673,10 @@ def test_build_html_body_escapes_announcement_fields() -> None:
 
 
 def test_build_html_body_uses_widened_max_width() -> None:
-    """HTML 본문 컨테이너의 max-width 가 600px 대비 약 2배(1160px)로 확장된다.
+    """HTML 본문 컨테이너의 max-width 가 1375px 로 확장된다.
 
-    task 00136-2 — 사용자 원문 \"폭을 옆으로 두 배 정도는 늘려줘\".
+    task 00141 — 날짜 셀 185px → 400px 확장(+215px)에 맞춰 전체 컨테이너도
+    1160px → 1375px 로 늘려 다른 컬럼이 눌리지 않도록 한다.
     """
     from app.email.message_builder import build_daily_report_html_body
 
@@ -1684,7 +1685,7 @@ def test_build_html_body_uses_widened_max_width() -> None:
     )
 
     # 확장된 max-width 값이 본문에 포함된다.
-    assert "max-width:1160px" in html_body
+    assert "max-width:1375px" in html_body
     # 기존 600px 는 더 이상 데일리 리포트 본문에 남아 있지 않다.
     assert "max-width:600px" not in html_body
 
