@@ -69,7 +69,7 @@ FastAPI + Jinja2 (`templates/`) + 로컬 정적 리소스 (`static/`, 외부 CDN
 
 #### 공유 렌더링 (`app/rendering/`)
 
-- `app/rendering/announcement_row.py` — 대시보드 Section A expand 행과 데일리 리포트 메일이 공유하는 '공고 1행' 렌더링 라이브러리. `AnnouncementRowView` view-model dataclass + `render_announcement_row_html(row, wrap_with_link)` 인라인 CSS HTML 렌더러가 핵심. 이 모듈만 고치면 대시보드·메일 양쪽 공고 표현이 동시에 바뀐다. `app.web` / `app.email` 어느 쪽도 import 하지 않는 중립 위치 — 순환 import 없음. 출처/상태 배지 색상 상수(`SOURCE_BADGE_COLORS`, `STATUS_BADGE_COLORS`)가 `style.css` 값과 1:1 연동되는 single source of truth. **행 레이아웃은 `<table>/<td>` 기반** — `display:flex + gap` 은 Outlook·Gmail 등 메일 클라이언트가 제거하므로, 셀별 명시 `padding` 으로 항목 간 간격을 보장한다. 렌더 순서: 출처 배지 → (전이 행이면) 이전 상태 배지 + '→' → 현재 상태 배지 → 공고명 → (있으면) 중복 배지 → 접수 일시 / 마감 일시.
+- `app/rendering/announcement_row.py` — 대시보드 Section A expand 행과 데일리 리포트 메일이 공유하는 '공고 1행' 렌더링 라이브러리. `AnnouncementRowView` view-model dataclass + `render_announcement_row_html(row, wrap_with_link)` 인라인 CSS HTML 렌더러가 핵심. 이 모듈만 고치면 대시보드·메일 양쪽 공고 표현이 동시에 바뀐다. `app.web` / `app.email` 어느 쪽도 import 하지 않는 중립 위치 — 순환 import 없음. 출처/상태 배지 색상 상수(`SOURCE_BADGE_COLORS`, `STATUS_BADGE_COLORS`)가 `style.css` 값과 1:1 연동되는 single source of truth. **행 레이아웃은 `<table>/<td>` 기반** — `display:flex + gap` 은 Outlook·Gmail 등 메일 클라이언트가 제거하므로, 셀별 명시 `padding` 으로 항목 간 간격을 보장한다. **컬럼 최소 너비 정책**: 상태 셀 `min-width:160px`(전이 행 '배지→배지' 조합 한 줄 기준), 날짜 셀 `min-width:185px`('접수 YYYY-MM-DD HH:MM:SS' 한 줄 기준), 공고명 셀 `min-width:80px`(완전 붕괴 방지) — 일부 메일 클라이언트가 `white-space:nowrap` 을 제거해도 상태·날짜 컬럼이 줄바꿈되지 않도록 상대 크기(`width:100%`)와 함께 px 절대단위 `min-width` 를 병행 지정. 렌더 순서: 출처 배지 → (전이 행이면) 이전 상태 배지 + '→' → 현재 상태 배지 → 공고명 → (있으면) 중복 배지 → 접수 일시 / 마감 일시.
 
 #### 이메일 발송 (`app/email/`)
 
@@ -358,6 +358,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
+- [00140] 데일리 리포트 메일 상태·날짜 컬럼 줄바꿈 방지 — 공유 공고 행 렌더러 `status_cell`·`dates_cell`·`title_cell` 에 px 절대단위 `min-width`(160px/185px/80px) 추가; 일부 메일 클라이언트가 `white-space:nowrap` 제거 시 상태·날짜 컬럼이 한 글자씩 줄바꿈되는 문제 해결 — 2026-05-22
 - [00139] 데일리 리포트 메일 레이아웃 개선 (행 간격 + 섹션 테두리) — `app/rendering/announcement_row.py` 행 컨테이너를 `display:flex+gap` → `<table>/<td>` 전환(메일 클라이언트가 flex/gap 제거 시 항목 뭉침 해결); `_build_daily_report_category_section_html` 각 카테고리 섹션을 `border:1px solid #e0e0e0` 단일 셀 표로 감싸 섹션 간 시각적 구분 — 2026-05-22
 - [00137] 공고 배지 postfix 전체 제거 — `SECTION_A_CATEGORY_DESCRIPTORS` 5종 `duplicate_badge` 문구에서 후치 조사/표현 제거: `🆕 신규에도` → `🆕 신규`, `📝 내용 변경에도` → `📝 내용 변경`, `🔄 전이→{상태}에도` → `🔄 전이→{상태}`; 관련 단위 테스트(test_dashboard_section_a.py·test_announcement_row.py)·e2e spec(00135-2) 문구 갱신 — 2026-05-22
 - [00136] 데일리 리포트 메일 폭 확장 + 대시보드·메일 공고 행 렌더링 공유 — `app/rendering/announcement_row.py` 신설(공고 1행 view-model + 인라인 CSS 렌더러); 메일 본문 `max-width` 600px → ~1160px 확장; 메일 공고 항목·대시보드 Section A expand 행 모두 공유 렌더러로 전환해 한 곳 수정 → 양쪽 반영 완성; `AnnouncementSummary` 에 status·transition_from·received_at 필드 추가 — 2026-05-22
@@ -367,4 +368,3 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - [00131] Cron 중복 실행 버그 수정 (스케줄러 단일 인스턴스 + job single-flight 가드) — uvicorn `--reload` 환경에서 worker 교체 시 이전 `BackgroundScheduler` 가 정리되지 못하고 누적돼 동일 job 이 2~3회 중복 실행되던 버그를 수정; (1) `app/scheduler/single_instance.py` 신설(고정 경로 flock 기반 프로세스 단일화), `start_scheduler`/`stop_scheduler` 가 lock 을 획득·해제, (2) `app/scheduler/job_guard.py` + `scheduler_job_claims` 테이블 신설 — `(job_name, slot_key)` UNIQUE claim 으로 동일 주기 중복 호출을 걸러 메일 발송·scrape run·백업 부수효과가 1회만 일어나도록 4개 잡 함수에 가드 추가 — 2026-05-22
 - [00130] Daily Report 발송 이력 API datetime 직렬화 수정 — `_serialize_daily_report_run`·`_serialize_daily_report_send_run` 에서 SQLite naive datetime 에 UTC tzinfo 부착 후 `.isoformat()` 해 응답에 `+00:00` 포함; 프론트엔드 KST 변환이 정상 동작하도록 수정 — 2026-05-22
 - [00129] 관리자 사용자 관리 화면에 이메일 주소·이메일 수신 여부 변경 기능 추가 — `POST /admin/users/{id}/email`·`/email-subscription` 엔드포인트 신설(기존 `change_email`/`change_email_subscribed` 서비스 함수 재사용, DB 마이그레이션 없음) — 2026-05-21
-- [00128] Daily Report 활성화 저장 미반영·다음 실행 예측 오표시 버그 수정 — APScheduler SQLAlchemyJobStore 가 같은 SQLite 파일에 별도 커넥션으로 write 해 `session_scope` write 트랜잭션과 SQLite 단일 writer 충돌("database is locked")이 원인; 스케줄 잡 갱신을 `session_scope` 밖에서 먼저 수행하는 순서로 수정 — 2026-05-21
