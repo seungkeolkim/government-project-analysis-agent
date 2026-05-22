@@ -946,8 +946,19 @@ def prepare_and_send_daily_report(
     # ── 단계 3. 본문 빌드 ─────────────────────────────────────────────
     payload = aggregate_snapshots(session, window)
     subject = build_daily_report_subject(window)
-    text_body = build_daily_report_text_body(window=window, payload=payload)
-    html_body = build_daily_report_html_body(window=window, payload=payload)
+    # 푸터의 '시스템 URL' — '공고 상세 보기' 링크(build_announcement_detail_url)
+    # 가 쓰는 base URL 과 동일한 SystemSetting 소스를 재사용한다. localhost
+    # 하드코딩 금지: aggregate_snapshots(line 515-518) 와 동일한 fallback 체인.
+    public_base_url = (
+        get_setting(session, SETTING_KEY_APP_PUBLIC_BASE_URL)
+        or DEFAULT_APP_PUBLIC_BASE_URL
+    )
+    text_body = build_daily_report_text_body(
+        window=window, payload=payload, public_base_url=public_base_url
+    )
+    html_body = build_daily_report_html_body(
+        window=window, payload=payload, public_base_url=public_base_url
+    )
 
     # 발신자 헤더 — forwarding 과 동일하게 SystemSetting fallback 체인 사용.
     sender_address = (

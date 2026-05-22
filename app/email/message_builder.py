@@ -52,6 +52,7 @@ from email.message import EmailMessage
 from email.utils import formataddr
 from typing import TYPE_CHECKING, Any
 
+from app.email.constants import DEFAULT_APP_PUBLIC_BASE_URL
 from app.rendering.announcement_row import (
     AnnouncementRowView,
     render_announcement_row_html,
@@ -946,6 +947,7 @@ def build_daily_report_text_body(
     *,
     window: AggregationWindow,
     payload: AggregatedSnapshotPayload,
+    public_base_url: str = DEFAULT_APP_PUBLIC_BASE_URL,
 ) -> str:
     """Daily report 의 text/plain 본문을 만든다.
 
@@ -955,7 +957,8 @@ def build_daily_report_text_body(
         2. 요약 줄 — 5종 카테고리 건수 한 줄
         3. 5종 카테고리 섹션 — 카테고리당 ``label (N건)`` + 공고당 1줄.
            빈 카테고리는 섹션 자체 생략. 50건 초과 시 끝에 ``외 N건`` 안내.
-        4. footer — 시스템 안내 + 수신 거부 안내
+        4. footer — 시스템 발송 안내(시스템 URL 포함) + 데스크톱 최적화 안내
+           + 계정설정 기반 메일 수신 거부 안내 3줄
 
     공고 1줄 형식 (task 00136-2 — 대시보드 포맷 통일):
         ``- [출처] {현재상태 or 이전→현재} | {제목} ({detail_url}) — {발주기관 or '-'}
@@ -965,6 +968,11 @@ def build_daily_report_text_body(
     Args:
         window: ``compute_aggregation_window`` 의 반환값.
         payload: ``aggregate_snapshots`` 의 반환값.
+        public_base_url: 푸터의 '시스템 URL' 로 노출할 시스템 외부 base URL.
+            ``build_announcement_detail_url`` (공고 상세 보기 링크) 이 쓰는 값과
+            동일해야 한다 — 호출부(run_daily_report)가 SystemSetting
+            ``app.public_base_url`` 또는 ``DEFAULT_APP_PUBLIC_BASE_URL`` 로
+            로드해 넘긴다.
 
     Returns:
         text/plain 본문 문자열 (끝에 개행 1개 추가).
@@ -1008,11 +1016,15 @@ def build_daily_report_text_body(
         lines.append("")
 
     # ── footer ───────────────────────────────────────────────────
+    # 첫 줄은 modify 지시대로 'URL 앞에 시스템 이름을 붙이지 않고' 문장 끝
+    # 괄호 안에 시스템 URL 을 둔다 ("...발송되었습니다. (URL)").
     lines.extend(
         [
             "---",
-            "이 메일은 정부사업 모니터링 시스템에서 발송되었습니다.",
-            "수신 거부는 시스템 관리자에게 문의해 주세요.",
+            f"이 메일은 정부사업 모니터링 시스템에서 발송되었습니다. ({public_base_url})",
+            "이 이메일은 데스크톱 환경에 최적화 되어 있습니다.",
+            "메일 수신을 희망하지 않으시는 분은 "
+            "\"계정설정\" → \"이메일 알림 수신\"을 해제하시면 됩니다.",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -1089,6 +1101,7 @@ def build_daily_report_html_body(
     *,
     window: AggregationWindow,
     payload: AggregatedSnapshotPayload,
+    public_base_url: str = DEFAULT_APP_PUBLIC_BASE_URL,
 ) -> str:
     """Daily report 의 text/html 본문을 만든다.
 
@@ -1106,14 +1119,20 @@ def build_daily_report_html_body(
            (``app.rendering.announcement_row``) 로 그려 출처 배지·상태/전이·
            공고명·접수/마감 일시를 대시보드 expand 행과 동일 포맷으로 표시.
            빈 카테고리 자동 생략, 50건 cap + 외 N건.
-        5. footer — hr + 회색 보조 텍스트 2줄
+        5. footer — hr + 회색 보조 텍스트 3줄 (시스템 발송 안내(시스템 URL
+           포함) / 데스크톱 최적화 안내 / 계정설정 기반 메일 수신 거부 안내)
 
     모든 외부 입력은 ``html.escape`` 로 이스케이프된다 — 공고 제목 / 발주기관 /
-    detail_url (quote=True) / 마감일 문자열 모두.
+    detail_url (quote=True) / 마감일 문자열 / 푸터의 시스템 URL 모두.
 
     Args:
         window: ``compute_aggregation_window`` 의 반환값.
         payload: ``aggregate_snapshots`` 의 반환값.
+        public_base_url: 푸터의 '시스템 URL' 로 노출할 시스템 외부 base URL.
+            ``build_announcement_detail_url`` (공고 상세 보기 링크) 이 쓰는 값과
+            동일해야 한다 — 호출부(run_daily_report)가 SystemSetting
+            ``app.public_base_url`` 또는 ``DEFAULT_APP_PUBLIC_BASE_URL`` 로
+            로드해 넘긴다.
 
     Returns:
         인라인 CSS 가 적용된 완결 HTML 문서 문자열.
@@ -1142,6 +1161,9 @@ def build_daily_report_html_body(
 
     # ── 요약 줄 ──────────────────────────────────────────────
     summary_line = html.escape(_build_daily_report_summary_line(payload))
+
+    # ── 푸터 시스템 URL — 텍스트로만 노출, html.escape 처리 ──────
+    footer_system_url = html.escape(public_base_url)
 
     # ── 5종 카테고리 섹션 — 빈 카테고리는 ``""`` 가 합쳐져 자연스럽게 사라진다.
     section_htmls = [
@@ -1175,11 +1197,14 @@ def build_daily_report_html_body(
         f"{summary_line}</div>"
         # 4. 5종 카테고리 섹션
         f"{''.join(section_htmls)}"
-        # 5. footer
+        # 5. footer — 시스템 URL 은 괄호 안 텍스트로만 노출 (<a> 링크 아님).
         '<hr style="border:none;border-top:1px solid #e0e0e0;margin:24px 0;">'
         '<div style="font-size:12px;color:#999;">'
-        "이 메일은 정부사업 모니터링 시스템에서 발송되었습니다.<br>"
-        "수신 거부는 시스템 관리자에게 문의해 주세요."
+        f"이 메일은 정부사업 모니터링 시스템에서 발송되었습니다. "
+        f"({footer_system_url})<br>"
+        "이 이메일은 데스크톱 환경에 최적화 되어 있습니다.<br>"
+        "메일 수신을 희망하지 않으시는 분은 "
+        "\"계정설정\" → \"이메일 알림 수신\"을 해제하시면 됩니다."
         "</div>"
         "</div></body></html>"
     )
