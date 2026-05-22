@@ -26,6 +26,17 @@ from app.scrape_control import (
 )
 from app.scrape_control.orphan_gc import run_gc
 
+# task 00131-2 — 스케줄 job 의 동일 주기 중복 실행 방지 가드(single-flight).
+# 동일 trigger 시각에 job 이 2~3회 호출돼도 부수효과는 1회만 일어나도록,
+# 각 잡 함수 진입부에서 claim 을 시도하고 실패 시 조용히 return 한다.
+from app.scheduler.job_guard import (
+    JOB_NAME_BACKUP,
+    JOB_NAME_DAILY_REPORT,
+    JOB_NAME_GC_ORPHAN,
+    JOB_NAME_SCHEDULED_SCRAPE,
+    try_claim_schedule_slot,
+)
+
 
 def scheduled_scrape(active_sources: list[str]) -> None:
     """스케줄 트리거로 호출되는 진입점.
@@ -41,6 +52,13 @@ def scheduled_scrape(active_sources: list[str]) -> None:
     Returns:
         None. 실행 결과는 ScrapeRun 행으로 DB 에 남고, UI 에서 확인한다.
 
+    중복 실행 방지 (task 00131-2):
+        함수 진입 시 :func:`try_claim_schedule_slot` 으로 single-flight claim 을
+        시도한다. 동일 trigger 주기에 다른 호출이 이미 claim 했으면 WARN 로그
+        후 조용히 return 한다 — scrape run 이 1건만 생성되도록 보장한다.
+        ``start_scrape_run`` 의 기존 running-lock 과는 별개 가드로, 순차로 빠르게
+        끝나는 중복 trigger 까지 막는다.
+
     예외 처리 정책:
         - :class:`ScrapeAlreadyRunningError` → WARN 로그 후 swallow.
           (이미 다른 수집이 돌고 있으면 이번 주기는 건너뛰고 다음 주기 대기.)
@@ -51,6 +69,17 @@ def scheduled_scrape(active_sources: list[str]) -> None:
           스킵될 수 있어, 안전하게 삼킨다.
     """
     normalized = list(active_sources or [])
+
+    # task 00131-2 — 동일 trigger 주기의 중복 실행 방지. claim 에 실패하면
+    # 다른 호출이 이미 이번 주기의 수집을 맡았다는 뜻이므로 조용히 return.
+    if not try_claim_schedule_slot(JOB_NAME_SCHEDULED_SCRAPE):
+        logger.warning(
+            "스케줄 수집 건너뜀 — 동일 주기에 다른 호출이 이미 수집을 "
+            "시작했다 (중복 실행 방지, active_sources={}).",
+            normalized or "(전체)",
+        )
+        return
+
     try:
         result = start_scrape_run(normalized, trigger="scheduled")
         logger.info(
@@ -94,10 +123,23 @@ def gc_orphan_attachments_job() -> None:
         - 인자 없음 — APScheduler 가 pickle 하는 args 가 없어 jobstore 에서
           \"호출 시 어떤 source 를 GC 할지\" 같은 부수 상태가 따라가지 않는다.
 
+    중복 실행 방지 (task 00131-2):
+        함수 진입 시 :func:`try_claim_schedule_slot` 으로 single-flight claim 을
+        시도한다. 동일 trigger 주기에 다른 호출이 이미 claim 했으면 WARN 로그
+        후 조용히 return 한다 — GC 가 1회만 수행되도록 보장한다.
+
     예외 처리 정책 (scheduled_scrape 와 동일):
         - 모든 예외를 swallow + ``logger.exception`` — APScheduler 스레드가
           조용히 죽지 않게 한다. cron 은 다음 주기에 다시 실행된다.
     """
+    # task 00131-2 — 동일 trigger 주기의 중복 실행 방지.
+    if not try_claim_schedule_slot(JOB_NAME_GC_ORPHAN):
+        logger.warning(
+            "GC 자동 실행 건너뜀 — 동일 주기에 다른 호출이 이미 GC 를 "
+            "시작했다 (중복 실행 방지).",
+        )
+        return
+
     try:
         report = run_gc(dry_run=False)
         if report.skipped_due_to_running_scrape_run:
@@ -138,7 +180,20 @@ def scheduled_backup_job() -> None:
         - ``app.backup.service`` 를 함수 안에서 lazy import — 순환 import 방지.
         - 모든 예외를 swallow + ``logger.exception`` — APScheduler 스레드가
           조용히 죽지 않게 한다 (``scheduled_scrape`` 와 동일 정책).
+
+    중복 실행 방지 (task 00131-2):
+        함수 진입 시 :func:`try_claim_schedule_slot` 으로 single-flight claim 을
+        시도한다. 동일 trigger 주기에 다른 호출이 이미 claim 했으면 WARN 로그
+        후 조용히 return 한다 — 백업이 1회만 수행되도록 보장한다.
     """
+    # task 00131-2 — 동일 trigger 주기의 중복 실행 방지.
+    if not try_claim_schedule_slot(JOB_NAME_BACKUP):
+        logger.warning(
+            "스케줄 백업 건너뜀 — 동일 주기에 다른 호출이 이미 백업을 "
+            "시작했다 (중복 실행 방지).",
+        )
+        return
+
     try:
         # 순환 import 방지를 위해 함수 내부 lazy import 사용.
         from app.backup.constants import BACKUP_TRIGGER_SCHEDULED
@@ -184,7 +239,24 @@ def scheduled_daily_report_job() -> None:
         6. ``EmailSendingDisabledError`` (게이트 차단) 는 \"운영자 설정 문제\" 라
            WARN 로그만 — EmailDailyReportRun row 는 prepare_and_send 가 미리
            FAILED 로 commit 해 두므로 이력은 남는다.
+
+    중복 실행 방지 (task 00131-2):
+        함수 진입 시 :func:`try_claim_schedule_slot` 으로 single-flight claim 을
+        시도한다. 동일 예정 시각에 여러 스케줄러 인스턴스가 발사돼도, claim 에
+        성공한 단 한 호출만 ``prepare_and_send_daily_report`` 에 도달한다 —
+        2026-05-22 09:00 KST 에 3통이 발송된 증상을 막는다. claim 은 발송 루프와
+        last_sent_at 갱신보다 앞서 수행되므로, 중복 호출은 메일을 보내기 전에
+        걸러진다.
     """
+    # task 00131-2 — 동일 예정 시각의 중복 발송 방지. claim 에 실패하면 다른
+    # 호출이 이미 이번 주기의 발송을 맡았다는 뜻이므로 조용히 return.
+    if not try_claim_schedule_slot(JOB_NAME_DAILY_REPORT):
+        logger.warning(
+            "Daily report 스케줄 발송 건너뜀 — 동일 예정 시각에 다른 호출이 "
+            "이미 발송을 시작했다 (중복 발송 방지).",
+        )
+        return
+
     try:
         # 순환 import 방지를 위해 함수 내부 lazy import 사용 (scheduled_backup_job
         # 과 동일 패턴).

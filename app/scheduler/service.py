@@ -49,6 +49,13 @@ from app.scheduler.job_runner import (
 # 을 만들지 않고 그곳의 상수를 가져온다.
 from app.timezone import KST
 
+# task 00131 — cron 중복 실행 버그 수정. 컨테이너당 스케줄러 job 을 실행하는
+# 프로세스를 1개로 강제하는 flock 기반 단일 인스턴스 가드.
+from app.scheduler.single_instance import (
+    release_single_instance_lock,
+    try_acquire_single_instance_lock,
+)
+
 # ──────────────────────────────────────────────────────────────
 # 예외
 # ──────────────────────────────────────────────────────────────
@@ -277,10 +284,32 @@ def start() -> None:
 
     task 00040-4 — start 직후 jobstore 의 기존 잡을 KST 기준으로 재해석한다
     (``_reinterpret_existing_jobs_to_kst`` 참조). 등록 잡이 0건이면 no-op.
+
+    task 00131 — cron 중복 실행 버그 수정. 스케줄러를 실제로 띄우기 전에
+    프로세스 수준 단일 인스턴스 flock 을 시도한다. lock 획득에 실패하면(=다른
+    프로세스가 이미 스케줄러를 실행 중) 이 프로세스에서는 스케줄러를 띄우지
+    않고 조기 반환한다. uvicorn ``--reload`` 환경에서 worker 프로세스가 교체될
+    때 이전 worker 의 ``BackgroundScheduler`` 가 깨끗이 정리되지 못하고 살아
+    남으면, 같은 ``scheduler_jobs`` 테이블을 보는 스케줄러가 여러 개가 되어
+    동일 job 이 trigger 시각마다 중복 실행된다. flock 으로 '컨테이너당 job 을
+    실행하는 스케줄러는 1개' 불변식을 코드로 강제한다 (자세한 배경은
+    ``app.scheduler.single_instance`` 모듈 docstring 참조).
     """
     scheduler = _get_or_build_scheduler()
     if scheduler.running:
         return
+
+    # task 00131 — 단일 인스턴스 lock 획득에 실패하면 스케줄러를 띄우지 않는다.
+    # lock 을 쥔 다른 프로세스가 이미 job 을 실행하므로, 이 프로세스까지 띄우면
+    # 동일 job 이 중복 실행된다.
+    if not try_acquire_single_instance_lock():
+        logger.warning(
+            "APScheduler 기동 생략 — 단일 인스턴스 lock 을 다른 프로세스가 "
+            "점유 중이다. 이 프로세스에서는 스케줄 job 이 실행되지 않는다 "
+            "(cron 중복 실행 방지).",
+        )
+        return
+
     scheduler.start()
     logger.info(
         "APScheduler 기동: tablename={} misfire_grace_time={}s max_instances=1 coalesce=True timezone=KST",
@@ -308,24 +337,36 @@ def start() -> None:
 def stop(*, wait: bool = False) -> None:
     """스케줄러를 정지하고 싱글턴을 None 으로 리셋한다.
 
+    task 00131 — 스케줄러 정지 후 단일 인스턴스 flock 도 함께 해제한다. 이렇게
+    해야 다음 worker(재기동/``--reload``) 가 lock 을 승계해 스케줄러를 정상
+    기동할 수 있다. lock 을 쥔 적이 없는 프로세스(=lock 획득 실패로 스케줄러를
+    띄우지 않은 프로세스)에서 호출돼도 release 는 안전한 no-op 이다. shutdown
+    을 먼저 끝낸 뒤 lock 을 풀어, 다른 프로세스가 정지 도중에 lock 을 가로채
+    스케줄러가 잠시 겹치는 일이 없도록 순서를 고정한다.
+
     Args:
         wait: True 면 진행 중 잡이 끝날 때까지 블록. 웹 shutdown 은 즉시 종료가
               나으니 기본은 False.
     """
     global _scheduler
     with _scheduler_lock:
-        if _scheduler is None:
-            return
-        if getattr(_scheduler, "running", False):
-            try:
-                _scheduler.shutdown(wait=wait)
-            except Exception as exc:
-                logger.warning(
-                    "APScheduler shutdown 중 예외(무시): {}: {}",
-                    type(exc).__name__, exc,
-                )
-        _scheduler = None
-        logger.info("APScheduler 정지")
+        if _scheduler is not None:
+            if getattr(_scheduler, "running", False):
+                try:
+                    _scheduler.shutdown(wait=wait)
+                except Exception as exc:
+                    logger.warning(
+                        "APScheduler shutdown 중 예외(무시): {}: {}",
+                        type(exc).__name__, exc,
+                    )
+            _scheduler = None
+            logger.info("APScheduler 정지")
+
+    # task 00131 — 스케줄러 인스턴스 유무와 무관하게 단일 인스턴스 lock 을
+    # 해제한다. _scheduler_lock 밖에서 호출하지만 release 는 자체 lock
+    # (_lock_state_guard) 으로 보호되며 두 lock 이 서로 중첩되지 않아 데드락이
+    # 없다.
+    release_single_instance_lock()
 
 
 # ──────────────────────────────────────────────────────────────
