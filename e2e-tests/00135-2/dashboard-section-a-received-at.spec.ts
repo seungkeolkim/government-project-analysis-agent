@@ -8,7 +8,7 @@ import { test, expect } from "@playwright/test";
 //     렌더된다 (.dashboard-card__received 가 .dashboard-card__deadline 보다
 //     DOM 순서상 앞).
 //   - 접수 일시 데이터가 없는 행은 "접수일 미정" 으로 자연스럽게 처리된다.
-//   - 00135-1 의 전이 문구 수정 결과(🔄 전이→{상태}에도)가 회귀 없이 함께
+//   - 00135-1/00137 의 전이 문구(🔄 전이→{상태})가 회귀 없이 함께
 //     정상 표시되고, 과거의 깨진 "전이→{상태}도마감" 표현이 보이지 않는다.
 //
 // 서비스는 8000 포트에서 동작한다 (00043-1 의 대시보드 진입 패턴 그대로).
@@ -77,7 +77,7 @@ test.describe("대시보드 A 섹션 — 접수·마감 일시 표시 (task 0013
     }
   });
 
-  test("전이 행의 중복 배지 문구가 '...에도' 이고 '도마감' 처럼 깨진 표현이 없다", async ({
+  test("전이 행의 중복 배지 문구에 '도마감' 처럼 깨진 표현이 없다", async ({
     page,
   }) => {
     await page.goto(DASHBOARD_URL);
@@ -97,19 +97,19 @@ test.describe("대시보드 A 섹션 — 접수·마감 일시 표시 (task 0013
 
     // 펼친 A 섹션 전체 텍스트에 깨진 전이 표현이 없어야 한다.
     // 과거 버그: "🔄 전이→접수중도" 가 옆 "마감 ..." 과 붙어 "도마감" 으로
-    // 읽혔다 — 00135-1 에서 "에도" 어법으로 교정됨.
+    // 읽혔다 — 00135-1 에서 "에도" 어법으로 교정됐으나 00137 에서 postfix 전체 제거.
     const sectionText = await sectionA.innerText();
     expect(sectionText).not.toContain("전이→접수예정도");
     expect(sectionText).not.toContain("전이→접수중도");
     expect(sectionText).not.toContain("전이→마감도");
 
-    // 중복 배지가 렌더된 경우 모두 "전이→{상태}에도" 형식이어야 한다.
+    // 중복 배지가 렌더된 경우 모두 postfix 없는 "전이→{상태}" 형식이어야 한다.
     const duplicateBadges = sectionA.locator(".dashboard-card__duplicate-badge");
     const badgeCount = await duplicateBadges.count();
     for (let index = 0; index < badgeCount; index += 1) {
       const badgeText = (await duplicateBadges.nth(index).innerText()).trim();
       if (badgeText.includes("전이→")) {
-        expect(badgeText).toMatch(/전이→(접수예정|접수중|마감)에도$/);
+        expect(badgeText).toMatch(/전이→(접수예정|접수중|마감)$/);
       }
     }
   });

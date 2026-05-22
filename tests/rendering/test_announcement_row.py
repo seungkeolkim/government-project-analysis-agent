@@ -207,10 +207,10 @@ def test_empty_duplicate_badges_omits_badge_area() -> None:
 def test_present_duplicate_badges_render_each_text() -> None:
     """duplicate_badges 가 있으면 각 배지 텍스트가 모두 렌더된다."""
     html_fragment = render_announcement_row_html(
-        _make_view(duplicate_badges=["🆕 신규에도", "🔄 전이→마감에도"])
+        _make_view(duplicate_badges=["🆕 신규", "🔄 전이→마감"])
     )
-    assert "🆕 신규에도" in html_fragment
-    assert "🔄 전이→마감에도" in html_fragment
+    assert "🆕 신규" in html_fragment
+    assert "🔄 전이→마감" in html_fragment
     # 중복 배지 보라색 배경이 등장한다.
     assert "#f3e8ff" in html_fragment
 
