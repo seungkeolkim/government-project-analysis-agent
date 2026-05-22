@@ -185,13 +185,13 @@ def test_wrap_with_link_true_wraps_row_in_anchor() -> None:
     assert 'href="https://example.com/announcements/42"' in html_fragment
 
 
-def test_wrap_with_link_false_wraps_row_in_div() -> None:
-    """wrap_with_link=False 는 행을 <div> 컨테이너로 감싸 링크를 생략한다."""
+def test_wrap_with_link_false_wraps_row_in_table() -> None:
+    """wrap_with_link=False 는 행을 <table> 컨테이너로 감싸 링크를 생략한다."""
     html_fragment = render_announcement_row_html(
         _make_view(), wrap_with_link=False
     )
-    assert html_fragment.startswith("<div ")
-    assert html_fragment.endswith("</div>")
+    assert html_fragment.startswith("<table ")
+    assert html_fragment.endswith("</table>")
     assert "<a " not in html_fragment
 
 

@@ -18,6 +18,12 @@
     그러면 본 모듈의 렌더러 한 곳을 고치면 대시보드·메일 양쪽 공고 표현이
     동시에 바뀐다.
 
+레이아웃 방식 (task 00139-1):
+    행 컨테이너를 ``display:flex + gap`` 에서 ``<table>/<td>`` 기반으로 전환했다.
+    Outlook(Word 렌더 엔진)·Gmail 등 메일 클라이언트가 ``flex`` 와 ``gap`` 을
+    제거하면 항목 사이 간격이 모두 사라지기 때문이다. ``<table>/<td>`` 는 메일
+    클라이언트가 안정적으로 지원하며, 셀별 명시적 ``padding`` 으로 간격을 보장한다.
+
 의존 방향:
     본 모듈은 ``app.timezone`` 과 표준 라이브러리만 import 한다. ``app.web`` /
     ``app.email`` 어느 쪽도 import 하지 않으므로 두 레이어 모두 순환 import
@@ -221,32 +227,36 @@ def _render_dates_group(
     received_at: datetime | None,
     deadline_at: datetime | None,
 ) -> str:
-    """접수 일시·마감 일시를 한 묶음 ``<span>`` 으로 렌더한다.
+    """접수 일시·마감 일시를 두 ``<span>`` 으로 렌더한다.
 
-    대시보드 expand 행과 동일하게 접수 span 이 마감 span 왼쪽에 오고, 묶음
-    전체는 ``margin-left:auto`` 로 행 우측에 정렬된다 (``style.css`` 의
-    ``.dashboard-card__dates``). 시각이 ``None`` 이면 흐린 이탤릭 톤의
-    ``"접수일 미정"`` / ``"마감 미정"`` 으로 떨어진다.
+    메일 클라이언트 호환을 위해 ``display:flex / gap / margin-left:auto`` 에
+    의존하지 않는다 — 대신 접수 ``<span>`` 에 ``margin-right:10px`` 를 명시적으로
+    부여해 두 일시 사이 간격을 보장한다. 우측 정렬은 호출자 ``<td>`` 의
+    ``text-align:right`` 로 처리한다.
+
+    시각이 ``None`` 이면 흐린 이탤릭 톤의 ``"접수일 미정"`` / ``"마감 미정"``
+    으로 떨어진다.
 
     Args:
         received_at: 접수 시작 시각 (UTC tz-aware) 또는 ``None``.
         deadline_at: 마감 시각 (UTC tz-aware) 또는 ``None``.
 
     Returns:
-        접수·마감 일시 묶음 ``<span>`` HTML 문자열.
+        접수 ``<span>`` 과 마감 ``<span>`` 을 이어 붙인 HTML 문자열.
     """
     if received_at is not None:
         received_text = "접수 " + format_kst(
             received_at, ANNOUNCEMENT_ROW_DATETIME_FORMAT
         )
         received_html = (
-            '<span style="color:#6b7280;font-size:12px;white-space:nowrap;">'
+            '<span style="color:#6b7280;font-size:12px;white-space:nowrap;'
+            'margin-right:10px;">'
             f"{html.escape(received_text)}</span>"
         )
     else:
         received_html = (
             '<span style="color:#9ca3af;font-size:12px;font-style:italic;'
-            'white-space:nowrap;">접수일 미정</span>'
+            'white-space:nowrap;margin-right:10px;">접수일 미정</span>'
         )
 
     if deadline_at is not None:
@@ -263,10 +273,7 @@ def _render_dates_group(
             'white-space:nowrap;">마감 미정</span>'
         )
 
-    return (
-        '<span style="display:flex;align-items:center;gap:8px;margin-left:auto;">'
-        f"{received_html}{deadline_html}</span>"
-    )
+    return f"{received_html}{deadline_html}"
 
 
 def render_announcement_row_html(
@@ -281,15 +288,16 @@ def render_announcement_row_html(
         출처 배지 → (전이 행이면) 이전상태 배지 + ``→`` 화살표 → 현재상태 배지
         → 공고명 → (있으면) 중복 배지들 → 접수 일시·마감 일시 묶음(우측 정렬).
 
-    행 컨테이너는 ``style.css`` 의 ``.dashboard-card__expand-link`` 와 동일하게
-    ``display:flex;flex-wrap:wrap;align-items:center;gap:8px`` 레이아웃이다.
+    행 컨테이너는 메일 클라이언트 호환성을 위해 ``<table>/<td>`` 기반 레이아웃을
+    사용한다. Outlook(Word 렌더 엔진)·Gmail 등이 ``display:flex`` 와 ``gap`` 을
+    제거해도 각 ``<td>`` 의 명시적 ``padding`` 이 항목 간 간격을 보장한다.
 
     링크 래핑:
-        ``wrap_with_link=True`` (기본) 이면 행 전체를 ``row.detail_url`` 를
-        대상으로 하는 ``<a href>`` 로 감싸 반환한다 — 대시보드 expand 행처럼
-        '행 전체가 클릭 영역' 이 되고, 메일 항목도 클릭 가능한 행이 된다.
-        ``wrap_with_link=False`` 이면 ``<div>`` 컨테이너로 감싸 반환해, 호출자가
-        바깥에서 별도 링크 래핑/배치를 제어할 수 있게 한다.
+        ``wrap_with_link=True`` (기본) 이면 ``<table>`` 전체를 ``row.detail_url``
+        을 대상으로 하는 ``<a href style="display:block;">`` 으로 감싼다 —
+        대시보드 expand 행처럼 '행 전체가 클릭 영역' 이 되고, 메일 항목도 클릭
+        가능하다. ``wrap_with_link=False`` 이면 ``<table>`` 을 그대로 반환해
+        호출자가 외부에서 링크 래핑을 제어할 수 있다.
 
     이스케이프:
         제목·출처·상태·중복 배지 등 모든 동적 값은 ``html.escape`` 되고,
@@ -298,64 +306,89 @@ def render_announcement_row_html(
 
     Args:
         row:            렌더할 공고 1행 view-model.
-        wrap_with_link: True 면 ``<a href>`` 로, False 면 ``<div>`` 로 행을
-            감싼다. 기본 True.
+        wrap_with_link: ``True`` 면 ``<a href style="display:block;">`` 으로,
+            ``False`` 면 ``<table>`` 을 그대로 반환한다. 기본 ``True``.
 
     Returns:
         공고 1행의 인라인 CSS HTML 조각 문자열.
     """
-    parts: list[str] = []
-
-    # 1. 출처 배지.
-    parts.append(_render_source_badge(row.source_type))
-
-    # 2. 전이 행이면 이전상태 배지 + 화살표. 비전이 행(transition_from is None)
-    #    이면 통째로 생략한다.
-    if row.transition_from is not None:
-        parts.append(
-            _render_status_badge(row.transition_from, row.transition_from_key)
-        )
-        parts.append(
-            '<span style="color:#6b7280;font-size:12px;margin:0 2px;">→</span>'
-        )
-
-    # 3. 현재상태 배지.
-    parts.append(_render_status_badge(row.status_label, row.status_key))
-
-    # 4. 공고명 — flex 로 남은 공간을 차지하게 해 날짜 묶음이 우측으로 밀린다.
-    parts.append(
-        '<span style="flex:1 1 220px;min-width:200px;color:#111827;">'
-        f"{html.escape(row.title)}</span>"
+    # 1. 출처 배지 셀.
+    source_cell = (
+        '<td style="padding:6px 6px;white-space:nowrap;vertical-align:middle;">'
+        + _render_source_badge(row.source_type)
+        + "</td>"
     )
 
-    # 5. 중복 배지 — 빈 list 면 루프가 돌지 않아 영역 자체가 생략된다.
-    for badge_text in row.duplicate_badges:
-        parts.append(
-            '<span style="display:inline-block;background:#f3e8ff;color:#6b21a8;'
-            'font-size:11px;padding:2px 6px;border-radius:3px;">'
-            f"{html.escape(badge_text)}</span>"
+    # 2. 상태 배지 셀 — 전이 행이면 이전상태 + 화살표 + 현재상태, 비전이 행이면
+    #    현재상태만.
+    if row.transition_from is not None:
+        status_inner = (
+            _render_status_badge(row.transition_from, row.transition_from_key)
+            + '<span style="color:#6b7280;font-size:12px;margin:0 4px;">→</span>'
+            + _render_status_badge(row.status_label, row.status_key)
         )
+    else:
+        status_inner = _render_status_badge(row.status_label, row.status_key)
 
-    # 6. 접수·마감 일시 묶음 (우측 정렬).
-    parts.append(_render_dates_group(row.received_at, row.deadline_at))
+    status_cell = (
+        '<td style="padding:6px 4px;white-space:nowrap;vertical-align:middle;">'
+        + status_inner
+        + "</td>"
+    )
 
-    inner_html = "".join(parts)
+    # 3. 공고명 셀 — width:100% 로 남은 가변 폭을 차지한다.
+    title_cell = (
+        '<td style="padding:6px 8px;width:100%;vertical-align:middle;">'
+        + f'<span style="color:#111827;">{html.escape(row.title)}</span>'
+        + "</td>"
+    )
 
-    # 행 컨테이너 — 대시보드 ``.dashboard-card__expand-link`` 의 flex 레이아웃을
-    # 인라인 CSS 로 옮긴 값. hover 효과는 인라인 CSS 로 표현 불가하므로 생략한다.
-    container_style = (
-        "display:flex;flex-wrap:wrap;align-items:center;gap:8px;"
-        "padding:6px 4px;font-size:13px;"
+    # 4. 중복 배지 셀 — 빈 list 이면 셀 자체를 생략한다.
+    if row.duplicate_badges:
+        dup_badges_inner = "".join(
+            '<span style="display:inline-block;background:#f3e8ff;color:#6b21a8;'
+            "font-size:11px;padding:2px 6px;border-radius:3px;margin-right:4px;\">"
+            + html.escape(badge_text)
+            + "</span>"
+            for badge_text in row.duplicate_badges
+        )
+        duplicate_cell = (
+            '<td style="padding:6px 4px;white-space:nowrap;vertical-align:middle;">'
+            + dup_badges_inner
+            + "</td>"
+        )
+    else:
+        duplicate_cell = ""
+
+    # 5. 접수·마감 일시 셀 — 우측 정렬, 줄바꿈 금지.
+    #    _render_dates_group 이 반환하는 두 <span> 사이 간격은 접수 span 의
+    #    margin-right 로 보장된다.
+    dates_cell = (
+        '<td style="padding:6px 6px;white-space:nowrap;vertical-align:middle;'
+        'text-align:right;">'
+        + _render_dates_group(row.received_at, row.deadline_at)
+        + "</td>"
+    )
+
+    table_html = (
+        '<table style="width:100%;border-collapse:collapse;font-size:13px;"><tr>'
+        + source_cell
+        + status_cell
+        + title_cell
+        + duplicate_cell
+        + dates_cell
+        + "</tr></table>"
     )
 
     if wrap_with_link:
         safe_url = html.escape(row.detail_url, quote=True)
         return (
             f'<a href="{safe_url}" '
-            f'style="{container_style}color:inherit;text-decoration:none;">'
-            f"{inner_html}</a>"
+            'style="display:block;color:inherit;text-decoration:none;">'
+            + table_html
+            + "</a>"
         )
-    return f'<div style="{container_style}">{inner_html}</div>'
+    return table_html
 
 
 __all__ = [
