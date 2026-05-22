@@ -130,9 +130,9 @@
                 <span>받는 사람</span>
                 <input id="daily-report-test-recipient"
                        name="test_recipient"
-                       type="email"
+                       type="text"
                        class="admin-schedule__input"
-                       placeholder="example@innodep.com"
+                       placeholder="example@company.com, example2@company.com"
                        autocomplete="off"
                        spellcheck="false">
             </label>
@@ -141,8 +141,9 @@
                     class="admin-button admin-button--secondary">📤 테스트 발송</button>
         </fieldset>
         <p class="admin-state__muted">
+            콤마(,)로 구분해 여러 주소를 입력할 수 있습니다.
+            주소를 비워두면 저장된 기본 받는 사람으로 발송됩니다.
             받는 사람 주소는 Cron 표현식 옆 「저장」 버튼으로 함께 저장됩니다.
-            「테스트 발송」 은 현재 입력값으로 즉시 1통을 보냅니다.
         </p>
 
         {# 지금 발송 — 수신 대상 전원에게 즉시 발송(manual_admin). #}
