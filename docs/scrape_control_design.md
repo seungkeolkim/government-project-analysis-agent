@@ -316,6 +316,13 @@ services:
   `-f /host/project/docker-compose.yml -p iris-agent` 플래그를 명시해야 한다.
   `HOST_PROJECT_DIR` 를 env 로 주입하고, app 컨테이너에
   `${HOST_PROJECT_DIR}:/host/project:ro` 를 마운트해 접근한다.
+  - **`HOST_PROJECT_DIR` 주입 경로(00134)**: app 서비스는 이 값을
+    `env_file: - .env` **한 곳만** 단일 출처로 주입한다. 과거에는
+    `environment` 블록에도 `HOST_PROJECT_DIR=${HOST_PROJECT_DIR:-}` 로
+    중복 정의했으나, docker compose 에서 `environment` 가 `env_file` 보다
+    우선순위가 높아 보간 실패 시 빈 값이 `.env` 의 정상값을 덮어쓰는
+    간헐적 버그가 있어 `environment` 항목을 제거했다. `env_file` 은 `.env`
+    를 리터럴로 읽으므로 보간 취약성이 없다.
 - 즉 subprocess 실제 명령은 다음 형태가 된다:
   ```
   docker -H unix:///var/run/docker.sock compose \

@@ -11,6 +11,20 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
 
+# 모든 docker compose 호출에 `--project-directory "$SCRIPT_DIR"` 를 명시한다(00134).
+#
+# docker compose 는 compose 파일 안의 `${VAR}` 보간 값을 (1) 호출 쉘 환경과
+# (2) 프로젝트 디렉터리의 .env 파일에서 찾는다. project-directory 를 명시하지
+# 않으면 호출 시점의 CWD/compose 버전에 따라 보간에 쓰이는 .env 탐색 위치가
+# 달라질 수 있고, 그 결과 `${HOST_PROJECT_DIR}` 같은 값이 빈 문자열로 떨어져
+# (docker-compose.yml 의 .env 마운트 타겟 등이) 어긋나는 간헐적 버그가 있었다.
+# project-directory 를 프로젝트 루트로 고정하면 호출 CWD 와 무관하게 보간이
+# 항상 프로젝트 루트의 .env 를 사용하므로 동작이 결정론적이 된다.
+#
+# 아래 각 서브커맨드는 `-f "$COMPOSE_FILE" --project-directory "$SCRIPT_DIR"`
+# 를 동일하게 명시한다. (경로에 공백이 있을 수 있어 단어 분리를 피하려고
+# 변수로 묶지 않고 각 호출에 따옴표로 직접 전개한다.)
+
 usage() {
     cat <<'USAGE' >&2
 사용법: ./run_compose.sh <subcommand> [args...]
@@ -46,26 +60,26 @@ shift
 case "$subcommand" in
     up)
         # 기본 대상 서비스는 app. -d 를 포함한 추가 인자는 그대로 위임된다.
-        exec docker compose -f "$COMPOSE_FILE" up app "$@"
+        exec docker compose -f "$COMPOSE_FILE" --project-directory "$SCRIPT_DIR" up app "$@"
         ;;
     down)
-        exec docker compose -f "$COMPOSE_FILE" down "$@"
+        exec docker compose -f "$COMPOSE_FILE" --project-directory "$SCRIPT_DIR" down "$@"
         ;;
     build)
-        exec docker compose -f "$COMPOSE_FILE" build "$@"
+        exec docker compose -f "$COMPOSE_FILE" --project-directory "$SCRIPT_DIR" build "$@"
         ;;
     logs)
-        exec docker compose -f "$COMPOSE_FILE" logs "$@"
+        exec docker compose -f "$COMPOSE_FILE" --project-directory "$SCRIPT_DIR" logs "$@"
         ;;
     restart)
-        exec docker compose -f "$COMPOSE_FILE" restart "$@"
+        exec docker compose -f "$COMPOSE_FILE" --project-directory "$SCRIPT_DIR" restart "$@"
         ;;
     ps)
-        exec docker compose -f "$COMPOSE_FILE" ps "$@"
+        exec docker compose -f "$COMPOSE_FILE" --project-directory "$SCRIPT_DIR" ps "$@"
         ;;
     scrape)
         # scraper 서비스를 1회 실행 후 컨테이너를 제거한다.
-        exec docker compose -f "$COMPOSE_FILE" --profile scrape run --rm scraper "$@"
+        exec docker compose -f "$COMPOSE_FILE" --project-directory "$SCRIPT_DIR" --profile scrape run --rm scraper "$@"
         ;;
     *)
         printf 'ERROR: 알 수 없는 서브커맨드: %s\n' "$subcommand" >&2
