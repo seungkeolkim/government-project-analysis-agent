@@ -2177,6 +2177,89 @@ def test_build_html_body_meta_label_cell_uses_nowrap() -> None:
     )
 
 
+# ──────────────────────────────────────────────────────────────
+# T. 메일 푸터 문구 — 시스템 URL + 데스크톱 최적화 + 수신 거부 안내 (task 00145)
+# ──────────────────────────────────────────────────────────────
+
+
+def test_build_text_body_footer_shows_new_three_line_notice() -> None:
+    """text 본문 푸터가 신규 3줄 문구이며 첫 줄 끝 괄호에 시스템 URL 이 들어간다.
+
+    검증 (task 00145):
+        - 첫 줄은 '...발송되었습니다. (URL)' — 마침표 뒤 공백 1칸 + 괄호 URL.
+          URL 앞에 시스템 이름을 붙이지 않는다.
+        - 둘째 줄은 데스크톱 최적화 안내.
+        - 셋째 줄은 계정설정 기반 메일 수신 거부 안내.
+        - 옛 문구('수신 거부는 시스템 관리자에게 문의')는 더 이상 등장하지 않는다.
+    """
+    from app.email.message_builder import build_daily_report_text_body
+
+    text = build_daily_report_text_body(
+        window=_window_for_body(),
+        payload=_build_full_payload(),
+        public_base_url="http://192.168.0.10:8000",
+    )
+
+    assert (
+        "이 메일은 정부사업 모니터링 시스템에서 발송되었습니다. "
+        "(http://192.168.0.10:8000)"
+    ) in text
+    assert "이 이메일은 데스크톱 환경에 최적화 되어 있습니다." in text
+    assert (
+        "메일 수신을 희망하지 않으시는 분은 "
+        "\"계정설정\" → \"이메일 알림 수신\"을 해제하시면 됩니다."
+    ) in text
+    # 옛 푸터 문구는 제거됐다.
+    assert "수신 거부는 시스템 관리자에게 문의해 주세요." not in text
+
+
+def test_build_html_body_footer_shows_new_three_line_notice() -> None:
+    """HTML 본문 푸터도 동일한 3줄 문구로 바뀌고 첫 줄에 시스템 URL 이 들어간다.
+
+    검증 (task 00145):
+        - 첫 줄 끝 괄호에 시스템 URL, <br> 로 줄 구분.
+        - 큰따옴표(\"계정설정\")는 HTML 에서 따옴표 문자 그대로 노출.
+        - 옛 문구가 더 이상 등장하지 않는다.
+    """
+    from app.email.message_builder import build_daily_report_html_body
+
+    html_body = build_daily_report_html_body(
+        window=_window_for_body(),
+        payload=_build_full_payload(),
+        public_base_url="http://192.168.0.10:8000",
+    )
+
+    assert (
+        "이 메일은 정부사업 모니터링 시스템에서 발송되었습니다. "
+        "(http://192.168.0.10:8000)<br>"
+    ) in html_body
+    assert "이 이메일은 데스크톱 환경에 최적화 되어 있습니다.<br>" in html_body
+    assert (
+        "메일 수신을 희망하지 않으시는 분은 "
+        "\"계정설정\" → \"이메일 알림 수신\"을 해제하시면 됩니다."
+    ) in html_body
+    assert "수신 거부는 시스템 관리자에게 문의해 주세요." not in html_body
+
+
+def test_build_html_body_footer_escapes_system_url() -> None:
+    """HTML 푸터의 시스템 URL 은 ``html.escape`` 로 이스케이프되어 노출된다.
+
+    URL 에 ``&`` 등 HTML 특수문자가 포함돼도 안전하게 표시되어야 한다.
+    """
+    from app.email.message_builder import build_daily_report_html_body
+
+    html_body = build_daily_report_html_body(
+        window=_window_for_body(),
+        payload=_build_full_payload(),
+        public_base_url="http://192.168.0.10:8000/?a=1&b=2",
+    )
+
+    # & 가 &amp; 로 이스케이프된 형태로 등장.
+    assert "(http://192.168.0.10:8000/?a=1&amp;b=2)" in html_body
+    # 이스케이프되지 않은 raw & 형태는 푸터 URL 로 등장하지 않는다.
+    assert "?a=1&b=2)" not in html_body
+
+
 # pytest 가 모듈 단독 실행 가능하도록.
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
