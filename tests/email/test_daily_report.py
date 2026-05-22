@@ -1957,6 +1957,226 @@ def test_compute_window_fixed_lookback_hours_returns_zero_count_if_no_snapshots(
     assert window.snapshot_count == 0
 
 
+# ──────────────────────────────────────────────────────────────
+# V. 누적 snapshot 생성 시각 목록 (task 00142)
+# ──────────────────────────────────────────────────────────────
+
+
+def _window_with_snapshot_created_ats(
+    snapshot_created_ats: list[datetime],
+) -> AggregationWindow:
+    """본문 빌더 테스트용 — 주어진 스냅샷 생성 시각 목록을 가진 ``AggregationWindow``.
+
+    ``snapshot_count`` 는 목록 길이와 일치시켜 정규 흐름
+    (``compute_aggregation_window``)과 동일한 불변식을 유지한다.
+
+    Args:
+        snapshot_created_ats: 누적 snapshot 들의 생성 시각 (UTC tz-aware).
+
+    Returns:
+        ``snapshot_created_ats`` / ``snapshot_count`` 가 채워진
+        ``AggregationWindow``. from_dt / to_dt 는 고정 시각.
+    """
+    return AggregationWindow(
+        from_dt=datetime(2026, 5, 18, 0, 0, tzinfo=UTC),
+        to_dt=datetime(2026, 5, 19, 0, 0, tzinfo=UTC),
+        snapshot_count=len(snapshot_created_ats),
+        is_first_send=False,
+        fallback_days=None,
+        snapshot_created_ats=snapshot_created_ats,
+    )
+
+
+def test_compute_window_collects_snapshot_created_ats_in_ascending_order(
+    db_session: Session,
+) -> None:
+    """``compute_aggregation_window`` 가 구간 내 snapshot 의 created_at 을
+    created_at 오름차순으로 ``snapshot_created_ats`` 에 모은다 (task 00142).
+
+    검증:
+        - ``snapshot_created_ats`` 길이 == ``snapshot_count``.
+        - INSERT 순서와 무관하게 created_at 오름차순으로 정렬된다.
+        - 추가 쿼리 없이 기존 list 결과를 재사용한다 (값 일치만 검증).
+    """
+    from app.timezone import format_kst
+
+    last_sent = datetime(2026, 5, 19, 9, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 5, 19, 12, 0, 0, tzinfo=UTC)
+    set_setting(
+        db_session, SETTING_KEY_DAILY_REPORT_LAST_SENT_AT, last_sent.isoformat()
+    )
+
+    # 일부러 created_at 이 늦은 row 를 먼저 INSERT — ASC 정렬을 검증하기 위함.
+    _insert_snapshot_with_created_at(
+        db_session,
+        created_at=datetime(2026, 5, 19, 11, 0, 0, tzinfo=UTC),
+        snapshot_date_iso="2026-05-19",
+        payload={"new": [9101]},
+    )
+    _insert_snapshot_with_created_at(
+        db_session,
+        created_at=datetime(2026, 5, 19, 10, 0, 0, tzinfo=UTC),
+        snapshot_date_iso="2026-05-18",
+        payload={"new": [9102]},
+    )
+    db_session.commit()
+
+    window = compute_aggregation_window(db_session, now=now)
+
+    assert window.snapshot_count == 2
+    assert len(window.snapshot_created_ats) == 2
+    # created_at 오름차순 — 10:00 UTC 가 먼저, 11:00 UTC 가 나중.
+    # KST 변환 후 비교 (SQLite 가 naive 로 돌려줘도 format_kst 가 UTC 가정 정규화).
+    formatted = [
+        format_kst(value, "%Y-%m-%d %H:%M:%S")
+        for value in window.snapshot_created_ats
+    ]
+    assert formatted == ["2026-05-19 19:00:00", "2026-05-19 20:00:00"]
+
+
+def test_compute_window_snapshot_created_ats_empty_when_no_snapshots(
+    db_session: Session,
+) -> None:
+    """구간 내 snapshot 이 0건이면 ``snapshot_created_ats`` 는 빈 list (task 00142)."""
+    last_sent = datetime(2026, 5, 19, 11, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 5, 19, 12, 0, 0, tzinfo=UTC)
+    set_setting(
+        db_session, SETTING_KEY_DAILY_REPORT_LAST_SENT_AT, last_sent.isoformat()
+    )
+
+    window = compute_aggregation_window(db_session, now=now)
+
+    assert window.snapshot_count == 0
+    assert window.snapshot_created_ats == []
+
+
+def test_aggregation_window_snapshot_created_ats_defaults_to_empty_list() -> None:
+    """``snapshot_created_ats`` 를 생략하고 ``AggregationWindow`` 를 만들면 빈 list.
+
+    기존 테스트/호출 코드가 키워드 일부만으로 ``AggregationWindow`` 를 생성해도
+    TypeError 없이 빈 list 기본값이 적용됨을 가드한다 (task 00142).
+    """
+    window = AggregationWindow(
+        from_dt=datetime(2026, 5, 18, tzinfo=UTC),
+        to_dt=datetime(2026, 5, 19, tzinfo=UTC),
+        snapshot_count=0,
+        is_first_send=False,
+        fallback_days=None,
+    )
+    assert window.snapshot_created_ats == []
+    # 별도 인스턴스 간에 list 가 공유되지 않아야 한다 (default_factory 보장).
+    other = AggregationWindow(
+        from_dt=datetime(2026, 5, 18, tzinfo=UTC),
+        to_dt=datetime(2026, 5, 19, tzinfo=UTC),
+        snapshot_count=0,
+        is_first_send=False,
+        fallback_days=None,
+    )
+    window.snapshot_created_ats.append(datetime(2026, 5, 18, tzinfo=UTC))
+    assert other.snapshot_created_ats == []
+
+
+def test_build_text_body_lists_snapshot_created_ats_in_kst() -> None:
+    """text 본문이 '누적 snapshot: N건' 줄 하위에 각 생성 시각을 KST 글머리로 나열.
+
+    검증 (task 00142 — 사용자 원문 형식):
+        - UTC 입력이 KST(+9h)로 변환된다.
+        - 'YYYY-MM-DD HH:MM:SS' 초 단위까지 표기.
+        - '누적 snapshot: N건' 줄 바로 다음 줄들에 들여쓴 ``* 시각`` 으로 등장.
+    """
+    from app.email.message_builder import build_daily_report_text_body
+
+    # UTC 2026-04-24 16:11:27 → KST 2026-04-25 01:11:27
+    # UTC 2026-04-25 04:09:31 → KST 2026-04-25 13:09:31 (사용자 원문 예시와 일치)
+    window = _window_with_snapshot_created_ats(
+        [
+            datetime(2026, 4, 24, 16, 11, 27, tzinfo=UTC),
+            datetime(2026, 4, 25, 4, 9, 31, tzinfo=UTC),
+        ]
+    )
+    text = build_daily_report_text_body(window=window, payload=_build_full_payload())
+
+    lines = text.splitlines()
+    count_index = lines.index("누적 snapshot: 2건")
+    # 누적 snapshot 줄 바로 다음 두 줄이 KST 시각 글머리.
+    assert lines[count_index + 1] == "  * 2026-04-25 01:11:27"
+    assert lines[count_index + 2] == "  * 2026-04-25 13:09:31"
+
+
+def test_build_text_body_omits_snapshot_list_when_zero() -> None:
+    """snapshot 0건이면 text 본문에 시각 글머리 줄이 전혀 없다 (task 00142).
+
+    빈 글머리(``*``)나 빈 줄이 추가로 생기지 않아야 한다.
+    """
+    from app.email.message_builder import build_daily_report_text_body
+
+    window = _window_with_snapshot_created_ats([])
+    text = build_daily_report_text_body(window=window, payload=_build_full_payload())
+
+    assert "누적 snapshot: 0건" in text
+    # 시각 글머리 줄(``  * ``)이 전혀 없어야 한다.
+    assert not any(line.startswith("  * ") for line in text.splitlines())
+
+
+def test_build_html_body_lists_snapshot_created_ats_in_kst() -> None:
+    """HTML 본문 회색 메타 박스에 각 스냅샷 생성 시각이 KST 목록으로 노출된다.
+
+    검증 (task 00142):
+        - UTC → KST(+9h) 변환 + 초 단위 표기.
+        - '누적 snapshot' 메타 행 value 안에 ``* 시각`` 글머리 줄로 등장.
+    """
+    from app.email.message_builder import build_daily_report_html_body
+
+    window = _window_with_snapshot_created_ats(
+        [
+            datetime(2026, 4, 24, 16, 11, 27, tzinfo=UTC),
+            datetime(2026, 4, 25, 4, 9, 31, tzinfo=UTC),
+        ]
+    )
+    html_body = build_daily_report_html_body(
+        window=window, payload=_build_full_payload()
+    )
+
+    assert "누적 snapshot" in html_body
+    assert "2건" in html_body
+    # KST 변환된 시각이 글머리(``* ``)와 함께 본문에 등장.
+    assert "* 2026-04-25 01:11:27" in html_body
+    assert "* 2026-04-25 13:09:31" in html_body
+
+
+def test_build_html_body_omits_snapshot_list_when_zero() -> None:
+    """snapshot 0건이면 HTML 본문 메타 박스에 시각 목록이 전혀 없다 (task 00142)."""
+    from app.email.message_builder import build_daily_report_html_body
+
+    window = _window_with_snapshot_created_ats([])
+    html_body = build_daily_report_html_body(
+        window=window, payload=_build_full_payload()
+    )
+
+    # '누적 snapshot' 행의 'N건' 은 그대로, 시각 글머리 줄(``* ``)은 없다.
+    assert "0건" in html_body
+    assert "* 2026-" not in html_body
+
+
+def test_build_html_body_meta_label_cell_uses_nowrap() -> None:
+    """회색 메타 박스 라벨 셀에 ``white-space:nowrap`` 가 적용된다 (task 00142).
+
+    '누적 snapshot' 라벨이 ``width:90px`` 고정 셀 안에서 2줄로 잘리던 문제를
+    nowrap 으로 해결한다 — 라벨 td 의 인라인 style 에 nowrap 이 들어가야 한다.
+    """
+    from app.email.message_builder import build_daily_report_html_body
+
+    html_body = build_daily_report_html_body(
+        window=_window_for_body(), payload=_build_full_payload()
+    )
+
+    # 라벨 td 의 인라인 style — width:90px + white-space:nowrap 가 함께 적용.
+    assert (
+        "width:90px;padding:2px 0;vertical-align:top;white-space:nowrap;"
+        in html_body
+    )
+
+
 # pytest 가 모듈 단독 실행 가능하도록.
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])

@@ -738,6 +738,13 @@ _DAILY_REPORT_CATEGORY_ITEM_CAP: int = 50
 _DAILY_REPORT_DATETIME_FORMAT: str = "%Y-%m-%d %H:%M"
 
 
+# 누적 snapshot 생성 시각 목록 전용 KST 표기 포맷 (task 00142). 사용자 원문
+# 예시('2026-04-25 01:11:27')가 초 단위까지 포함하므로 초까지 표기한다.
+# 제목/구간/공고 행에 쓰이는 분 단위 ``_DAILY_REPORT_DATETIME_FORMAT`` 은
+# 용도가 달라 그대로 두고, 스냅샷 목록 전용으로 별도 상수를 둔다.
+_DAILY_REPORT_SNAPSHOT_DATETIME_FORMAT: str = "%Y-%m-%d %H:%M:%S"
+
+
 # 메일 제목의 고정 prefix. forward 의 ``_FORWARD_SUBJECT_PREFIX`` 와 같은 톤.
 _DAILY_REPORT_SUBJECT_PREFIX: str = "[정부사업 모니터링] Daily Report — "
 
@@ -840,6 +847,63 @@ def _build_daily_report_summary_line(payload: AggregatedSnapshotPayload) -> str:
     return " · ".join(parts)
 
 
+def _format_snapshot_created_ats(window: AggregationWindow) -> list[str]:
+    """누적 snapshot 들의 생성 시각을 KST 문자열 list 로 변환한다 (task 00142).
+
+    ``window.snapshot_created_ats`` 의 각 ``datetime`` (UTC tz-aware — SQLite 는
+    naive 로 돌려줄 수 있다)을 ``format_kst`` 로 KST 변환한다. ``format_kst`` 가
+    내부적으로 ``to_kst`` 정규화를 수행하므로 naive 입력도 안전하다 — 직접 +9
+    시간 산술을 하지 않는다. 포맷은 초 단위까지 표기하는
+    ``_DAILY_REPORT_SNAPSHOT_DATETIME_FORMAT`` 을 쓴다.
+
+    입력 순서(``created_at`` 오름차순)를 그대로 유지한다 — 호출자
+    (``compute_aggregation_window``)가 이미 오름차순으로 모아 두었다.
+
+    Args:
+        window: ``compute_aggregation_window`` 의 반환값.
+
+    Returns:
+        KST ``YYYY-MM-DD HH:MM:SS`` 형식 문자열 list. snapshot 이 0건이면 빈 list.
+    """
+    return [
+        format_kst(created_at, _DAILY_REPORT_SNAPSHOT_DATETIME_FORMAT)
+        for created_at in window.snapshot_created_ats
+    ]
+
+
+def _build_snapshot_count_value_html(window: AggregationWindow) -> str:
+    """'누적 snapshot' 메타 행의 value 칸 HTML 을 만든다 (task 00142).
+
+    ``"N건"`` 뒤에, 구간 내 snapshot 이 1건 이상이면 각 스냅샷의 생성 시각을
+    KST 기준 ``* YYYY-MM-DD HH:MM:SS`` 글머리 줄 목록으로 이어 붙인다. 시각
+    목록은 회색 메타 박스 안에 자연스럽게 들어가도록 보조 텍스트 색상(#888)을
+    쓰고, 각 줄은 ``<div>`` 로 분리해 Outlook/Gmail 양쪽에서 안정적으로
+    줄바꿈된다 (메일 클라이언트는 ``<ul>`` 기본 margin 처리가 제각각이라
+    ``<div>`` 글머리 줄이 더 예측 가능하다).
+
+    snapshot 이 0건이면 ``"N건"`` 만 반환해 빈 목록 줄이 생기지 않게 한다.
+
+    Args:
+        window: ``compute_aggregation_window`` 의 반환값.
+
+    Returns:
+        ``_html_meta_row`` 의 ``value_html`` 로 넘길 HTML 문자열. 동적 값(시각
+        문자열 포함)은 모두 ``html.escape`` 처리된 상태다.
+    """
+    count_html = html.escape(f"{window.snapshot_count}건")
+    formatted_created_ats = _format_snapshot_created_ats(window)
+    if not formatted_created_ats:
+        # snapshot 0건 — 시각 목록을 통째로 생략한다 (빈 글머리/빈 줄 없이).
+        return count_html
+    list_items_html = "".join(
+        '<div style="color:#888;font-size:13px;white-space:nowrap;'
+        'margin-top:2px;">'
+        f"* {html.escape(formatted)}</div>"
+        for formatted in formatted_created_ats
+    )
+    return f"{count_html}{list_items_html}"
+
+
 def _build_daily_report_text_item_line(summary: AnnouncementSummary) -> str:
     """text/plain 본문의 공고 1줄을 만든다.
 
@@ -887,6 +951,7 @@ def build_daily_report_text_body(
 
     multipart/alternative 의 text 대체본용. 구성 (prompt §4):
         1. 헤더 — 구간 표기(KST) + (옵션) 최초 발송 안내 + 누적 snapshot 수
+           + (1건 이상이면) 각 스냅샷 생성 시각(KST) 글머리 목록
         2. 요약 줄 — 5종 카테고리 건수 한 줄
         3. 5종 카테고리 섹션 — 카테고리당 ``label (N건)`` + 공고당 1줄.
            빈 카테고리는 섹션 자체 생략. 50건 초과 시 끝에 ``외 N건`` 안내.
@@ -918,6 +983,10 @@ def build_daily_report_text_body(
             f"※ 최초 발송 — 직전 {window.fallback_days}일치 변화를 포함합니다."
         )
     lines.append(f"누적 snapshot: {window.snapshot_count}건")
+    # 누적 snapshot 하위에 각 스냅샷의 생성 시각을 KST 글머리 줄로 나열한다
+    # (task 00142). snapshot 이 0건이면 목록 자체를 생략한다.
+    for formatted_created_at in _format_snapshot_created_ats(window):
+        lines.append(f"  * {formatted_created_at}")
     lines.append("")
 
     # ── 요약 줄 ──────────────────────────────────────────────────
@@ -1030,7 +1099,8 @@ def build_daily_report_html_body(
 
     구성 (위→아래):
         1. h2 제목 ("Daily Report")
-        2. 메타 박스 — 구간(KST) / (옵션) 최초 발송 안내 / 누적 snapshot 수
+        2. 메타 박스 — 구간(KST) / 누적 snapshot 수 (+ 1건 이상이면 각 스냅샷
+           생성 시각 KST 목록) / (옵션) 최초 발송 안내
         3. 요약 줄 (text 본문과 동일 문자열)
         4. 5종 카테고리 섹션 — 공고 1건은 대시보드와 공유하는 렌더러
            (``app.rendering.announcement_row``) 로 그려 출처 배지·상태/전이·
@@ -1052,12 +1122,14 @@ def build_daily_report_html_body(
     to_kst = format_kst(window.to_dt, _DAILY_REPORT_DATETIME_FORMAT)
 
     # ── 메타 박스 행 ───────────────────────────────────────────
+    # '누적 snapshot' 행 value 에는 'N건' 뒤로 각 스냅샷 생성 시각을 KST
+    # 목록으로 이어 붙인다 (task 00142). 0건이면 'N건' 만 노출된다.
     meta_rows = [
         _html_meta_row(
             "구간 (KST)", html.escape(f"{from_kst} ~ {to_kst}"),
         ),
         _html_meta_row(
-            "누적 snapshot", html.escape(f"{window.snapshot_count}건"),
+            "누적 snapshot", _build_snapshot_count_value_html(window),
         ),
     ]
     if window.is_first_send:
@@ -1119,6 +1191,12 @@ def _html_meta_row(label: str, value_html: str) -> str:
     label 은 호출부에서 넘기는 고정 한글 라벨(이스케이프 불필요)이고,
     ``value_html`` 은 호출부가 **이미 이스케이프한** 값이다.
 
+    라벨 셀에는 ``white-space:nowrap`` 를 적용한다 (task 00142). 라벨 td 가
+    ``width:90px`` 로 고정돼 있어 '누적 snapshot' 처럼 90px 를 넘는 라벨이
+    회색 메타 박스 안에서 2줄로 잘리던 문제를 막는다 — ``nowrap`` 이면 셀이
+    내용 길이에 맞게 늘어나 라벨이 항상 한 줄에 표시된다. 90px 는 짧은 라벨
+    들의 최소 폭 힌트로만 남는다.
+
     Args:
         label: 행 라벨 (예: ``"발주기관"``). 고정 문자열.
         value_html: 행 값 — 호출부에서 이미 ``html.escape`` 된 상태로 넘긴다.
@@ -1128,7 +1206,7 @@ def _html_meta_row(label: str, value_html: str) -> str:
     """
     return (
         '<tr><td style="color:#888;width:90px;padding:2px 0;'
-        'vertical-align:top;">'
+        'vertical-align:top;white-space:nowrap;">'
         f"{label}</td><td style=\"padding:2px 0;\">{value_html}</td></tr>"
     )
 

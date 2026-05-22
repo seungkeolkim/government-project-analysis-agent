@@ -30,7 +30,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from functools import reduce
 from typing import Any, Literal
@@ -108,6 +108,18 @@ class AggregationWindow:
             발송 — 직전 N일치 포함\" 안내를 노출한다.
         fallback_days: 첫 발송 분기에서 적용된 fallback 일수 (보통 7).
             ``is_first_send=False`` 이면 None.
+        snapshot_created_ats: 구간 ``(from_dt, to_dt]`` 안의 ScrapeSnapshot 들이
+            가진 ``created_at`` 목록. ``list_snapshots_created_in_range`` 결과를
+            ``created_at`` 오름차순 그대로 보관한다 (UTC tz-aware — SQLite 는
+            naive 로 돌려줄 수 있다). 본문 빌더(00142)가 KST 로 변환해 '누적
+            snapshot' 행 하위에 생성 시각 목록으로 노출한다. snapshot 이 0건이면
+            빈 list. ``snapshot_count`` 와 항상 길이가 일치한다 (같은 list 에서
+            len 과 created_at 을 함께 뽑기 때문).
+
+            기본값 정책: 테스트 / 호출 코드가 본 필드 없이 ``AggregationWindow``
+            를 키워드 일부만으로 생성하는 경우가 있어 ``default_factory=list``
+            로 빈 list 기본값을 둔다. dataclass 필드 정의의 끝(``fallback_days``
+            뒤)에 위치한다.
 
     frozen 정책:
         ``@dataclass(frozen=False)`` (default). 사용 시점에 mutate 하지 않지만,
@@ -120,6 +132,7 @@ class AggregationWindow:
     snapshot_count: int
     is_first_send: bool
     fallback_days: int | None
+    snapshot_created_ats: list[datetime] = field(default_factory=list)
 
 
 @dataclass
@@ -296,7 +309,9 @@ def compute_aggregation_window(
            ``is_first_send=True`` , ``fallback_days=fallback_days``.
         3. ``to_dt = now``.
         4. ``list_snapshots_created_in_range(session, from_dt, to_dt)`` 의
-           ``len`` 으로 구간 내 snapshot 수를 센다.
+           ``len`` 으로 구간 내 snapshot 수를 세고, 같은 결과에서 각 row 의
+           ``created_at`` 을 ``created_at`` 오름차순 그대로 모아
+           ``snapshot_created_ats`` 에 담는다 (추가 쿼리 없음).
         5. 0건이어도 항상 ``AggregationWindow`` 를 반환한다 — 빈 구간이어도
            발송을 건너뛰지 않는다.
 
@@ -353,6 +368,12 @@ def compute_aggregation_window(
         to_inclusive=to_dt,
     )
     snapshot_count = len(snapshots_in_window)
+    # 각 snapshot 의 생성 시각을 created_at 오름차순 그대로 모은다. 본문 빌더가
+    # '누적 snapshot' 행 하위에 KST 목록으로 노출한다 (task 00142). 위 list 를
+    # 재사용하므로 추가 쿼리는 발생하지 않는다.
+    snapshot_created_ats = [
+        snapshot.created_at for snapshot in snapshots_in_window
+    ]
 
     return AggregationWindow(
         from_dt=from_dt,
@@ -360,6 +381,7 @@ def compute_aggregation_window(
         snapshot_count=snapshot_count,
         is_first_send=is_first_send,
         fallback_days=applied_fallback_days,
+        snapshot_created_ats=snapshot_created_ats,
     )
 
 
