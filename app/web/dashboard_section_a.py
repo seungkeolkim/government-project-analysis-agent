@@ -99,19 +99,22 @@ SECTION_A_CATEGORY_DESCRIPTORS: tuple[dict[str, str], ...] = (
     {
         "key": _transition_key(TRANSITION_TO_LABELS[0]),  # 접수예정
         "label": f"(전이) {TRANSITION_TO_LABELS[0]}",
-        "duplicate_badge": f"🔄 전이→{TRANSITION_TO_LABELS[0]}도",
+        # 신규('🆕 신규에도')·내용 변경('📝 내용 변경에도') 배지와 어법을
+        # 통일하기 위해 조사 '에도' 를 사용한다. 과거 '...도' 형태는 상태명
+        # 뒤에 조사 '도' 가 직접 붙어 '접수중도' 처럼 한 단어로 잘못 읽혔다.
+        "duplicate_badge": f"🔄 전이→{TRANSITION_TO_LABELS[0]}에도",
         "is_transition": "true",
     },
     {
         "key": _transition_key(TRANSITION_TO_LABELS[1]),  # 접수중
         "label": f"(전이) {TRANSITION_TO_LABELS[1]}",
-        "duplicate_badge": f"🔄 전이→{TRANSITION_TO_LABELS[1]}도",
+        "duplicate_badge": f"🔄 전이→{TRANSITION_TO_LABELS[1]}에도",
         "is_transition": "true",
     },
     {
         "key": _transition_key(TRANSITION_TO_LABELS[2]),  # 마감
         "label": f"(전이) {TRANSITION_TO_LABELS[2]}",
-        "duplicate_badge": f"🔄 전이→{TRANSITION_TO_LABELS[2]}도",
+        "duplicate_badge": f"🔄 전이→{TRANSITION_TO_LABELS[2]}에도",
         "is_transition": "true",
     },
 )
@@ -137,6 +140,10 @@ class SectionAExpandItem:
                             동일 키를 사용해 대시보드 배지 색상도 목록 페이지와
                             통일하기 위한 보조 필드 (task 00046-1).
         agency:             주관 기관명 (없으면 None).
+        received_at:        접수 시작 시각 UTC tz-aware datetime — 템플릿이
+                            ``kst_date`` 필터로 마감 일시 왼쪽에 표시. 공고에
+                            접수 일시가 명시되지 않은 경우 None (템플릿이
+                            \"접수일 미정\" 으로 처리).
         deadline_at:        마감 시각 UTC tz-aware datetime — 템플릿이 ``kst_date``
                             필터로 표시.
         canonical_group_id: 위젯 4번 (canonical 미판정 카운트) 가 활용. None 가능.
@@ -157,6 +164,7 @@ class SectionAExpandItem:
     status_label: str
     status_key: str
     agency: str | None
+    received_at: datetime | None
     deadline_at: datetime | None
     canonical_group_id: int | None
     transition_from: str | None
@@ -625,6 +633,7 @@ def _build_expand_items_for_category(
                     status_label=announcement.status.value,
                     status_key=announcement.status.name.lower(),
                     agency=announcement.agency,
+                    received_at=announcement.received_at,
                     deadline_at=announcement.deadline_at,
                     canonical_group_id=announcement.canonical_group_id,
                     transition_from=from_label,
@@ -660,6 +669,7 @@ def _build_expand_items_for_category(
                     status_label=announcement.status.value,
                     status_key=announcement.status.name.lower(),
                     agency=announcement.agency,
+                    received_at=announcement.received_at,
                     deadline_at=announcement.deadline_at,
                     canonical_group_id=announcement.canonical_group_id,
                     transition_from=None,

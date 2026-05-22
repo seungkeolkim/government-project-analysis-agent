@@ -209,15 +209,28 @@
                                                 {% for badge_text in item.duplicate_badges %}
                                                     <span class="dashboard-card__duplicate-badge">{{ badge_text }}</span>
                                                 {% endfor %}
-                                                {% if item.deadline_at %}
-                                                    <span class="dashboard-card__deadline">
-                                                        마감 {{ item.deadline_at | kst_date }}
-                                                    </span>
-                                                {% else %}
-                                                    <span class="dashboard-card__deadline dashboard-card__deadline--unknown">
-                                                        마감 미정
-                                                    </span>
-                                                {% endif %}
+                                                {# 접수·마감 일시를 한 묶음으로 우측 정렬. 접수 span 이
+                                                   마감 span 왼쪽에 오도록 순서를 고정한다. #}
+                                                <span class="dashboard-card__dates">
+                                                    {% if item.received_at %}
+                                                        <span class="dashboard-card__received">
+                                                            접수 {{ item.received_at | kst_date }}
+                                                        </span>
+                                                    {% else %}
+                                                        <span class="dashboard-card__received dashboard-card__received--unknown">
+                                                            접수일 미정
+                                                        </span>
+                                                    {% endif %}
+                                                    {% if item.deadline_at %}
+                                                        <span class="dashboard-card__deadline">
+                                                            마감 {{ item.deadline_at | kst_date }}
+                                                        </span>
+                                                    {% else %}
+                                                        <span class="dashboard-card__deadline dashboard-card__deadline--unknown">
+                                                            마감 미정
+                                                        </span>
+                                                    {% endif %}
+                                                </span>
                                             </a>
                                         </li>
                                     {% endfor %}

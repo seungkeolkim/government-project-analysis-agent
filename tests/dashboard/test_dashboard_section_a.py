@@ -62,6 +62,7 @@ def _make_canonical_with_announcement(
     source_announcement_id: str,
     source_type: str = "IRIS",
     status: AnnouncementStatus = AnnouncementStatus.RECEIVING,
+    received_at: datetime | None = None,
     deadline_at: datetime | None = None,
 ) -> tuple[CanonicalProject, Announcement]:
     """canonical 1개 + is_current=True announcement 1개 INSERT 헬퍼."""
@@ -79,7 +80,7 @@ def _make_canonical_with_announcement(
         title=title,
         agency="테스트기관",
         status=status,
-        received_at=None,
+        received_at=received_at,
         deadline_at=deadline_at,
         scraped_at=datetime(2026, 4, 1, 0, 0, tzinfo=UTC),
         canonical_group_id=canonical.id,
@@ -340,6 +341,78 @@ class TestBuildSectionA:
         # counts 기준이면 1, items 기준이면 0 — 정답은 1.
         assert new_card.base_count == 1
         assert new_card.items == []  # 메타 누락분은 행에서 빠짐.
+
+    def test_expand_item_carries_received_at_for_both_branches(
+        self, session: Session
+    ) -> None:
+        """expand item 이 announcement.received_at 을 transition·non-transition
+        두 빌더 경로 모두에서 채운다 (task 00135-2).
+
+        - 신규(non-transition) 행: received_at 이 있는 공고는 그대로 전달.
+        - 전이(transition) 행: received_at 이 None 인 공고는 None 으로 전달.
+        """
+        # id=1 — 신규 카드용. received_at 명시.
+        _make_canonical_with_announcement(
+            session,
+            canonical_key="key-001",
+            title="접수 일시 있는 공고",
+            source_announcement_id="A-001",
+            received_at=datetime(2026, 5, 1, 0, 0, tzinfo=UTC),
+            deadline_at=datetime(2026, 6, 22, 0, 0, tzinfo=UTC),
+        )
+        # id=2 — 전이 카드용. received_at 미상(None).
+        _make_canonical_with_announcement(
+            session,
+            canonical_key="key-002",
+            title="접수 일시 없는 공고",
+            source_announcement_id="A-002",
+            received_at=None,
+        )
+
+        _insert_snapshot(
+            session, snapshot_date_iso="2026-04-28", payload={"new": []}
+        )
+        _insert_snapshot(
+            session,
+            snapshot_date_iso="2026-04-29",
+            payload={
+                "new": [1],
+                "transitioned_to_접수중": [{"id": 2, "from": "접수예정"}],
+            },
+        )
+
+        result = build_section_a(
+            session,
+            base_date=date(2026, 4, 29),
+            requested_compare_date=date(2026, 4, 28),
+        )
+
+        # non-transition(신규) 경로 — received_at 그대로 전달.
+        # SQLite 는 tz-aware datetime 을 naive 로 돌려주므로 date/시각 성분만
+        # 비교한다 (deadline_at 도 동일한 round-trip 을 거친다).
+        new_card = next(c for c in result.cards if c.category_key == CATEGORY_NEW)
+        assert len(new_card.items) == 1
+        received_at = new_card.items[0].received_at
+        assert received_at is not None
+        assert (received_at.year, received_at.month, received_at.day) == (
+            2026,
+            5,
+            1,
+        )
+        deadline_at = new_card.items[0].deadline_at
+        assert deadline_at is not None
+        assert (deadline_at.year, deadline_at.month, deadline_at.day) == (
+            2026,
+            6,
+            22,
+        )
+
+        # transition(전이) 경로 — received_at 이 None 이어도 필드가 채워진다.
+        transition_card = next(
+            c for c in result.cards if c.category_key == "transitioned_to_접수중"
+        )
+        assert len(transition_card.items) == 1
+        assert transition_card.items[0].received_at is None
 
     def test_fallback_uses_nearest_previous_snapshot(self, session: Session) -> None:
         """(b) fallback: 비교일 가용 안 되면 가장 가까운 이전 snapshot 사용 + 안내문."""
