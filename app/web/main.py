@@ -74,7 +74,11 @@ from app.scheduler import (
     start_scheduler,
     stop_scheduler,
 )
-from app.scrape_control import cleanup_stale_running_runs
+from app.scrape_control import (
+    ComposeEnvironmentError,
+    cleanup_stale_running_runs,
+    validate_host_project_dir,
+)
 from app.suggestions import (
     ensure_deleted_at_columns,
     ensure_suggestion_comment_updated_at_column,
@@ -502,6 +506,46 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         logger.info(
             "ASGI startup 훅 — APScheduler 기동 절차 시작 (pid={}).", os.getpid()
         )
+
+        # task 00143 — HOST_PROJECT_DIR fail-fast 검증 (스케줄러 기동 이전).
+        #
+        # 근본 원인: docker-compose.yml 의 app 서비스는 HOST_PROJECT_DIR 를
+        # `env_file: - .env` 로 주입한다. env_file 은 컨테이너 **생성 시점** 에
+        # 1회 평가돼 컨테이너 환경에 그대로 박힌다. task 134 가 고친 것은 compose
+        # **파일**(environment 중복 제거 + run_compose.sh --project-directory
+        # 명시) 뿐이라, task 134 이전(버그 있는 compose)에 생성돼 계속 떠 있는
+        # stale 컨테이너는 여전히 빈 HOST_PROJECT_DIR 를 안고 있다. 그 상태로
+        # 스케줄러가 기동되면 scheduled_scrape 가 매 주기 ComposeEnvironmentError
+        # 를 swallow 해 '조용히 실패만 반복'(task 67, 2026-05-22 13:00) 하는
+        # silent-failure 가 된다 — 운영자가 수집 이력을 열어보기 전까지 드러나지
+        # 않는다.
+        #
+        # 근본 수정: 빈/미설정 HOST_PROJECT_DIR 로는 app(웹+스케줄러) 자체가
+        # 기동되지 않도록 부팅 단계에서 차단한다. 예외를 startup 훅 밖으로
+        # 전파하면 ASGI 서버 기동이 실패하고, docker-compose 의
+        # `restart: unless-stopped` 와 맞물려 컨테이너가 재시작 루프에 들어간다.
+        # 운영자는 `docker ps`(Restarting) / `docker logs` 에서 원인을 즉시
+        # 인지하고 컨테이너를 재생성(down && up)하게 된다 — 수집 이력에서 뒤늦게
+        # 발견하던 silent-failure 구조가 사라진다.
+        #
+        # 검증은 app 기동 경로에만 둔다. scraper 컨테이너는 FastAPI 를 띄우지
+        # 않고 `python -m app.cli` 만 실행하므로 본 훅을 거치지 않는다 — 공유
+        # 파일인 docker/entrypoint.sh 에 검증을 넣지 않아 scraper 기동은 영향을
+        # 받지 않는다.
+        try:
+            host_project_dir = validate_host_project_dir()
+        except ComposeEnvironmentError as exc:
+            logger.critical(
+                "app 기동 중단 — HOST_PROJECT_DIR 미설정/빈 값입니다. 이 상태로는 "
+                "수집 기능(수동·스케줄)이 전혀 동작할 수 없어 부팅을 중단합니다. "
+                "이 컨테이너가 task 134 이전에 생성된 stale 컨테이너라면 "
+                "`./run_compose.sh down && ./run_compose.sh up -d` 로 컨테이너를 "
+                "재생성해야 .env 의 HOST_PROJECT_DIR 가 반영됩니다. 원인: {}",
+                exc,
+            )
+            # startup 훅 밖으로 전파 → ASGI 기동 실패 → 컨테이너 재시작 루프.
+            raise
+        logger.info("HOST_PROJECT_DIR 검증 통과: {}", host_project_dir)
 
         # Phase 2(00025-6): APScheduler BackgroundScheduler 기동.
         # create_app() 본문의 stale cleanup 이 끝난 **뒤** 에 실행된다 — startup

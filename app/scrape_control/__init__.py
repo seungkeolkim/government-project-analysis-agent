@@ -18,6 +18,7 @@ from app.scrape_control.runner import (
     StartResult,
     build_compose_command,
     start_scrape_run,
+    validate_host_project_dir,
 )
 from app.scrape_control.stale import cleanup_stale_running_runs
 
@@ -33,4 +34,5 @@ __all__ = [
     "scrape_run_log_path",
     "scrape_run_log_root",
     "start_scrape_run",
+    "validate_host_project_dir",
 ]

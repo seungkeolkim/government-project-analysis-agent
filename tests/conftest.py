@@ -17,6 +17,25 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
 
+@pytest.fixture(autouse=True)
+def _default_host_project_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """모든 테스트에 기본 HOST_PROJECT_DIR 환경변수를 주입한다 (task 00143).
+
+    task 00143 에서 app(FastAPI) 부팅 경로의 ASGI startup 훅에 HOST_PROJECT_DIR
+    fail-fast 검증이 추가됐다. ``with TestClient(...)`` 로 startup 이벤트를
+    발화시키는 테스트는 이 환경변수가 비어 있으면 ``ComposeEnvironmentError`` 로
+    기동에 실패한다. 실제 운영에서는 ``.env`` 가 이 값을 항상 제공하므로,
+    테스트 기본값을 주입해 운영 환경과 동일한 전제로 맞춘다.
+
+    HOST_PROJECT_DIR 의 미설정/빈 값을 명시적으로 검증해야 하는 테스트
+    (예: ``test_build_compose_command.py``, ``test_host_project_dir_fail_fast.py``)
+    는 각 테스트가 직접 ``monkeypatch.delenv`` / ``setenv`` 로 이 기본값을
+    덮어쓴다. autouse 픽스처와 테스트 본문은 동일한 함수 스코프 ``monkeypatch``
+    를 공유하므로, 테스트 본문에서의 재설정이 나중에 적용돼 우선한다.
+    """
+    monkeypatch.setenv("HOST_PROJECT_DIR", "/home/test/workspace/iris-agent")
+
+
 @pytest.fixture
 def _test_db_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     """테스트별 고유 SQLite 파일 URL 을 환경변수에 주입한다.
