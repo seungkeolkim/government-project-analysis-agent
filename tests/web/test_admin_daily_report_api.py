@@ -784,6 +784,12 @@ def test_get_daily_report_runs_returns_recent_rows(
     # ISO-8601 직렬화 형식 가드.
     assert items[0]["started_at"].startswith("2026-05-20T")
     assert items[1]["aggregation_from"].startswith("2026-05-18T")
+    # UTC tz-aware 직렬화 검증 — 프론트엔드 KST 변환이 정상 동작하려면 +00:00 이 있어야 한다.
+    for item in items:
+        for field in ("started_at", "completed_at", "aggregation_from", "aggregation_to"):
+            value = item.get(field)
+            if value is not None:
+                assert "+00:00" in value, f"{field}={value!r} 에 UTC 오프셋이 없음"
 
 
 def test_get_daily_report_runs_limit_validation(
@@ -885,6 +891,11 @@ def test_get_daily_report_run_sends_returns_matching_send_runs(
     assert items[1]["status"] == "failed"
     assert items[1]["error_message"] == "TimeoutError: too slow"
     assert items[1]["attempt_count"] == 3
+    # UTC tz-aware 직렬화 검증 — sent_at 이 있는 row 는 +00:00 오프셋 포함.
+    assert items[0]["sent_at"] is not None
+    assert "+00:00" in items[0]["sent_at"], f"sent_at={items[0]['sent_at']!r} 에 UTC 오프셋이 없음"
+    # bob 은 sent_at=None 이므로 None 이어야 한다.
+    assert items[1]["sent_at"] is None
 
 
 def test_get_daily_report_run_sends_404_when_run_missing(

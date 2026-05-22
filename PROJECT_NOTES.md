@@ -153,7 +153,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - **언어 / 문서**: 모든 모듈 docstring 과 주석은 **한국어**. 외부 공개용이 아니므로 격식보다 명확성 우선.
 - **타입힌트**: 모든 공개 함수에 타입 어노테이션. `from __future__ import annotations` 를 파일 상단에.
 - **설정 접근**: 직접 `os.environ` 읽지 말고 `app.config.get_settings()` 싱글턴 경유.
-- **시각 처리**: DB 의 모든 시간 컬럼은 timezone-aware UTC 저장이 컨벤션. **SQLite 백엔드는 `DateTime(timezone=True)` 의 tz 를 실제로 저장하지 못해** SELECT 결과가 naive 로 돌아오므로, 비교 직전에 양쪽을 UTC tz-aware 로 정규화하는 헬퍼 (`_as_utc`) 를 사용한다. **표시·로그·cron 은 Asia/Seoul (KST) 단일 고정**: 저장은 `now_utc()`, 표시는 `to_kst()` + `format_kst()` 또는 Jinja2 필터 (`kst_format`, `kst_date`). **시스템 표시 포맷은 `YYYY-MM-DD HH:mm:ss` 초 단위로 통일** (`DEFAULT_KST_FORMAT = "%Y-%m-%d %H:%M:%S"`). `kst_date` Jinja2 필터도 초 단위 표시 (날짜 전용 아님 — 00122). JS datetime 은 `en-CA` locale + `Asia/Seoul` timeZone 패턴으로 통일 (`toLocaleString('ko-KR')` 대체). `datetime.utcnow()` · naive `datetime.now()` 직접 사용 금지 — `app/timezone.py` 헬퍼로만 생성. 컨테이너 `TZ` env 는 유지하되 코드는 `ZoneInfo("Asia/Seoul")` 명시로 환경변수 비의존. 외부 응답(IRIS / NTIS) 날짜는 KST 가정 후 UTC 변환 저장 (가정이 틀렸을 때는 `raw_metadata` 의 원문 텍스트로 backfill).
+- **시각 처리**: DB 의 모든 시간 컬럼은 timezone-aware UTC 저장이 컨벤션. **SQLite 백엔드는 `DateTime(timezone=True)` 의 tz 를 실제로 저장하지 못해** SELECT 결과가 naive 로 돌아오므로, 비교 직전에 양쪽을 UTC tz-aware 로 정규화하는 헬퍼 (`_as_utc`) 를 사용한다. **표시·로그·cron 은 Asia/Seoul (KST) 단일 고정**: 저장은 `now_utc()`, 표시는 `to_kst()` + `format_kst()` 또는 Jinja2 필터 (`kst_format`, `kst_date`). **시스템 표시 포맷은 `YYYY-MM-DD HH:mm:ss` 초 단위로 통일** (`DEFAULT_KST_FORMAT = "%Y-%m-%d %H:%M:%S"`). `kst_date` Jinja2 필터도 초 단위 표시 (날짜 전용 아님 — 00122). JS datetime 은 `en-CA` locale + `Asia/Seoul` timeZone 패턴으로 통일 (`toLocaleString('ko-KR')` 대체). `datetime.utcnow()` · naive `datetime.now()` 직접 사용 금지 — `app/timezone.py` 헬퍼로만 생성. 컨테이너 `TZ` env 는 유지하되 코드는 `ZoneInfo("Asia/Seoul")` 명시로 환경변수 비의존. 외부 응답(IRIS / NTIS) 날짜는 KST 가정 후 UTC 변환 저장 (가정이 틀렸을 때는 `raw_metadata` 의 원문 텍스트로 backfill). **API 응답 datetime 직렬화**: SQLite SELECT 가 돌려주는 naive datetime 을 `.isoformat()` 하면 `+00:00` 오프셋이 없는 문자열이 나와 프론트엔드 `new Date()` 가 브라우저 로컬 시각으로 해석 — KST 변환이 무력화된다. API 응답에서 datetime 을 직렬화할 때는 `_as_utc(dt)` 로 UTC tz-aware 로 정규화한 뒤 `.isoformat()` 해야 한다 (결과에 `+00:00` 포함). JS 측 `formatDateTimeKst` / `formatDateKst` 는 오프셋 있는 입력을 전제로 동작한다.
 - **UPSERT**: 공고는 `(source_type, source_announcement_id)` 복합 키, 첨부는 `(announcement_id, original_filename)` + `sha256` 비교. 재실행 시 중복 생성 금지. 변경된 경우만 신규 row 생성(이력 보존), 상태 전이만은 in-place UPDATE.
 - **예외 격리**: 스크래퍼 파이프라인은 **공고 1건 단위** try/except. 한 공고 실패가 전체 실행을 중단시키지 않는다.
 - **웹 보안 경계**: FastAPI 외부 노출 금지 (Secure=False 쿠키, CSRF 토큰 없음 — 로컬 전용 전제). 첨부 다운로드는 반드시 `download_dir` 하위로 경로 트래버설 방어. POST 인증 라우트는 `ensure_same_origin` 의존성 (Origin/Referer 헤더 netloc 비교).
@@ -343,6 +343,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
+- [00130] Daily Report 발송 이력 API datetime 직렬화 수정 — `_serialize_daily_report_run`·`_serialize_daily_report_send_run` 에서 SQLite naive datetime 에 UTC tzinfo 부착 후 `.isoformat()` 해 응답에 `+00:00` 포함; 프론트엔드 KST 변환이 정상 동작하도록 수정 — 2026-05-22
 - [00129] 관리자 사용자 관리 화면에 이메일 주소·이메일 수신 여부 변경 기능 추가 — `POST /admin/users/{id}/email`·`/email-subscription` 엔드포인트 신설(기존 `change_email`/`change_email_subscribed` 서비스 함수 재사용, DB 마이그레이션 없음) — 2026-05-21
 - [00128] Daily Report 활성화 저장 미반영·다음 실행 예측 오표시 버그 수정 — APScheduler SQLAlchemyJobStore 가 같은 SQLite 파일에 별도 커넥션으로 write 해 `session_scope` write 트랜잭션과 SQLite 단일 writer 충돌("database is locked")이 원인; 스케줄 잡 갱신을 `session_scope` 밖에서 먼저 수행하는 순서로 수정 — 2026-05-21
 - [00126] daily report 발송 정책 개선 — snapshot 0건이어도 SKIPPED 없이 항상 발송, `manual_test` 트리거는 `TEST_SEND_LOOKBACK_HOURS=24`시간 고정 구간 사용(`fixed_lookback_hours` 파라미터 추가), 빈 구간 SKIPPED 분기 완전 제거 — 2026-05-21
@@ -352,4 +353,3 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - [00122] 시스템 전체 datetime 표시 포맷 `YYYY-MM-DD HH:mm:ss` 초 단위로 통일 — `DEFAULT_KST_FORMAT` 변경, `kst_date` Jinja2 필터도 초 단위로 변경, JS `relevance.js` 의 `ko-KR` toLocaleString 을 `en-CA + Asia/Seoul` 패턴으로 교체 — 2026-05-19
 - [00121] 공고 목록에 모집 시작일 컬럼 추가 — 마감일 좌측에 시작일 표시; 데이터 없을 경우 '-' 처리; CSS 컬럼 너비 조정 — 2026-05-19
 - [00120] 메일 포워딩 비동기화 + 프로그레스 바 — POST /forward 즉시 반환 후 BackgroundTasks 발송, 모달에 polling 기반 실시간 N명 중 M명 완료 / 실패 K건 표시 — 2026-05-19
-- [00119] 메일 포워드 버튼 툴팁 방향 변경 (상단 → 좌측) — `[data-tooltip]::after` CSS를 `bottom/left/translateX` 기준에서 `top/right/translateY` 기준으로 변경; 우측 overflow로 인한 테이블 컬럼 expand 문제 해소 — 2026-05-19
