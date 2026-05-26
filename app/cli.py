@@ -84,10 +84,10 @@ from app.db.repository import (
     get_running_scrape_run,
     insert_delta_announcement,
     insert_delta_attachment,
+    insert_scrape_snapshot,
     peek_main_can_skip_detail,
     set_scrape_run_pid,
     update_delta_announcement_detail,
-    upsert_scrape_snapshot,
 )
 from app.db.models import DeltaAnnouncement, ScrapeRun
 from app.db.session import session_scope
@@ -1236,17 +1236,20 @@ async def _async_main() -> int:
                         apply_session,
                         scrape_run_id=scrape_run_id,
                     )
-                    # ── snapshot 생성/머지 (00041-4) ──────────────────────────
-                    # apply 와 같은 트랜잭션에서 ScrapeSnapshot UPSERT 를 수행해
-                    # \"본 테이블 적용 + delta 비움 + snapshot 생성\" 의 atomic
-                    # 단위를 완성한다 (사용자 원문 \"수집 종료 시: 단일 트랜잭션\").
-                    # apply 단계가 raise 하면 SQLAlchemy auto-rollback 으로
-                    # snapshot UPSERT 도 함께 원상복구되어 검증 11 시나리오를
-                    # 만족한다 (apply / snapshot 어느 단계가 raise 하든 동일).
-                    # snapshot_date 는 종료 시점의 KST 날짜 — Phase 4 컨벤션.
+                    # ── snapshot 생성 (task 00150-1) ───────────────────────────
+                    # apply 와 같은 트랜잭션에서 ScrapeSnapshot 1 row 를 INSERT
+                    # 한다 (이전의 UPSERT 머지 방식에서 매 ScrapeRun 마다 1 row
+                    # 로 전환). \"본 테이블 적용 + delta 비움 + snapshot 생성\"
+                    # 의 atomic 단위는 그대로 유지된다 — apply 단계가 raise 하면
+                    # SQLAlchemy auto-rollback 으로 snapshot INSERT 도 함께
+                    # 원상복구된다 (검증 11). snapshot_date 는 종료 시점의 KST
+                    # 날짜 — Phase 4 컨벤션. scrape_run_id 를 함께 전달해 DB
+                    # 의 UNIQUE(scrape_run_id) 가 \"같은 run 에 대한 snapshot
+                    # 중복 INSERT\" 회귀를 막는다.
                     snapshot_payload = build_snapshot_payload(apply_result)
-                    upsert_scrape_snapshot(
+                    insert_scrape_snapshot(
                         apply_session,
+                        scrape_run_id=scrape_run_id,
                         snapshot_date=now_kst().date(),
                         new_payload=snapshot_payload,
                     )

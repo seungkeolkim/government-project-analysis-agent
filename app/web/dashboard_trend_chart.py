@@ -37,6 +37,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
+from functools import reduce
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -45,6 +47,8 @@ from app.db.snapshot import (
     CATEGORY_CONTENT_CHANGED,
     CATEGORY_NEW,
     TRANSITION_TO_LABELS,
+    merge_snapshot_payload,
+    normalize_payload,
 )
 
 
@@ -158,14 +162,29 @@ def build_trend_chart(
         from_inclusive=from_date,
         to_inclusive=to_date,
     )
-    counts_by_snapshot_date: dict[date, dict[str, int]] = {}
+    # task 00150-1 이후 같은 KST 날짜에 여러 ScrapeSnapshot row 가 존재할 수 있다.
+    # 같은 snapshot_date 의 row 들을 묶어 ``merge_snapshot_payload`` 로 reduce
+    # 머지한 결과를 카운트의 source 로 사용한다 — dict 단순 덮어쓰기로 인한
+    # 회귀(나중 row 만 남아 \"하루 합계\" 가 잘못 보이는 문제) 방지. 보조 정렬
+    # ``created_at ASC`` 가 머지 순서를 보장한다.
+    payloads_by_snapshot_date: dict[date, list[dict[str, Any]]] = {}
     for snapshot in snapshots_in_range:
-        snapshot_counts = snapshot.payload.get("counts", {}) if snapshot.payload else {}
-        counts_by_snapshot_date[snapshot.snapshot_date] = {
-            "new": int(snapshot_counts.get(CATEGORY_NEW, 0)),
-            "content_changed": int(snapshot_counts.get(CATEGORY_CONTENT_CHANGED, 0)),
+        payloads_by_snapshot_date.setdefault(snapshot.snapshot_date, []).append(
+            snapshot.payload or {}
+        )
+    counts_by_snapshot_date: dict[date, dict[str, int]] = {}
+    for snapshot_date_value, payloads in payloads_by_snapshot_date.items():
+        merged_payload = reduce(
+            merge_snapshot_payload,
+            payloads,
+            normalize_payload(None),
+        )
+        merged_counts = merged_payload.get("counts", {})
+        counts_by_snapshot_date[snapshot_date_value] = {
+            "new": int(merged_counts.get(CATEGORY_NEW, 0)),
+            "content_changed": int(merged_counts.get(CATEGORY_CONTENT_CHANGED, 0)),
             "transitioned": sum(
-                int(snapshot_counts.get(key, 0)) for key in _TRANSITION_COUNT_KEYS
+                int(merged_counts.get(key, 0)) for key in _TRANSITION_COUNT_KEYS
             ),
         }
 

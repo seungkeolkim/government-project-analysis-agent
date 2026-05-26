@@ -46,6 +46,7 @@ from app.db.models import (
     Announcement,
     AnnouncementStatus,
     CanonicalProject,
+    ScrapeRun,
     ScrapeSnapshot,
 )
 from app.db.repository import list_snapshots_in_range
@@ -140,7 +141,18 @@ def _insert_snapshot_with_single_new(
         flush 된 ``ScrapeSnapshot``.
     """
     payload = normalize_payload({"new": [new_announcement_id]})
+    # task 00150-1: scrape_run_id NOT NULL FK 를 만족하기 위해 보조 ScrapeRun 함께 INSERT.
+    scrape_run = ScrapeRun(
+        started_at=datetime(2026, 4, 1, 0, 0, tzinfo=UTC),
+        ended_at=datetime(2026, 4, 1, 0, 0, tzinfo=UTC),
+        status="completed",
+        trigger="cli",
+        source_counts={},
+    )
+    session.add(scrape_run)
+    session.flush()
     snapshot = ScrapeSnapshot(
+        scrape_run_id=scrape_run.id,
         snapshot_date=snapshot_date_obj,
         payload=payload,
     )
@@ -252,11 +264,25 @@ class TestCompareRangeSemanticsUserExample:
 
         # 9일치 snapshot 만 INSERT (announcement INSERT 는 본 테스트에서 불필요 —
         # snapshot.payload 는 announcement_id 정합성 체크 없이 저장된다).
+        # task 00150-1: scrape_run_id NOT NULL FK 를 만족하기 위해 ScrapeRun 도 같이.
         for offset_days in range(0, 9):
             snapshot_date_obj = compare_date + timedelta(days=offset_days)
             payload = normalize_payload({"new": [offset_days + 1]})
+            scrape_run = ScrapeRun(
+                started_at=datetime(2026, 4, 1, 0, 0, tzinfo=UTC),
+                ended_at=datetime(2026, 4, 1, 0, 0, tzinfo=UTC),
+                status="completed",
+                trigger="cli",
+                source_counts={},
+            )
+            session.add(scrape_run)
+            session.flush()
             session.add(
-                ScrapeSnapshot(snapshot_date=snapshot_date_obj, payload=payload)
+                ScrapeSnapshot(
+                    scrape_run_id=scrape_run.id,
+                    snapshot_date=snapshot_date_obj,
+                    payload=payload,
+                )
             )
         session.flush()
 

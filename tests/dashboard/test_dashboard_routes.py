@@ -23,8 +23,26 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine
 
-from app.db.models import ScrapeSnapshot
+from app.db.models import ScrapeRun, ScrapeSnapshot
 from app.db.session import session_scope
+
+
+def _make_scrape_run(session) -> int:
+    """1 ScrapeRun = 1 snapshot 매핑을 위한 보조 헬퍼.
+
+    task 00150-1 에서 ``scrape_snapshots.scrape_run_id`` 가 NOT NULL FK 가 됐다.
+    각 snapshot 헬퍼 호출 시 ScrapeRun (completed) 을 1건씩 만들어 PK 를 반환.
+    """
+    scrape_run = ScrapeRun(
+        started_at=datetime(2026, 4, 1, 0, 0, tzinfo=UTC),
+        ended_at=datetime(2026, 4, 1, 0, 0, tzinfo=UTC),
+        status="completed",
+        trigger="cli",
+        source_counts={},
+    )
+    session.add(scrape_run)
+    session.flush()
+    return scrape_run.id
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +99,9 @@ def _insert_snapshot_with_zero_changes(snapshot_date_iso: str) -> None:
         },
     }
     with session_scope() as s:
+        scrape_run_id = _make_scrape_run(s)
         snap = ScrapeSnapshot(
+            scrape_run_id=scrape_run_id,
             snapshot_date=date.fromisoformat(snapshot_date_iso),
             payload=empty_payload,
         )
@@ -296,7 +316,9 @@ def _insert_snapshot_with_payload(snapshot_date_iso: str, payload: dict) -> None
     from app.db.snapshot import normalize_payload
 
     with session_scope() as session:
+        scrape_run_id = _make_scrape_run(session)
         snapshot = ScrapeSnapshot(
+            scrape_run_id=scrape_run_id,
             snapshot_date=date.fromisoformat(snapshot_date_iso),
             payload=normalize_payload(payload),
         )

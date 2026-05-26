@@ -229,9 +229,11 @@ def get_snapshot_dates(
 
     가용 날짜 판정 정책 (docs/dashboard_design.md §4.1):
         snapshot_date 의 존재 여부 한 가지로 결정. '수집은 됐지만 변화 0건' 인
-        날도 5a 의 upsert_scrape_snapshot 이 row 를 INSERT 하므로 결과에 포함
+        날도 ``insert_scrape_snapshot`` 이 row 를 INSERT 하므로 결과에 포함
         된다 — 사용자 원문 modify v2 의 가정과는 반대지만 코드와 정합되는
-        디자인 의도다 (§2 / §4.1 참조).
+        디자인 의도다 (§2 / §4.1 참조). task 00150-1 부터는 같은 KST 날짜에
+        여러 row 가 존재할 수 있으나 ``list_available_snapshot_dates`` 가
+        SELECT DISTINCT 로 중복을 제거하므로 캘린더 노출에는 영향이 없다.
 
     비로그인도 호출 가능 (current_user_optional) — 캘린더 자체가 비로그인
     경로의 컨트롤이라 인증을 요구하지 않는다.

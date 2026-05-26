@@ -1677,26 +1677,39 @@ class DeltaAttachment(Base):
 
 
 class ScrapeSnapshot(Base):
-    """KST 날짜 단위 변화 요약. 일자별 1 row.
+    """ScrapeRun 1회의 diff 결과 요약. 매 ScrapeRun 마다 1 row INSERT 된다.
 
-    같은 KST 날짜에 여러 ScrapeRun(수동 / 자동 / CLI) 이 종료되면 본 row 의
-    payload 가 ``merge_snapshot_payload(existing, new)`` 로 머지된다 — 사용자
-    원문 "snapshot UPSERT (같은 KST 날짜 1 row). 같은 날 여러 ScrapeRun 의 변화는
-    머지" 그대로.
+    task 00150 이전에는 UNIQUE(``snapshot_date``) 로 KST 날짜당 1 row 만 유지하고
+    같은 날의 후속 ScrapeRun 종료 시 ``merge_snapshot_payload`` 로 payload 를
+    누적 머지하는 UPSERT 방식이었다. 그 결과 row 의 ``created_at`` 이 그날 첫
+    ScrapeRun 종료 시각에 고정되어 daily report 의 ``(last_sent_at, now]`` 시간
+    필터가 같은 날 늦은 시각에 종료된 ScrapeRun 의 diff 를 0건으로 잡는 회귀가
+    발생했다. 사용자 원문 ("snapshot 과 payload 는 scrape 실행시 하루치를 계속
+    업데이트 하는게 아니라, 매 scrape 실행마다 새로이 만들어져야 한다") 그대로
+    설계를 전환했다 — 같은 KST 날짜에 여러 ScrapeRun 이 종료되면 row 가 여러
+    개가 된다. 누적 머지(예: dashboard A 섹션 / daily report) 는 호출자가
+    ``merge_snapshot_payload`` 로 reduce 머지를 한다.
 
     설계 메모 (docs/snapshot_pipeline_design.md §4.3·§9·§10):
         - ``snapshot_date`` 는 ``Date`` 타입. SQLite 의 Date 컬럼은 timezone
-          정보를 갖지 않으므로 호출자(00041-4 의 upsert) 가
+          정보를 갖지 않으므로 호출자(``insert_scrape_snapshot``) 가
           ``app.timezone.now_kst().date()`` 로 KST 변환 후 저장한다 — Phase 4
           컨벤션 준수.
-        - ``created_at`` / ``updated_at`` 는 모두 ``DateTime(timezone=True)``,
-          UTC 저장.
+        - ``scrape_run_id`` 는 본 row 를 만든 ScrapeRun 의 id. NOT NULL +
+          UNIQUE — 1 ScrapeRun = 1 snapshot row 보장. FK ondelete=CASCADE.
+        - ``created_at`` 는 ``DateTime(timezone=True)``, UTC 저장. insert-only
+          흐름이라 본 row 의 ``created_at`` 은 ScrapeRun 종료 시각을 그대로
+          가리킨다.
+        - ``updated_at`` 는 호환성을 위해 유지하지만 insert-only 흐름에서는
+          ``onupdate`` 가 실질적으로 발동하지 않는다 (별도 task 에서 컬럼 제거
+          여부를 결정). 호출부가 본 컬럼을 의미 있게 읽지 않도록 한다.
         - ``payload`` 는 5 종 카테고리(new / content_changed / transitioned_to_접수예정/
           접수중/마감) + counts 를 담는 자유 스키마 JSON. 구조는 §10, 머지 규칙은
           §9 에 있고, 머지 헬퍼는 ``app/db/snapshot.py`` 의 ``merge_snapshot_payload``
-          단독 함수다 (00041-4 가 구현).
-        - UNIQUE(snapshot_date) 가 implicit index 로 일자 lookup 을 커버한다 —
-          별도 인덱스 없음.
+          단독 함수다 (dashboard reduce / daily report aggregate 가 사용).
+        - 인덱스: ``ix_scrape_snapshots_snapshot_date`` (KST 날짜 조회) +
+          ``ix_scrape_snapshots_scrape_run_id`` (UNIQUE 의 implicit 인덱스를
+          명시적으로 노출).
     """
 
     __tablename__ = "scrape_snapshots"
@@ -1714,11 +1727,28 @@ class ScrapeSnapshot(Base):
             " 저장한다 (Date 타입은 timezone 정보를 갖지 않음).",
     )
 
+    # task 00150-1 에서 신설된 컬럼. 본 row 를 만든 ScrapeRun.id 를 가리킨다.
+    # NOT NULL + UNIQUE 로 1 ScrapeRun = 1 snapshot row 를 보장한다 — 같은
+    # ScrapeRun 에 대한 snapshot 중복 INSERT 가 DB 에서 막힌다. ScrapeRun 이
+    # 삭제되면 본 row 도 함께 사라진다 (CASCADE).
+    scrape_run_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "scrape_runs.id",
+            name="fk_scrape_snapshots_scrape_run_id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+        index=True,
+        doc="본 row 를 만든 ScrapeRun PK. 1 ScrapeRun = 1 snapshot row.",
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         default=_utcnow,
-        doc="이 snapshot row 가 최초 INSERT 된 시각(UTC).",
+        doc="이 snapshot row 가 INSERT 된 시각(UTC). insert-only 흐름이라 본 row 가"
+            " 가리키는 diff 산출 시각(=ScrapeRun 종료 시각) 과 사실상 동일하다.",
     )
 
     updated_at: Mapped[datetime] = mapped_column(
@@ -1726,7 +1756,11 @@ class ScrapeSnapshot(Base):
         nullable=False,
         default=_utcnow,
         onupdate=_utcnow,
-        doc="payload 가 마지막으로 머지된 시각(UTC). UPSERT 머지 시 자동 갱신.",
+        # task 00150-1: snapshot 저장은 insert-only 로 전환됐다. 본 컬럼은 호환
+        # 성을 위해 유지하지만 onupdate 가 실질적으로 발동하지 않으며, 호출부가
+        # 본 컬럼을 의미 있게 읽어서는 안 된다 — daily report 시간 필터 등은
+        # `created_at` 만 사용한다. 별도 task 에서 컬럼 제거 여부 결정.
+        doc="레거시 호환용 — insert-only 흐름에서는 실질적으로 갱신되지 않는다.",
     )
 
     payload: Mapped[dict[str, Any]] = mapped_column(
@@ -1739,17 +1773,24 @@ class ScrapeSnapshot(Base):
     )
 
     __table_args__ = (
-        # 같은 KST 날짜 1 row 보장. 머지의 기준 키가 된다.
+        # task 00150-1: UNIQUE(snapshot_date) 제거 — 같은 KST 날짜에 여러 row
+        # 허용. 1 ScrapeRun = 1 row 는 UNIQUE(scrape_run_id) 로 보장.
         UniqueConstraint(
+            "scrape_run_id",
+            name="uq_scrape_snapshots_scrape_run_id",
+        ),
+        # KST 날짜 조회용 — 기존 UNIQUE 가 제공하던 implicit 인덱스 보완.
+        Index(
+            "ix_scrape_snapshots_snapshot_date",
             "snapshot_date",
-            name="uq_scrape_snapshots_snapshot_date",
         ),
     )
 
     def __repr__(self) -> str:
         """디버깅 편의용 문자열 표현."""
         return (
-            f"<ScrapeSnapshot id={self.id} date={self.snapshot_date!s}>"
+            f"<ScrapeSnapshot id={self.id} date={self.snapshot_date!s} "
+            f"scrape_run_id={self.scrape_run_id}>"
         )
 
 

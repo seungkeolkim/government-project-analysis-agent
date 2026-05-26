@@ -50,6 +50,7 @@ from app.db.models import (
     EmailDailyReportStatus,
     EmailSendRun,
     EmailSendRunStatus,
+    ScrapeRun,
     ScrapeSnapshot,
     User,
 )
@@ -153,13 +154,23 @@ def _insert_snapshot(
     snapshot_date_iso: str,
     payload: dict | None = None,
 ) -> ScrapeSnapshot:
-    """``ScrapeSnapshot`` row 1건을 명시적 created_at 으로 INSERT 한다.
+    """``ScrapeSnapshot`` row 1건 + 보조 ``ScrapeRun`` 1건을 INSERT 한다.
 
     payload 는 ``normalize_payload`` 로 정규형 dict 으로 만들어 둔다.
-    snapshot_date 의 UNIQUE 제약을 만족하려면 테스트마다 다른 일자 문자열을
-    전달해야 한다.
+    task 00150-1 에서 ``scrape_snapshots.scrape_run_id`` 가 NOT NULL FK 가 됐다.
+    호출 시마다 새 ScrapeRun (completed) 을 1개씩 만들어 1:1 매핑을 유지한다.
     """
+    scrape_run = ScrapeRun(
+        started_at=created_at,
+        ended_at=created_at,
+        status="completed",
+        trigger="cli",
+        source_counts={},
+    )
+    session.add(scrape_run)
+    session.flush()
     snapshot = ScrapeSnapshot(
+        scrape_run_id=scrape_run.id,
         snapshot_date=date.fromisoformat(snapshot_date_iso),
         created_at=created_at,
         payload=normalize_payload(payload),

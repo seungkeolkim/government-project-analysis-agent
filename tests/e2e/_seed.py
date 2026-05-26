@@ -42,6 +42,7 @@ from app.db.models import (
     Announcement,
     AnnouncementStatus,
     CanonicalProject,
+    ScrapeRun,
     ScrapeSnapshot,
 )
 from app.db.snapshot import normalize_payload
@@ -134,7 +135,18 @@ def _insert_snapshot(
         flush 된 ``ScrapeSnapshot``.
     """
     normalized = normalize_payload(payload_dict)
+    # task 00150-1: scrape_run_id NOT NULL FK 를 만족하기 위해 보조 ScrapeRun 함께 INSERT.
+    scrape_run = ScrapeRun(
+        started_at=_utc(2026, 4, 1, 0, 0),
+        ended_at=_utc(2026, 4, 1, 0, 0),
+        status="completed",
+        trigger="cli",
+        source_counts={},
+    )
+    session.add(scrape_run)
+    session.flush()
     snapshot = ScrapeSnapshot(
+        scrape_run_id=scrape_run.id,
         snapshot_date=snapshot_date_obj,
         payload=normalized,
     )
