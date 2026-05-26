@@ -17,12 +17,15 @@ guidance 핵심:
 
 from __future__ import annotations
 
+import os
+
 from loguru import logger
 
 from app.scrape_control import (
     ComposeEnvironmentError,
     ScrapeAlreadyRunningError,
     start_scrape_run,
+    validate_host_project_dir,
 )
 from app.scrape_control.orphan_gc import run_gc
 
@@ -52,6 +55,32 @@ def scheduled_scrape(active_sources: list[str]) -> None:
     Returns:
         None. 실행 결과는 ScrapeRun 행으로 DB 에 남고, UI 에서 확인한다.
 
+    HOST_PROJECT_DIR fail-fast 자기-종료 (task 00148):
+        함수 진입 직후, 가장 먼저 :func:`validate_host_project_dir` 로 환경변수
+        를 검증한다. 검증에 실패하면 (HOST_PROJECT_DIR 미설정/빈 값) 이
+        프로세스는 정상 운영 컨테이너가 아니라는 의미다 — 다음 둘 중 하나:
+            (a) ``env_file`` 평가가 끝난 정상 컨테이너 생성 이전(00134/00143
+                이전 compose 로 생성)에 떠 있는 **stale 컨테이너**, 또는
+            (b) Docker Compose 경유가 아닌 다른 경로로 띄워진 **stale 프로세스**
+                (예: 호스트에서 직접 ``python -m uvicorn ...`` 으로 기동된 잔류
+                서버. 본 프로젝트는 ``로컬 Python 직접 실행 금지`` 컨벤션이지만
+                실수로 남아 있을 수 있음).
+        두 경우 모두 ``scheduled_scrape`` 가 매 cron 주기마다 ScrapeRun 을
+        ``failed`` 로 마감하는 silent-failure 가 운영 이력을 오염시킨다. 이를
+        끊기 위해 ``logger.critical`` + ``os._exit(2)`` 로 프로세스 자체를
+        즉시 종료한다 — 정상 컨테이너는 ``restart: unless-stopped`` 정책으로
+        재기동되며 이때는 (지금 컨테이너가 stale 이었다는 가정 하에) 새 env
+        가 적용된 상태로 부팅된다. ``os._exit`` 는 ``sys.exit`` 와 달리
+        try/except 와 finally 를 건너뛰며 stdlib atexit 도 우회한다 — 본
+        시점은 ScrapeRun row 가 아직 생성되기 전이므로 trade-off 가 명확하다
+        (정리할 트랜잭션이 없다 vs 즉시·확실히 종료해야 한다).
+
+        검증을 ``try_claim_schedule_slot`` 보다 **앞**에 두는 이유: claim row 가
+        먼저 INSERT 되면 같은 trigger 시각에 떠 있는 다른(정상) 스케줄러 인스
+        턴스가 자기 슬롯을 빼앗긴 채 skip 되어 그 주기에 정상 수집이 0건이
+        되는 부작용이 생긴다. 본 검증을 먼저 두면 stale 프로세스는 claim 도
+        하지 않고 곧바로 죽으므로 정상 스케줄러의 claim 이 그대로 통과한다.
+
     중복 실행 방지 (task 00131-2):
         함수 진입 시 :func:`try_claim_schedule_slot` 으로 single-flight claim 을
         시도한다. 동일 trigger 주기에 다른 호출이 이미 claim 했으면 WARN 로그
@@ -69,6 +98,26 @@ def scheduled_scrape(active_sources: list[str]) -> None:
           스킵될 수 있어, 안전하게 삼킨다.
     """
     normalized = list(active_sources or [])
+
+    # task 00148 — 진입 즉시 HOST_PROJECT_DIR fail-fast.
+    # 환경변수가 비어 있으면 이 프로세스가 stale 인스턴스(컨테이너 또는 호스트
+    # 잔류 서버) 라는 의미다. ScrapeRun 을 만들기 전·claim 을 따기 전 곧바로
+    # 프로세스를 죽여 silent-failure (매 주기 'failed' ScrapeRun 생성) 를
+    # 끊는다. 정상 컨테이너에서는 항상 통과하므로 회귀가 없다.
+    try:
+        validate_host_project_dir()
+    except ComposeEnvironmentError as exc:
+        logger.critical(
+            "스케줄 수집 진입 시 HOST_PROJECT_DIR 검증 실패 — 이 프로세스는 "
+            "stale 인스턴스로 간주하고 즉시 종료한다 (silent-failure 차단, "
+            "task 00148). pid={} error={}",
+            os.getpid(),
+            exc,
+        )
+        # os._exit 은 try/except 와 atexit 을 모두 건너뛴다. 본 시점은
+        # ScrapeRun row / claim row 가 아직 없으므로 정리할 부수 상태가 없다.
+        # restart: unless-stopped 정책이 정상 컨테이너 재기동을 떠맡는다.
+        os._exit(2)
 
     # task 00131-2 — 동일 trigger 주기의 중복 실행 방지. claim 에 실패하면
     # 다른 호출이 이미 이번 주기의 수집을 맡았다는 뜻이므로 조용히 return.
