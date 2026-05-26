@@ -18,8 +18,9 @@
        되고 next_run_time 도 함께 갱신된다 (00040-4 회귀 보호 — 본 task 가
        _reinterpret_existing_jobs_to_kst 의 책임을 흡수).
     3. \"컨테이너 재기동 시뮬레이션\" — stop → 등록 잡들의 stale next_run_time
-       조작 → start → backup/daily-report/일반 cron 3종 모두 현재 시각 이후로
-       갱신된다.
+       조작 → start → 일반 cron(scheduled_scrape) / 백업 / daily-report /
+       gc_orphan 4종 모두 현재 시각 이후로 갱신된다. (task 00149-3 E2E 회귀 —
+       사용자 원문이 명시한 4종 잡 prefix 매칭 회귀 가드.)
 
 설계:
     - 모듈 수준 ``_scheduler`` 싱글턴은 fixture 가 매 테스트 시작·종료 시
@@ -50,6 +51,7 @@ from app.scheduler import (
 from app.scheduler.service import (
     _get_or_build_scheduler,
     _recompute_all_jobs_next_run_time,
+    add_gc_orphan_cron_schedule,
 )
 from app.timezone import KST, now_utc
 
@@ -254,16 +256,20 @@ def test_recompute_reinterprets_legacy_utc_cron_trigger_to_kst(
 def test_container_restart_recomputes_all_jobs(
     running_scheduler: None,
 ) -> None:
-    """컨테이너 재기동 시뮬레이션 — stop 직전 stale 박힌 잡들이 start 직후 모두 advance.
+    """컨테이너 재기동 시뮬레이션 — stop 직전 stale 박힌 4종 잡 모두 start 직후 advance.
 
-    백업·daily-report·일반 cron 3종을 모두 등록 → 강제로 stale next_run_time
-    박기 → stop → start (= 컨테이너 재기동 시뮬레이션) → 3종 잡 모두
-    next_run_time 이 현재 시각 이후로 갱신됐는지 검증.
+    일반 cron(scheduled_scrape) · 백업 · daily-report · gc_orphan 4종을 모두 등록 →
+    강제로 stale next_run_time 박기 → stop → start (= 컨테이너 재기동 시뮬레이션)
+    → 4종 잡 모두 next_run_time 이 현재 시각 이후로 갱신됐는지 검증.
 
     핵심: ``start()`` 가 lock 획득 + scheduler.start + 재계산을 한 흐름으로
     수행해야 함을 보장한다. APScheduler 의 jobstore 자동 복원만으로는 stale
     절대 시각이 그대로 남는다는 점이 본 task 의 진단 결론이며, 본 테스트가
     \"start 만으로도 영구 누락 차단\" 의 회귀를 가드한다.
+
+    task 00149-3 E2E 회귀 — 사용자 원문이 명시한 4종 잡(``scheduled_scrape /
+    scheduled_backup_job / scheduled_daily_report_job / gc_orphan_attachments_job``)
+    중 GC 잡을 추가해 prefix 매칭 회귀(``gc-orphan-cron:``) 까지 묶어 가드한다.
     """
     general = add_cron_schedule(
         cron_expression="*/3 * * * *", active_sources=[], enabled=True,
@@ -273,18 +279,27 @@ def test_container_restart_recomputes_all_jobs(
         cron_expression="* * * * *", enabled=True,
     )
     assert daily is not None
+    gc_summary = add_gc_orphan_cron_schedule(
+        cron_expression="*/11 * * * *", enabled=True,
+    )
 
-    # 3종 모두 강제로 stale.
+    # 4종 모두 강제로 stale.
     _force_stale_next_run_time(general.job_id, minutes_in_past=120)
     _force_stale_next_run_time(backup.job_id, minutes_in_past=120)
     _force_stale_next_run_time(JOB_ID_DAILY_REPORT, minutes_in_past=120)
+    _force_stale_next_run_time(gc_summary.job_id, minutes_in_past=120)
 
     # 재기동 시뮬레이션 — stop → start.
     stop_scheduler(wait=False)
     start_scheduler()
 
-    # 3종 모두 현재 시각 이후로 advance 됐어야 한다.
-    for job_id in (general.job_id, backup.job_id, JOB_ID_DAILY_REPORT):
+    # 4종 모두 현재 시각 이후로 advance 됐어야 한다.
+    for job_id in (
+        general.job_id,
+        backup.job_id,
+        JOB_ID_DAILY_REPORT,
+        gc_summary.job_id,
+    ):
         scheduler = _get_or_build_scheduler()
         job = scheduler.get_job(job_id)
         assert job is not None, f"잡 {job_id} 가 재기동 후 사라졌다"
