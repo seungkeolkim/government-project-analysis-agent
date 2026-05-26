@@ -23,6 +23,7 @@ from app.db.models import (
     Announcement,
     AnnouncementStatus,
     CanonicalProject,
+    ScrapeRun,
     ScrapeSnapshot,
 )
 from app.db.snapshot import (
@@ -100,9 +101,24 @@ def _make_canonical_with_announcement(
 def _insert_snapshot(
     session: Session, *, snapshot_date_iso: str, payload: dict
 ) -> ScrapeSnapshot:
-    """snapshot_date 와 payload 를 받아 ScrapeSnapshot 을 INSERT 한다."""
+    """snapshot_date 와 payload 를 받아 ScrapeSnapshot + 보조 ScrapeRun 1쌍을 INSERT.
+
+    task 00150-1 에서 ``scrape_snapshots.scrape_run_id`` 가 NOT NULL FK 로 추가됐다.
+    호출 시마다 새 ScrapeRun (completed) 1건도 함께 만들어 1:1 매핑을 유지한다.
+    """
     normalized = normalize_payload(payload)
+    scrape_run = ScrapeRun(
+        started_at=datetime(2026, 4, 1, 0, 0, tzinfo=UTC),
+        ended_at=datetime(2026, 4, 1, 0, 0, tzinfo=UTC),
+        status="completed",
+        trigger="cli",
+        source_counts={},
+    )
+    session.add(scrape_run)
+    session.flush()
+
     snapshot = ScrapeSnapshot(
+        scrape_run_id=scrape_run.id,
         snapshot_date=date.fromisoformat(snapshot_date_iso),
         payload=normalized,
     )
@@ -273,6 +289,55 @@ class TestBuildSectionA:
         assert new_card.items[0].duplicate_badges == []
 
         assert result.merged_announcement_ids == [1]
+
+    def test_multi_row_same_snapshot_date_merges_consistently(
+        self, session: Session
+    ) -> None:
+        """task 00150-1 회귀: 같은 KST 날짜에 2 row 가 있어도 reduce 머지가 정상 동작.
+
+        이전 (UNIQUE(snapshot_date)) 설계에서는 같은 날짜 row 가 최대 1건이라
+        ``list_snapshots_in_range`` 결과의 일자별 차원이 자동으로 1:1 이었다.
+        새 설계에서는 같은 날에 row 가 여러 개일 수 있어, 빌더의 reduce 머지가
+        \"같은 날 2 row → set union\" 까지 정합하게 동작하는지 보호한다.
+
+        시나리오:
+            - 비교일(2026-04-25) baseline (빈 변화 1 row).
+            - 기준일(2026-04-26) 에 새로 끝난 ScrapeRun 2개 → 2 row.
+              row1.new=[1], row2.new=[2]. 머지 결과 new={1, 2}.
+        """
+        for index in range(1, 3):
+            _make_canonical_with_announcement(
+                session,
+                canonical_key=f"key-multi-{index:03d}",
+                title=f"공고 {index}",
+                source_announcement_id=f"M-{index:03d}",
+            )
+
+        # baseline.
+        _insert_snapshot(
+            session, snapshot_date_iso="2026-04-25", payload={"new": []}
+        )
+        # 같은 KST 날짜의 2 row.
+        _insert_snapshot(
+            session, snapshot_date_iso="2026-04-26", payload={"new": [1]}
+        )
+        _insert_snapshot(
+            session, snapshot_date_iso="2026-04-26", payload={"new": [2]}
+        )
+
+        result = build_section_a(
+            session,
+            base_date=date(2026, 4, 26),
+            requested_compare_date=date(2026, 4, 25),
+        )
+
+        new_card = next(c for c in result.cards if c.category_key == CATEGORY_NEW)
+        assert new_card.base_count == 2, (
+            "같은 KST 날짜의 multi-row 가 set union 으로 머지되어야 한다. "
+            "1건만 잡히면 row 덮어쓰기 버그."
+        )
+        assert sorted([item.announcement_id for item in new_card.items]) == [1, 2]
+        assert result.merged_announcement_ids == [1, 2]
 
     def test_n_day_reduce_consistent_with_pairwise_merge(
         self, session: Session

@@ -36,9 +36,27 @@ from app.db.models import (
     Announcement,
     AnnouncementStatus,
     CanonicalProject,
+    ScrapeRun,
     ScrapeSnapshot,
 )
 from app.db.snapshot import normalize_payload
+
+
+def _make_scrape_run_id(session) -> int:
+    """1 ScrapeRun = 1 snapshot 매핑을 위한 보조 헬퍼.
+
+    task 00150-1 에서 ``scrape_snapshots.scrape_run_id`` 가 NOT NULL FK 가 됐다.
+    """
+    scrape_run = ScrapeRun(
+        started_at=datetime(2026, 4, 1, 0, 0, tzinfo=UTC),
+        ended_at=datetime(2026, 4, 1, 0, 0, tzinfo=UTC),
+        status="completed",
+        trigger="cli",
+        source_counts={},
+    )
+    session.add(scrape_run)
+    session.flush()
+    return scrape_run.id
 
 
 # ──────────────────────────────────────────────────────────────
@@ -257,6 +275,7 @@ def _insert_snapshot(
 ) -> ScrapeSnapshot:
     """payload 정규형으로 INSERT — 시나리오용."""
     snap = ScrapeSnapshot(
+        scrape_run_id=_make_scrape_run_id(session),
         snapshot_date=date.fromisoformat(snapshot_date_iso),
         payload=normalize_payload(payload),
     )
@@ -331,7 +350,9 @@ class TestNamedVerificationScenarios:
             for offset_days in (0, 7):  # 어제 + 8일 전 (= 전주 baseline 역할).
                 d = yesterday - timedelta(days=offset_days)
                 snap = ScrapeSnapshot(
-                    snapshot_date=d, payload=normalize_payload({"new": []})
+                    scrape_run_id=_make_scrape_run_id(sess),
+                    snapshot_date=d,
+                    payload=normalize_payload({"new": []}),
                 )
                 sess.add(snap)
 
@@ -360,6 +381,7 @@ class TestNamedVerificationScenarios:
         with session_scope() as sess:
             for iso in ("2026-04-22", "2026-04-29"):
                 snap = ScrapeSnapshot(
+                    scrape_run_id=_make_scrape_run_id(sess),
                     snapshot_date=date.fromisoformat(iso),
                     payload=normalize_payload({"new": []}),
                 )
@@ -405,6 +427,7 @@ class TestCalendarUnavailableDateInactive:
         with session_scope() as sess:
             for iso in ("2026-04-15", "2026-04-29"):
                 snap = ScrapeSnapshot(
+                    scrape_run_id=_make_scrape_run_id(sess),
                     snapshot_date=date.fromisoformat(iso),
                     payload=normalize_payload({"new": []}),
                 )
@@ -479,11 +502,13 @@ class TestKstFilterUsage:
             sess.flush()
             # B 섹션 마감예정 그룹에 노출되도록 to=2026-04-29 로 호출.
             snap = ScrapeSnapshot(
+                scrape_run_id=_make_scrape_run_id(sess),
                 snapshot_date=date(2026, 4, 28),
                 payload=normalize_payload({"new": []}),
             )
             sess.add(snap)
             snap = ScrapeSnapshot(
+                scrape_run_id=_make_scrape_run_id(sess),
                 snapshot_date=date(2026, 4, 29),
                 payload=normalize_payload({"new": [announcement.id]}),
             )
@@ -527,6 +552,7 @@ class TestDashboardIsReadOnly:
         with session_scope() as sess:
             for iso in ("2026-04-28", "2026-04-29"):
                 snap = ScrapeSnapshot(
+                    scrape_run_id=_make_scrape_run_id(sess),
                     snapshot_date=date.fromisoformat(iso),
                     payload=normalize_payload({"new": []}),
                 )

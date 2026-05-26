@@ -3,7 +3,7 @@
 설계 근거: ``docs/snapshot_pipeline_design.md`` §9·§10.
 
 본 모듈은 **순수 함수 (DB 의존 없음)** 만 노출한다 — DB session 이 필요한
-``upsert_scrape_snapshot`` 은 ``app/db/repository.py`` 가 담당하고, 이 모듈은
+``insert_scrape_snapshot`` 은 ``app/db/repository.py`` 가 담당하고, 이 모듈은
 JSON dict 만 다룬다. 단독 모듈로 분리한 이유:
 
 - 머지 규칙(검증 4·5·6·7) 을 유닛 테스트가 1줄 import 로 검증할 수 있게.
@@ -146,7 +146,7 @@ def build_snapshot_payload(apply_result: Any) -> dict[str, Any]:
         - counts: 5종 길이를 그대로 반영
 
     호출 의도:
-        - apply 트랜잭션 안에서 ``upsert_scrape_snapshot`` 의 ``new_payload``
+        - apply 트랜잭션 안에서 ``insert_scrape_snapshot`` 의 ``new_payload``
           인자로 그대로 전달된다.
         - DeltaApplyResult 의 dataclass 의존을 본 모듈 안에 가두어, 5b 가
           payload dict 만 보고도 같은 형식을 재구성할 수 있게 한다.

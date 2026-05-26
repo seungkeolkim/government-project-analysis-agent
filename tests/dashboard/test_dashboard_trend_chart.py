@@ -14,13 +14,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pytest
 from sqlalchemy import Engine, event
 from sqlalchemy.orm import Session
 
-from app.db.models import ScrapeSnapshot
+from app.db.models import ScrapeRun, ScrapeSnapshot
 from app.db.snapshot import normalize_payload
 from app.web.dashboard_trend_chart import (
     TREND_CHART_DEFAULT_PAST_DAYS,
@@ -51,9 +51,22 @@ def session(test_engine: Engine) -> Iterator[Session]:
 def _insert_snapshot(
     session: Session, *, snapshot_date_iso: str, payload: dict
 ) -> ScrapeSnapshot:
-    """payload 를 정규형으로 INSERT — 추이 차트 회귀 테스트용."""
+    """payload 를 정규형으로 INSERT + 보조 ScrapeRun 1쌍.
+
+    task 00150-1 에서 ``scrape_snapshots.scrape_run_id`` 가 NOT NULL FK 가 됐다.
+    """
     normalized = normalize_payload(payload)
+    scrape_run = ScrapeRun(
+        started_at=datetime(2026, 4, 1, 0, 0, tzinfo=UTC),
+        ended_at=datetime(2026, 4, 1, 0, 0, tzinfo=UTC),
+        status="completed",
+        trigger="cli",
+        source_counts={},
+    )
+    session.add(scrape_run)
+    session.flush()
     snapshot = ScrapeSnapshot(
+        scrape_run_id=scrape_run.id,
         snapshot_date=date.fromisoformat(snapshot_date_iso),
         payload=normalized,
     )

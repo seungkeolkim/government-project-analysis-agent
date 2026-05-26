@@ -70,6 +70,7 @@ import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
+from functools import reduce
 from typing import Any, Literal
 
 from loguru import logger
@@ -3661,7 +3662,7 @@ def apply_delta_to_main(
 
     docs/snapshot_pipeline_design.md §7.4·§8 의 단일 트랜잭션 본문이다.
     호출자(``cli._async_main``) 가 ``session_scope()`` 안에서 부르고, 본 함수가
-    return 한 뒤 같은 session 으로 ``upsert_scrape_snapshot`` (00041-4) 을 추가
+    return 한 뒤 같은 session 으로 ``insert_scrape_snapshot`` 을 추가
     호출하면 모든 작업이 같은 트랜잭션에 묶인다.
 
     동작 (호출자 session 에서):
@@ -3881,10 +3882,12 @@ def apply_delta_to_main(
 
 
 # ──────────────────────────────────────────────────────────────
-# ScrapeSnapshot UPSERT — 같은 KST 날짜 1 row + payload 머지
+# ScrapeSnapshot INSERT — 매 ScrapeRun 마다 1 row (task 00150-1)
 # ──────────────────────────────────────────────────────────────
 #
-# 설계 근거: docs/snapshot_pipeline_design.md §9.6·§10.
+# 설계 근거: 사용자 원문 task 00150 ("snapshot 과 payload 는 scrape 실행시
+# 하루치를 계속 업데이트 하는게 아니라, 매 scrape 실행마다 새로이 만들어져야
+# 한다") + docs/snapshot_pipeline_design.md §10.
 #
 # 호출 위치:
 #   - app/cli.py 의 _async_main 안 apply_session 트랜잭션에서 apply_delta_to_main
@@ -3892,44 +3895,60 @@ def apply_delta_to_main(
 #     모두 단일 atomic 단위에 묶인다.
 #
 # 동시성 고려:
-#   - ScrapeRun lock (Phase 2 — running row 1개) 으로 동시 ScrapeRun 이 차단되어
-#     같은 snapshot_date 에 대한 race 는 사실상 발생하지 않는다.
-#   - 그래도 SELECT-then-INSERT/UPDATE 패턴으로 단일 트랜잭션 안에서 원자성을
-#     확보한다. UNIQUE(snapshot_date) (00041-2 migration) 가 최후 방어선.
+#   - ScrapeRun lock (Phase 2 — running row 1개) 으로 동시 ScrapeRun 이
+#     차단되므로 같은 ScrapeRun.id 에 대한 race 는 발생하지 않는다.
+#   - UNIQUE(scrape_run_id) 가 본 함수의 회귀 가드 — 같은 ScrapeRun 에 대해
+#     본 함수가 2번 호출되면 IntegrityError 가 발생한다.
 #
-# 머지는 본 모듈이 아니라 app/db/snapshot.py 의 순수 함수 merge_snapshot_payload
-# 가 담당한다 — DB session 의존을 떼어내 유닛 테스트가 1줄 import 로 가능하도록.
+# 머지는 본 모듈이 저장 경로에서 더 이상 수행하지 않는다. dashboard A 섹션 /
+# daily report 도메인이 ``merge_snapshot_payload`` 로 reduce 머지하는
+# 소비자 경로에서만 머지가 일어난다 — DB session 의존을 떼어내 유닛 테스트가
+# 1줄 import 로 가능하도록 ``app/db/snapshot.py`` 의 순수 함수를 호출한다.
 
 
-def upsert_scrape_snapshot(
+def insert_scrape_snapshot(
     session: Session,
     *,
+    scrape_run_id: int,
     snapshot_date: date,
     new_payload: dict[str, Any],
 ) -> ScrapeSnapshot:
-    """같은 KST 날짜의 ScrapeSnapshot 이 있으면 머지, 없으면 신규 INSERT 한다.
+    """ScrapeRun 1회의 diff 결과를 새 row 로 INSERT 한다 (머지 없음).
+
+    task 00150-1 에서 ``upsert_scrape_snapshot`` 을 본 함수로 대체했다. 같은
+    KST 날짜에 여러 ScrapeRun 이 종료되어도 머지하지 않고 별개 row 를 만들어
+    각 row 의 ``created_at`` 이 그 ScrapeRun 의 diff 산출 시각을 정확히
+    가리키게 한다 (daily report 의 ``(last_sent_at, now]`` 시간 필터 정합).
 
     동작 (호출자 session 사용 — flush 까지만 수행, commit 은 호출자 책임):
-        1. SELECT scrape_snapshots WHERE snapshot_date = :snapshot_date
-        2. 매칭 row 가 없으면 → INSERT (payload=normalize_payload(new_payload)).
-           normalize_payload 가 5종 카테고리를 빈 배열로 채워 5b 의 view 가
+        1. ``new_payload`` 를 ``normalize_payload`` 로 정규형으로 채운다 —
+           누락된 5종 카테고리는 빈 배열로 채워져 dashboard 의 view 가
            KeyError 없이 0 건도 표시할 수 있게 한다 (설계 §10.3).
-        3. 매칭 row 가 있으면 → merge_snapshot_payload(existing, new) 결과로
-           UPDATE. updated_at 은 모델의 onupdate 가 자동 갱신.
+        2. ``ScrapeSnapshot`` 을 단순 INSERT 한다. 같은 KST 날짜에 다른
+           ScrapeRun 의 row 가 이미 있어도 머지하지 않는다.
+        3. flush 한 뒤 id 가 채워진 인스턴스를 반환한다.
 
     트랜잭션 경계:
         본 함수는 flush 까지만 수행한다. 호출자(_async_main 의 apply_session)
         가 commit 시점을 통제하므로, apply_delta_to_main 과 같은 트랜잭션에
         묶여 일관성이 보장된다 — apply 가 raise 하면 SQLAlchemy auto-rollback
-        으로 snapshot 도 함께 원상복구되어 검증 11 시나리오를 만족한다.
+        으로 snapshot INSERT 도 함께 원상복구된다.
 
     빈 ScrapeRun (5종 카테고리 모두 빈 배열) 처리:
-        설계 §10.3 권장안에 따라 신규 INSERT 시에도 row 를 만든다 — 같은 날의
-        후속 ScrapeRun 이 머지할 대상이 되며, 5b 의 캘린더가 \"이 날 수집 시도가
-        있었음\" 을 표시할 수 있다.
+        설계 §10.3 권장안에 따라 빈 ScrapeRun 도 row 를 만든다 — 캘린더가
+        \"이 날 수집 시도가 있었음\" 을 표시할 수 있다.
+
+    회귀 가드 (UNIQUE(scrape_run_id)):
+        같은 ScrapeRun.id 에 대해 본 함수가 두 번 호출되면 DB 의
+        UNIQUE(scrape_run_id) 제약이 IntegrityError 를 던진다 — apply 트랜잭션
+        설계상 발생할 수 없는 경로지만, 향후 호출부에 회귀가 들어와도 데이터가
+        중복 누적되지 않도록 DB 가 막는다.
 
     Args:
         session:        호출자 세션.
+        scrape_run_id:  본 row 를 만든 ScrapeRun PK. NOT NULL — 호출자가
+                        apply 트랜잭션 컨텍스트에서 직접 알고 있는 값을
+                        넘긴다.
         snapshot_date:  KST 기준 날짜 (date 객체). 호출자가
                         ``app.timezone.now_kst().date()`` 로 계산해 전달한다.
         new_payload:    이번 ScrapeRun 의 ``build_snapshot_payload(apply_result)``
@@ -3937,86 +3956,115 @@ def upsert_scrape_snapshot(
                         빈 컨테이너로 채운다.
 
     Returns:
-        flush 후 id 가 부여된 ``ScrapeSnapshot`` 인스턴스 (신규 INSERT 또는
-        머지 UPDATE 결과).
+        flush 후 id 가 부여된 신규 ``ScrapeSnapshot`` 인스턴스.
     """
-    existing_row = session.execute(
-        select(ScrapeSnapshot).where(ScrapeSnapshot.snapshot_date == snapshot_date)
-    ).scalar_one_or_none()
-
-    if existing_row is None:
-        # 신규 INSERT — 빈 카테고리도 명시적으로 정규형으로 채운다.
-        normalized = normalize_payload(new_payload)
-        snapshot = ScrapeSnapshot(
-            snapshot_date=snapshot_date,
-            payload=normalized,
-        )
-        session.add(snapshot)
-        session.flush()
-        logger.info(
-            "ScrapeSnapshot 신규 INSERT: snapshot_date={} counts={}",
-            snapshot_date.isoformat(),
-            normalized.get("counts", {}),
-        )
-        return snapshot
-
-    # 기존 row → merge_snapshot_payload 결과로 UPDATE.
-    merged = merge_snapshot_payload(existing_row.payload, new_payload)
-    existing_row.payload = merged
+    normalized = normalize_payload(new_payload)
+    snapshot = ScrapeSnapshot(
+        scrape_run_id=scrape_run_id,
+        snapshot_date=snapshot_date,
+        payload=normalized,
+    )
+    session.add(snapshot)
     session.flush()
     logger.info(
-        "ScrapeSnapshot 머지 UPDATE: snapshot_date={} counts={}",
+        "ScrapeSnapshot INSERT: scrape_run_id={} snapshot_date={} counts={}",
+        scrape_run_id,
         snapshot_date.isoformat(),
-        merged.get("counts", {}),
+        normalized.get("counts", {}),
     )
-    return existing_row
+    return snapshot
 
 
 def get_scrape_snapshot_by_date(
     session: Session,
     snapshot_date: date,
 ) -> ScrapeSnapshot | None:
-    """``snapshot_date`` 의 ScrapeSnapshot row 를 조회한다 (없으면 None).
+    """``snapshot_date`` 의 누적 ScrapeSnapshot 상태를 단일 row 표현으로 반환한다.
 
-    UNIQUE(snapshot_date) 제약상 0 또는 1 건만 존재한다. 5b 의 dashboard view
-    에서 \"오늘의 변화 요약\" 을 빠르게 가져올 때 사용한다.
+    task 00150-1 에서 ``scrape_snapshots`` 가 매 ScrapeRun 마다 1 row INSERT
+    되도록 전환되어, 같은 KST 날짜에 row 가 여러 개 존재할 수 있다. 본 함수는
+    호출부의 의도 ("그 날 누적 상태") 를 유지하기 위해 같은 ``snapshot_date``
+    의 모든 row 를 ``created_at`` 오름차순으로 fetch 한 뒤 ``merge_snapshot_payload``
+    로 reduce 머지한 단일 ``ScrapeSnapshot`` 인스턴스를 반환한다.
+
+    동작:
+        1. ``WHERE snapshot_date = :snapshot_date`` + ``ORDER BY created_at ASC,
+           id ASC`` 로 모든 후보 row 를 fetch.
+        2. 0건이면 None 반환.
+        3. 1건이면 그 row 를 그대로 반환 (정규화도 불필요 — 저장 시 이미 정규형).
+        4. 2건 이상이면 가장 ``created_at`` 이 늦은 row 를 "대표" 로 삼고 그
+           row 의 ``payload`` 를 reduce 머지 결과로 덮어쓴 가상 인스턴스를
+           반환한다. 호출자는 ``id`` / ``created_at`` 보다 ``payload`` /
+           ``snapshot_date`` 만 읽는 게 일반적이라 부작용이 없다.
 
     Args:
         session:       호출자 세션.
         snapshot_date: 조회할 KST 날짜.
 
     Returns:
-        ``ScrapeSnapshot`` 또는 None.
+        ``ScrapeSnapshot`` (multi-row reduce 머지 결과 또는 단일 row) 또는 None.
+
+    Note:
+        반환 인스턴스의 ``payload`` 는 SQLAlchemy 세션에 attached 인 채로
+        in-place 갱신되므로, 호출 시점에 ``session.commit()`` 이 발생하면 DB
+        의 row payload 도 덮어써진다. 그러나 본 함수는 dashboard 의 read-only
+        세션에서 호출되어 commit 이 일어나지 않으므로 실제 부작용은 없다.
+        호출부가 본 함수 결과를 직접 commit 하지 않는 것을 컨벤션으로 둔다.
     """
-    return session.execute(
-        select(ScrapeSnapshot).where(ScrapeSnapshot.snapshot_date == snapshot_date)
-    ).scalar_one_or_none()
+    rows = (
+        session.execute(
+            select(ScrapeSnapshot)
+            .where(ScrapeSnapshot.snapshot_date == snapshot_date)
+            .order_by(ScrapeSnapshot.created_at.asc(), ScrapeSnapshot.id.asc())
+        )
+        .scalars()
+        .all()
+    )
+    if not rows:
+        return None
+    if len(rows) == 1:
+        return rows[0]
+
+    # multi-row reduce 머지 — dashboard A 섹션과 동일 시맨틱 (먼저 끝난 run →
+    # 나중에 끝난 run 순으로 누적). 대표는 가장 늦게 끝난 row 로 둔다.
+    merged_payload = reduce(
+        merge_snapshot_payload,
+        (snapshot.payload for snapshot in rows),
+        normalize_payload(None),
+    )
+    representative = rows[-1]
+    representative.payload = merged_payload
+    return representative
 
 
 def list_available_snapshot_dates(session: Session) -> list[date]:
-    """``scrape_snapshots`` 의 ``snapshot_date`` 전체를 오름차순으로 반환한다.
+    """``scrape_snapshots`` 의 ``snapshot_date`` 전체를 중복 제거 + 오름차순 반환.
 
     Phase 5b (task 00042-2) 의 캘린더 컴포넌트와 ``GET
-    /dashboard/api/snapshot-dates`` JSON API 가 공유하는 단일 헬퍼다. UNIQUE
-    제약상 한 KST 날짜당 0 또는 1 건이라 결과 list 는 자연스럽게 중복이
-    없으며, 정렬은 SQL ``ORDER BY snapshot_date ASC`` 로 처리한다.
+    /dashboard/api/snapshot-dates`` JSON API 가 공유하는 단일 헬퍼다. task
+    00150-1 에서 ``scrape_snapshots`` 가 매 ScrapeRun 마다 1 row INSERT 로
+    전환되어 같은 KST 날짜에 row 가 여러 개 존재할 수 있다 — 본 함수는
+    캘린더가 같은 날짜를 중복 노출하지 않도록 ``SELECT DISTINCT snapshot_date``
+    로 중복을 제거한다.
 
     캘린더 가용 날짜 판정 정책 (``docs/dashboard_design.md §4.1``):
         본 함수가 반환하는 날짜 == \"캘린더에서 활성 (클릭 가능)\" 이다.
-        Phase 5a 의 ``upsert_scrape_snapshot`` 이 ScrapeRun completed/partial
-        종료 시 변화 0건이어도 row 를 INSERT 하므로, \"수집은 됐지만 변화 0건\"
-        인 날도 본 함수의 결과에 포함되어 캘린더에서 활성으로 보인다 (디자인
-        의도). 반대로 그날 ScrapeRun 이 모두 failed/cancelled 였거나 실행 자체
-        가 없었던 날만 비활성으로 표시된다.
+        ``insert_scrape_snapshot`` 이 ScrapeRun completed/partial 종료 시
+        변화 0건이어도 row 를 INSERT 하므로, \"수집은 됐지만 변화 0건\" 인
+        날도 본 함수의 결과에 포함되어 캘린더에서 활성으로 보인다 (디자인
+        의도). 반대로 그날 ScrapeRun 이 모두 failed/cancelled 였거나 실행
+        자체가 없었던 날만 비활성으로 표시된다.
 
     Args:
         session: 호출자 세션.
 
     Returns:
-        snapshot_date(KST date) 들의 오름차순 list. 비어 있으면 빈 list.
+        snapshot_date(KST date) 들의 오름차순 list, 중복 제거됨. 비어 있으면 빈 list.
     """
     rows = session.execute(
-        select(ScrapeSnapshot.snapshot_date).order_by(ScrapeSnapshot.snapshot_date.asc())
+        select(ScrapeSnapshot.snapshot_date)
+        .distinct()
+        .order_by(ScrapeSnapshot.snapshot_date.asc())
     ).all()
     return [row[0] for row in rows]
 
@@ -4035,11 +4083,14 @@ def list_snapshots_in_range(
     은 비교 baseline 이라 누적 대상에서 제외된다 (사용자 원문 그대로).
 
     SQL: ``WHERE snapshot_date > :from_exclusive AND snapshot_date <= :to_inclusive``
-         ``ORDER BY snapshot_date ASC``
+         ``ORDER BY snapshot_date ASC, created_at ASC``
 
     누적 머지의 정확성을 위해 ``snapshot_date ASC`` 정렬은 필수다 — 시간순으로
     ``merge_snapshot_payload`` 를 reduce 해야 \"first from 유지 + last to 갱신\"
-    transition 머지 규칙이 의도대로 작동한다.
+    transition 머지 규칙이 의도대로 작동한다. task 00150-1 에서 같은 KST 날짜에
+    여러 row 가 존재할 수 있게 되어, ``created_at ASC`` 보조 정렬을 추가해
+    \"먼저 끝난 ScrapeRun → 나중에 끝난 ScrapeRun\" 순서로 머지가 일어나도록
+    보장한다.
 
     Args:
         session:        호출자 세션.
@@ -4047,14 +4098,18 @@ def list_snapshots_in_range(
         to_inclusive:   끝 경계 (포함). 보통 기준일 (base_date).
 
     Returns:
-        ``ScrapeSnapshot`` 의 list, ``snapshot_date`` 오름차순. 구간이 비면
-        빈 list. ``from_exclusive >= to_inclusive`` 도 그대로 빈 list.
+        ``ScrapeSnapshot`` 의 list, ``snapshot_date`` 오름차순 + 같은 날 안에서는
+        ``created_at`` 오름차순. 구간이 비면 빈 list. ``from_exclusive >=
+        to_inclusive`` 도 그대로 빈 list.
     """
     rows = session.execute(
         select(ScrapeSnapshot)
         .where(ScrapeSnapshot.snapshot_date > from_exclusive)
         .where(ScrapeSnapshot.snapshot_date <= to_inclusive)
-        .order_by(ScrapeSnapshot.snapshot_date.asc())
+        .order_by(
+            ScrapeSnapshot.snapshot_date.asc(),
+            ScrapeSnapshot.created_at.asc(),
+        )
     ).scalars().all()
     return list(rows)
 
@@ -4118,12 +4173,16 @@ def list_snapshots_in_inclusive_range(
     별도 헬퍼로 둔다 — 호출자가 둘을 헷갈릴 위험을 줄인다.
 
     SQL: ``WHERE snapshot_date >= :from_inclusive AND snapshot_date <= :to_inclusive``
-         ``ORDER BY snapshot_date ASC``
+         ``ORDER BY snapshot_date ASC, created_at ASC``
 
     호출 의도:
         추이 차트의 ±15일 = 31일 (양끝 포함, design doc §9.1) 데이터 fetch 를
         단일 IN/BETWEEN 쿼리 1회로 끝낸다. snapshot 가 없는 날짜는 결과에서
         자연스럽게 빠지고, 빌더가 0 으로 채워 그래프에 골짜기를 만든다.
+
+        task 00150-1 이후 같은 KST 날짜에 row 가 여러 개일 수 있으므로 호출자가
+        snapshot_date 별로 그룹핑 후 ``merge_snapshot_payload`` 로 reduce 머지하는
+        것이 안전하다. 보조 정렬 ``created_at ASC`` 가 머지 순서를 보장한다.
 
     Args:
         session:        호출자 세션.
@@ -4131,13 +4190,17 @@ def list_snapshots_in_inclusive_range(
         to_inclusive:   끝 경계 (포함). 보통 ``base_date + timedelta(days=15)``.
 
     Returns:
-        ``ScrapeSnapshot`` list, ``snapshot_date`` 오름차순. 매칭 0건은 빈 list.
+        ``ScrapeSnapshot`` list, ``snapshot_date`` 오름차순 + 같은 날 안에서는
+        ``created_at`` 오름차순. 매칭 0건은 빈 list.
     """
     rows = session.execute(
         select(ScrapeSnapshot)
         .where(ScrapeSnapshot.snapshot_date >= from_inclusive)
         .where(ScrapeSnapshot.snapshot_date <= to_inclusive)
-        .order_by(ScrapeSnapshot.snapshot_date.asc())
+        .order_by(
+            ScrapeSnapshot.snapshot_date.asc(),
+            ScrapeSnapshot.created_at.asc(),
+        )
     ).scalars().all()
     return list(rows)
 

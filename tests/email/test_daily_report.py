@@ -75,7 +75,7 @@ from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 from app.backup.service import set_setting
-from app.db.models import Announcement, AnnouncementStatus, ScrapeSnapshot
+from app.db.models import Announcement, AnnouncementStatus, ScrapeRun, ScrapeSnapshot
 from app.db.snapshot import normalize_payload
 from app.email.constants import (
     DEFAULT_APP_PUBLIC_BASE_URL,
@@ -111,12 +111,21 @@ def _insert_snapshot_with_created_at(
     적용). 테스트는 발송 구간 경계의 직전/직후를 정밀히 재현하기 위해 created_at
     을 직접 주입한다.
 
+    task 00150-1 에서 ``scrape_snapshots.scrape_run_id`` 가 NOT NULL FK 로
+    추가되어, 본 헬퍼는 호출 시마다 \"이 snapshot 을 만든 ScrapeRun\" 을 1개씩
+    함께 INSERT 한다. ScrapeRun.ended_at 은 ``created_at`` 과 동일 시각으로
+    채워, 운영상 의미("이 시각에 종료된 run 이 만든 snapshot") 를 정합하게 유지
+    한다. UNIQUE(``scrape_run_id``) 제약이 \"1 run = 1 snapshot\" 을 강제하므로
+    여러 snapshot 을 만들려면 본 헬퍼를 여러 번 호출하면 각자 다른 ScrapeRun 이
+    자동으로 만들어진다.
+
     Args:
         session:           대상 ORM 세션.
         created_at:       UTC tz-aware datetime. 본 row 의 ``created_at`` 컬럼
-                          에 그대로 들어간다.
-        snapshot_date_iso: ``YYYY-MM-DD`` 문자열. UNIQUE 제약을 만족해야 하므로
-                          테스트 케이스마다 다른 값을 전달한다.
+                          에 그대로 들어간다. 함께 만들어지는 ScrapeRun 의
+                          ``ended_at`` 도 같은 시각.
+        snapshot_date_iso: ``YYYY-MM-DD`` 문자열. task 00150-1 이후 같은 날짜
+                          중복도 허용되므로 케이스마다 자유롭게 전달 가능.
         payload:          ScrapeSnapshot.payload 에 들어갈 dict. None 이면 빈
                           payload 정규형으로 채운다.
 
@@ -125,7 +134,21 @@ def _insert_snapshot_with_created_at(
     """
     from datetime import date
 
+    # 보조 ScrapeRun — 같은 시각에 종료된 정상 종료 run 으로 만든다. trigger 는
+    # 임의값 ("cli") 이면 충분 — daily report 도메인이 ScrapeRun.trigger 를
+    # 직접 보지는 않는다.
+    scrape_run = ScrapeRun(
+        started_at=created_at,
+        ended_at=created_at,
+        status="completed",
+        trigger="cli",
+        source_counts={},
+    )
+    session.add(scrape_run)
+    session.flush()
+
     snapshot = ScrapeSnapshot(
+        scrape_run_id=scrape_run.id,
         snapshot_date=date.fromisoformat(snapshot_date_iso),
         created_at=created_at,
         payload=normalize_payload(payload),
@@ -282,8 +305,9 @@ def test_compute_window_counts_snapshots_in_range(db_session: Session) -> None:
         snapshot_date_iso="2026-05-17",
         payload={"new": [401]},
     )
-    # 구간 안 row 3건. ScrapeSnapshot 의 UNIQUE(snapshot_date) 를 만족하기 위해
-    # 각 row 의 snapshot_date 를 서로 다른 일자(2026-05-19/20/21) 로 둔다.
+    # 구간 안 row 3건. task 00150-1 이후 같은 snapshot_date 중복도 허용되지만,
+    # 본 테스트는 시간 윈도우 필터만 검증하므로 가독성을 위해 서로 다른 일자
+    # (2026-05-19/20/21) 로 둔다.
     for index, hour_offset in enumerate([3, 12, 23], start=1):
         _insert_snapshot_with_created_at(
             db_session,
@@ -431,6 +455,79 @@ def test_compute_window_does_not_expand_to_fallback_when_last_sent_present(
     assert window.snapshot_count == 0
     assert window.is_first_send is False
     assert window.from_dt == last_sent
+
+
+# ──────────────────────────────────────────────────────────────
+# 6b. task 00150-1 회귀 — 같은 KST 날짜의 multi-row 환경에서 윈도우 안 row 만 잡기
+# ──────────────────────────────────────────────────────────────
+
+
+def test_compute_window_picks_only_in_window_row_when_same_snapshot_date_multi_run(
+    db_session: Session,
+) -> None:
+    """task 00150 회귀: 같은 KST 날짜의 2 row 중 (from, to] 윈도우 안 1 row 만 잡힌다.
+
+    사용자 보고 케이스 (10번 메일, 14:40~16:10 윈도우, scrape_run 88 종료 16:02 +
+    같은 KST 날짜 09:xx 종료된 다른 ScrapeRun) 의 본질을 추상화한 회귀 가드.
+
+    task 00150-1 이전 설계 (UNIQUE(snapshot_date) + UPSERT 머지) 에서는 같은 날
+    의 두 ScrapeRun 결과가 단일 row 의 ``created_at`` (= 09:xx) 에 머지되어,
+    14:40~16:10 윈도우 필터가 본 row 를 \"창 밖\" 으로 판정해 snapshot_count=0
+    이 됐었다. 새 설계 (매 ScrapeRun 마다 1 row INSERT) 에서는 16:02 row 의
+    ``created_at`` 이 정확히 16:02 이라 윈도우 안에 들어와 1건이 잡힌다.
+
+    검증:
+        - 같은 ``snapshot_date`` 의 2 row (09:xx + 16:02) 가 별개로 존재한다.
+        - (14:40, 16:10] 윈도우는 16:02 row 만 1건 잡는다 (09:xx 는 윈도우 밖).
+        - ``snapshot_count == 1`` + ``snapshot_created_ats`` 가 16:02 만 포함.
+    """
+    # 사용자 케이스 추상화: KST 2026-05-26 = UTC 기준 같은 날.
+    # 09:xx 종료 + 16:02 종료의 2개 ScrapeRun → 같은 snapshot_date 의 2 row.
+    same_snapshot_date_iso = "2026-05-26"
+    earlier_ended_utc = datetime(2026, 5, 26, 0, 0, 0, tzinfo=UTC)   # KST 09:00
+    later_ended_utc = datetime(2026, 5, 26, 7, 2, 0, tzinfo=UTC)    # KST 16:02
+
+    _insert_snapshot_with_created_at(
+        db_session,
+        created_at=earlier_ended_utc,
+        snapshot_date_iso=same_snapshot_date_iso,
+        payload={"new": [1001]},
+    )
+    _insert_snapshot_with_created_at(
+        db_session,
+        created_at=later_ended_utc,
+        snapshot_date_iso=same_snapshot_date_iso,
+        payload={"new": [1002]},
+    )
+
+    # 발송 윈도우: KST 14:40 ~ 16:10 → UTC 05:40 ~ 07:10.
+    window_from_utc = datetime(2026, 5, 26, 5, 40, 0, tzinfo=UTC)
+    window_to_utc = datetime(2026, 5, 26, 7, 10, 0, tzinfo=UTC)
+
+    set_setting(
+        db_session,
+        SETTING_KEY_DAILY_REPORT_LAST_SENT_AT,
+        window_from_utc.isoformat(),
+    )
+    db_session.commit()
+
+    window = compute_aggregation_window(db_session, now=window_to_utc)
+
+    # 핵심 회귀 가드 — 16:02 row 만 1건 잡혀야 한다.
+    assert window is not None
+    assert window.snapshot_count == 1, (
+        "사용자 보고 케이스: 같은 KST 날짜의 2 row 중 (14:40, 16:10] 윈도우 안 "
+        "row 1개만 잡아야 한다. snapshot_count=0 이면 task 00150 이전의 회귀."
+    )
+    assert window.from_dt == window_from_utc
+    assert window.to_dt == window_to_utc
+    # 잡힌 row 의 created_at 이 16:02 인지 (09:xx 가 아닌지) 확인.
+    # SQLite 백엔드는 DateTime(timezone=True) 컬럼을 SELECT 시 naive 로 돌려주므로
+    # ``as_utc`` 로 정규화 후 비교한다 (프로젝트 컨벤션).
+    from app.db.models import as_utc
+
+    assert len(window.snapshot_created_ats) == 1
+    assert as_utc(window.snapshot_created_ats[0]) == later_ended_utc
 
 
 # ──────────────────────────────────────────────────────────────
