@@ -232,9 +232,17 @@ sqlite3 ./data/db/app.sqlite3 \
 
 수집 중에는 본 테이블 직접 UPSERT 가 없다 — `delta_announcements` /
 `delta_attachments` 에만 INSERT 한다. ScrapeRun 종료 시점에 단일 트랜잭션으로 (a) delta →
-본 테이블 4-branch 적용 + (b) `scrape_snapshots` UPSERT(KST 날짜당 1 row) + (c) 같은
-scrape_run_id 의 delta DELETE 가 한 번에 일어난다. **본 테이블·snapshot 은 트랜잭션
-commit 시점에만** 변한다 — 도중 SIGTERM·예외가 새지 않는다.
+본 테이블 4-branch 적용 + (b) `scrape_snapshots` 에 신규 row 1 개 INSERT (매 ScrapeRun 마다
+1 row, 머지 없음) + (c) 같은 scrape_run_id 의 delta DELETE 가 한 번에 일어난다. **본 테이블·
+snapshot 은 트랜잭션 commit 시점에만** 변한다 — 도중 SIGTERM·예외가 새지 않는다.
+
+`scrape_snapshots` 는 `scrape_run_id` FK 가 NOT NULL + UNIQUE 라서 **1 ScrapeRun = 1 row**
+가 DB 제약으로 보장된다. 같은 KST 날짜에 ScrapeRun 이 여러 번 끝나면 같은 `snapshot_date`
+의 row 가 여러 개 생기며, 각 row 의 `created_at` 은 그 ScrapeRun 의 diff 산출 시각
+(= apply 트랜잭션 commit 시각) 을 정확히 가리킨다. `updated_at` 컬럼은 호환성 위해 남아
+있으나 INSERT 전용 흐름에서는 실질적으로 갱신되지 않는다 — 시점 비교는 항상 `created_at`
+을 본다. Daily Report 의 `(last_sent_at, now]` 시간 필터와 dashboard A 섹션의 `(from, to]`
+구간 머지 모두 이 보장 위에서 동작한다.
 
 **4-branch 분류** (apply 단계 단일 공고 처리):
 
@@ -264,8 +272,79 @@ apply 자체 실패만 delta 가 보존되어 다음 ScrapeRun 으로 자동 복
 ```sql
 SELECT * FROM announcements WHERE is_current = 1;                         -- 현재 유효 버전
 SELECT * FROM announcements WHERE source_type='IRIS' AND source_announcement_id='12345' ORDER BY id;  -- 이력 포함
-SELECT snapshot_date, payload FROM scrape_snapshots ORDER BY snapshot_date DESC LIMIT 1;
+SELECT id, scrape_run_id, snapshot_date, created_at, payload FROM scrape_snapshots
+ WHERE snapshot_date = '2026-05-26' ORDER BY created_at ASC;              -- 그 날의 모든 row (같은 날 ScrapeRun 여러 번 = row 여러 개)
 SELECT scrape_run_id, COUNT(*) FROM delta_announcements GROUP BY scrape_run_id;  -- 정상이면 0
+```
+
+### 수집 결과 보는 법 — `scrape_runs.source_counts` vs `scrape_snapshots.payload`
+
+같은 ScrapeRun 을 두 컬럼에서 조회하면 내용이 꽤 다르게 보인다. 의도된 설계이며, 두
+컬럼의 **목적과 범위가 다르기 때문**이다. 어떤 질문에 어느 컬럼을 봐야 하는지 정리한다.
+
+| 컬럼 | 단위 | 무엇을 담는가 | 언제 보는가 |
+|------|------|---------------|-------------|
+| `scrape_runs.source_counts` | ScrapeRun 1 회 | 이 run 의 **raw 실행 통계** — 수집 단계 카운터(`collection.*`) + apply 단계 결과(`apply.*`) + 실패 공고 ID 리스트 | "이 run 이 정상 종료됐는가 / 무엇을 처리했는가" 진단용 |
+| `scrape_snapshots.payload` | ScrapeRun 1 회 (= 1 row) | 이 run 의 **diff 결과 5종 카테고리** — `new` / `content_changed` / `transitioned_to_접수예정·접수중·마감` + `counts` | "이 run 으로 인해 dashboard 카드와 메일 본문에 어떤 공고가 올라가는가" 표시용 |
+
+**`source_counts` 의 구조** (`_build_final_source_counts` 가 채움):
+
+- `active_sources`: 이번 run 이 돌린 소스 ID 리스트.
+- `collection.*`: 수집 단계 카운터 — `delta_inserted` / `delta_failed` / `detail_success` /
+  `detail_failure` / `skipped_detail` / `attachment_download_success` /
+  `attachment_download_failure`. 첨부 다운로드·상세 페이지 호출 같은 **raw I/O** 통계가
+  들어간다.
+- `apply.executed`: apply 단계가 실제 실행됐는지 (cancelled / orchestrator-failed 면 false).
+- `apply.action_counts`: 4-branch 분류 카운트 — `created` / `unchanged` / `new_version` /
+  `status_transitioned`. **본 테이블에 적용된 row 수**.
+- `apply.new_announcement_ids` / `apply.content_changed_announcement_ids`: 신규 / 내용 변경
+  공고 ID 리스트.
+- `apply.transition_count`: 상태 전이 건수 (row 단위 합계).
+- `apply.attachment_success` / `apply.attachment_skipped` / `apply.attachment_content_change`:
+  apply 단계의 첨부 적용 통계.
+- `failed_source_announcement_ids`: 수집 단계에서 실패한 공고 ID 리스트.
+
+**`payload` 의 구조** (`build_snapshot_payload` 가 채움):
+
+- `new`: `int[]` (asc 정렬) — 신규 등장 공고 ID.
+- `content_changed`: `int[]` (asc 정렬) — title / agency / deadline_at 중 하나라도 바뀐 공고
+  ID. 같은 공고가 `transitioned_to_*` 에도 동시에 들어갈 수 있다 (양립 가능).
+- `transitioned_to_접수예정` / `transitioned_to_접수중` / `transitioned_to_마감`: 각
+  `{id, from}` 객체 배열. status 단독 전이만 들어간다 (4-branch 의 `status_transitioned`
+  분기). title 변경을 동반한 전이는 `new_version` 으로 분류되어 여기 안 들어간다.
+- `counts`: 위 5 종 길이를 그대로 반영한 dict.
+
+**왜 둘이 달라 보이는가** — 같은 ScrapeRun 이라도:
+
+1. `source_counts` 는 `detail_failure` / `attachment_skipped` 같은 **raw 단계 카운터**까지
+   포함하지만 `payload` 는 본 테이블에 들어간 diff 만 본다. 수집은 됐지만 본 테이블에
+   안 들어간 공고는 `payload` 에 없다.
+2. `source_counts.apply.transition_count` 는 **row 단위 합계** (3 종 to_label 통합), `payload`
+   의 `transitioned_to_*` 3 종은 to 별 그룹핑이라 분포가 다르게 보인다.
+3. `source_counts.apply.new_announcement_ids` 와 `payload.new` 는 같은 run 내에서 동일한
+   ID 집합을 가지나, `payload.new` 는 asc 정렬·`int[]` 정규형이고 `source_counts.*` 쪽은
+   삽입 순서대로 들어 있다.
+4. dashboard 가 사용자에게 보여 주는 카드는 항상 **`payload` 기반** 이며, 여러 ScrapeRun
+   의 `payload` 가 `(from, to]` 구간에서 시간순 reduce 머지된다 (같은 announcement_id 가
+   여러 카테고리에 들어가면 머지 단계에서 정정 / 제거된다). `source_counts` 는 dashboard
+   계산에 쓰이지 않는다.
+
+**자주 쓰는 SQL 예시**:
+
+```sql
+-- 어떤 run 이 정상 종료됐고 무엇을 처리했는지 (source_counts 사용)
+SELECT id, trigger_source, status, started_at, ended_at,
+       json_extract(source_counts, '$.collection.delta_inserted') AS delta_inserted,
+       json_extract(source_counts, '$.apply.action_counts')      AS action_counts,
+       json_extract(source_counts, '$.apply.transition_count')   AS transition_count
+  FROM scrape_runs
+ WHERE id = 88;
+
+-- 그 run 이 dashboard / 메일에 어떤 변화를 올렸는가 (payload 사용)
+SELECT s.id, s.scrape_run_id, s.snapshot_date, s.created_at,
+       json_extract(s.payload, '$.counts') AS counts
+  FROM scrape_snapshots AS s
+ WHERE s.scrape_run_id = 88;
 ```
 
 ### NTIS 운영 특이사항
@@ -931,6 +1010,39 @@ sqlite3 ./data/db/app.sqlite3 \
 값은 ISO-8601 UTC 문자열이다. 빈 값 · 행 없음 · 파싱 불가 값은 모두 "첫 발송 전" 으로
 간주되어 직전 7일치 fallback 이 적용된다. 변경은 다음 발송부터 반영된다.
 
+##### 트러블슈팅 — 0건 발송 / snapshot 0건 점검
+
+발송 이력에 ⏭ (snapshot 0건) 으로 표시되거나, 메일이 실제로 나갔어도 본문이 "변화
+0건" 으로 발송된 경우 점검 순서:
+
+1. **메일 발송 게이트** — `/admin/email` 「메일 발송 설정」 카드의 **활성화 토글** 이 ON
+   인지 확인. OFF 면 자동 잡·테스트·지금 발송 모두 503 으로 막힌다 (별도 발송 실패
+   로그도 안 남는다).
+2. **누적 구간 (`last_sent_at`)** — 페이지 하단 발송 이력의 「누적 구간」 컬럼이 의도한
+   범위를 가리키는지 확인. 너무 좁은 구간이면 위 [마지막 발송 시각 수동
+   reset](#트러블슈팅-마지막-발송-시각-수동-reset) 절차로 비우거나 명시 지정.
+3. **그 구간 안에 snapshot 이 실제로 존재하는가** — `scrape_snapshots.created_at` 기준
+   으로 조회한다. `snapshot_date` 가 같은 날이어도 `created_at` 이 구간 밖이면 0 건으로
+   잡힌다 (각 row 는 그 ScrapeRun 종료 시각으로 박혀 있다, 후속 ScrapeRun 이 들어와도
+   기존 row 의 `created_at` 은 갱신되지 않는다).
+
+   ```sql
+   -- 발송 이력의 누적 구간 (UTC) 안에 잡힌 snapshot row 수동 확인
+   SELECT id, scrape_run_id, snapshot_date, created_at,
+          json_extract(payload, '$.counts') AS counts
+     FROM scrape_snapshots
+    WHERE created_at >  '2026-05-26T05:40:00+00:00'  -- last_sent_at (KST 14:40 → UTC 05:40)
+      AND created_at <= '2026-05-26T07:10:00+00:00'  -- now           (KST 16:10 → UTC 07:10)
+    ORDER BY created_at ASC;
+   ```
+
+4. **수신자 풀** — 발송 시점에 `is_admin=True` 이며 이메일이 등록되어 있고 이메일 알림
+   토글이 ON 인 사용자가 1 명 이상인지. `/admin/email` 「Daily Report」 카드의 수신자
+   미리보기에 경고가 떠 있으면 거기에 원인이 표시된다.
+5. **「테스트 발송」 으로 본 발송 흐름 재현** — 위 1-4 에 문제가 없는데 0 건이 계속
+   잡히면 「Daily Report」 카드 하단의 [테스트 발송] 으로 동일한 누적 구간 계산을
+   재현해 본다. `last_sent_at` 을 갱신하지 않으므로 실제 발송 주기에는 영향 없다.
+
 ---
 
 ## 로그와 디버깅
@@ -1011,7 +1123,7 @@ INFO  목록 수집 시작: source=IRIS max_pages=10
 INFO  목록 수집 완료: source=IRIS 42건
 INFO  소스 IRIS 완료(수집 단계): delta INSERT 성공 42건 / 실패 0건 ...
 INFO  apply_delta_to_main 완료: actions={'created': 5, 'unchanged': 37} ...
-INFO  ScrapeSnapshot 신규 INSERT: snapshot_date=2026-04-29 counts={'new': 5, ...}
+INFO  ScrapeSnapshot INSERT: scrape_run_id=88 snapshot_date=2026-04-29 counts={'new': 5, ...}
 INFO  apply_delta_to_main 트랜잭션 commit 완료: status=completed
 ```
 
