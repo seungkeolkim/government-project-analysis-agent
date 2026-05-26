@@ -35,6 +35,7 @@ from app.scheduler.constants import (
     JOB_NAME_BACKUP_PREFIX,
     JOB_NAME_CRON_PREFIX,
     JOB_NAME_DAILY_REPORT_PREFIX,
+    JOB_NAME_GC_ORPHAN_PREFIX,
     JOB_NAME_INTERVAL_PREFIX,
     MAX_INTERVAL_HOURS,
     SCHEDULER_JOBS_TABLENAME,
@@ -61,6 +62,11 @@ from app.scheduler.single_instance import (
 # CronTrigger.from_crontab 은 요일 숫자를 변환 없이 넘겨 '1-5'(월~금) 가 화~토로
 # 어긋나므로, 모든 cron trigger 생성은 이 헬퍼를 거치도록 통일한다.
 from app.scheduler.cron import build_cron_trigger
+
+# task 00149-2 — APScheduler 의 기본 SQLAlchemyJobStore(BLOB pickle) 대신
+# 구조화 JSON / cron_expression / 상태 타임스탬프 컬럼화된 자체 jobstore 를 쓴다.
+# 운영자가 sqlite3 직접 조회로 잡 상태를 진단할 수 있게 한다.
+from app.scheduler.jobstore import JsonSchedulerJobStore
 
 # ──────────────────────────────────────────────────────────────
 # 예외
@@ -115,16 +121,19 @@ _scheduler_lock: threading.Lock = threading.Lock()
 def _build_scheduler() -> Any:
     """BackgroundScheduler 를 새로 생성한다.
 
-    SQLAlchemyJobStore 는 ``app.db.session.get_engine()`` 의 엔진을 재사용해
-    같은 SQLite 파일에 scheduler_jobs 테이블을 둔다. alembic 관리 밖이며,
-    APScheduler 가 최초 start 시 ``CREATE TABLE IF NOT EXISTS`` 를 실행한다.
+    task 00149-2 — 잡 직렬화는 ``JsonSchedulerJobStore`` 가 담당한다. 기존
+    APScheduler 의 ``SQLAlchemyJobStore`` 는 ``(id, next_run_time FLOAT,
+    job_state LargeBinary[pickle])`` 3컬럼 BLOB 스키마를 런타임에 자동 생성
+    했지만, 본 task 부터는 Alembic 마이그레이션이 신 스키마를 미리 생성하고
+    본 jobstore 가 그 컬럼들로 잡을 직렬화/역직렬화한다. 운영자가 sqlite3 직접
+    조회로 cron 표현식 / 다음 실행 시각 / 최근 성공·실패 시각을 한 줄 SQL 로
+    확인할 수 있게 된다.
     """
     # 의존성(apscheduler)은 import 가 늦을수록 낫다 — 호환성 문제를 런타임에만 노출.
     # 00025-2 의 'python-multipart 패턴: 선언만 추가, import 는 쓰는 순간에' 와 동일 정책.
-    from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
     from apscheduler.schedulers.background import BackgroundScheduler
 
-    jobstore = SQLAlchemyJobStore(
+    jobstore = JsonSchedulerJobStore(
         engine=get_engine(),
         tablename=SCHEDULER_JOBS_TABLENAME,
     )
@@ -308,6 +317,93 @@ def _recompute_all_jobs_next_run_time(scheduler: Any) -> int:
     return recomputed_count
 
 
+def _register_job_run_listener(scheduler: Any) -> None:
+    """잡 실행 이벤트를 jobstore 의 상태 컬럼에 기록하는 listener 를 등록한다.
+
+    task 00149-2 — 운영 가시성 보강. scheduler_jobs 테이블의 ``last_run_at`` /
+    ``last_success_at`` / ``last_fail_at`` / ``last_error_message`` 컬럼을 잡
+    실행 종료 시각에 동기로 채워, 운영자가 sqlite3 직접 조회로 \"마지막 성공
+    실행\" / \"마지막 실패와 에러\" 를 1줄 SQL 로 확인할 수 있게 한다.
+
+    이벤트 처리 (3종):
+        - ``EVENT_JOB_EXECUTED`` → ``record_job_success`` (last_run_at +
+          last_success_at 동시 갱신).
+        - ``EVENT_JOB_ERROR`` → ``record_job_failure`` (last_run_at +
+          last_fail_at + last_error_message 동시 갱신).
+        - ``EVENT_JOB_MISSED`` → ``record_job_failure`` with \"missed\" 메시지
+          — misfire_grace_time 을 넘긴 누락 사고도 fail 흐름으로 기록한다.
+
+    Args:
+        scheduler: 이미 ``start()`` 된 BackgroundScheduler. ``add_listener`` 가
+            가능한 상태여야 한다.
+
+    예외 정책:
+        listener 콜백의 모든 예외는 swallow + ``logger.exception``. 본 listener
+        자체가 실패해도 다음 잡 발사가 막히지 않도록 한다.
+    """
+    # lazy import — apscheduler 의존성을 런타임에만 노출 (다른 함수와 동일 정책).
+    from apscheduler.events import (
+        EVENT_JOB_ERROR,
+        EVENT_JOB_EXECUTED,
+        EVENT_JOB_MISSED,
+    )
+
+    def _listener(event: Any) -> None:
+        """잡 실행 이벤트 1건을 jobstore 컬럼에 반영한다.
+
+        event 는 ``JobExecutionEvent`` (EVENT_JOB_EXECUTED / EVENT_JOB_ERROR /
+        EVENT_JOB_MISSED 공통 base) 이며 ``.code`` / ``.job_id`` / ``.exception``
+        을 갖는다. 본 콜백은 jobstore 의 helper 메서드만 호출하므로 동기 SQL
+        UPDATE 1건만 발급된다 — 잡 함수 본체의 실행 흐름을 차단하지 않는다.
+        """
+        try:
+            jobstore = getattr(scheduler, "_jobstores", {}).get("default")
+            if not isinstance(jobstore, JsonSchedulerJobStore):
+                # 기본 jobstore 가 JsonSchedulerJobStore 가 아니면(테스트 환경
+                # 등) 상태 컬럼 갱신 자체를 스킵한다 — 회귀 안전.
+                return
+
+            if event.code == EVENT_JOB_EXECUTED:
+                jobstore.record_job_success(event.job_id)
+            elif event.code == EVENT_JOB_ERROR:
+                exception = getattr(event, "exception", None)
+                error_message = (
+                    f"{type(exception).__name__}: {exception}"
+                    if exception is not None
+                    else "unknown error"
+                )
+                jobstore.record_job_failure(
+                    event.job_id, error_message=error_message,
+                )
+            elif event.code == EVENT_JOB_MISSED:
+                # misfire_grace_time 초과로 발사조차 못한 케이스. 사용자 원문이
+                # 진단한 누락 시나리오의 일종이라 fail 흐름으로 기록한다.
+                jobstore.record_job_failure(
+                    event.job_id,
+                    error_message="missed: misfire_grace_time 초과로 발사 누락",
+                )
+        except Exception as exc:
+            # listener 자체가 던지는 예외는 swallow — APScheduler 의 다른 잡
+            # 흐름이 막히지 않게 한다. 디버깅용 logger.exception 만 남긴다.
+            logger.exception(
+                "scheduler_jobs 상태 컬럼 갱신 실패(잡 실행 흐름은 정상 유지): "
+                "job_id={} code={} err={}: {}",
+                getattr(event, "job_id", "?"),
+                getattr(event, "code", "?"),
+                type(exc).__name__,
+                exc,
+            )
+
+    scheduler.add_listener(
+        _listener,
+        EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED,
+    )
+    logger.debug(
+        "scheduler_jobs 상태 컬럼 listener 등록 완료 "
+        "(EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED)"
+    )
+
+
 def start() -> None:
     """스케줄러를 기동한다. 이미 running 이면 no-op (멱등).
 
@@ -358,6 +454,13 @@ def start() -> None:
         "APScheduler 기동: pid={} tablename={} misfire_grace_time={}s max_instances=1 coalesce=True timezone=KST",
         os.getpid(), SCHEDULER_JOBS_TABLENAME, DEFAULT_MISFIRE_GRACE_TIME_SEC,
     )
+
+    # task 00149-2 — 잡 실행 결과를 jobstore 의 last_run_at / last_success_at /
+    # last_fail_at / last_error_message 컬럼에 기록하는 listener 를 등록한다.
+    # 운영자가 sqlite3 직접 조회로 \"마지막에 잡이 언제 돌았고 성공했는지\" 를
+    # 즉시 확인할 수 있게 한다. listener 자체가 던지는 예외는 swallow 해
+    # APScheduler 의 다른 잡 발사 흐름을 막지 않는다 (콜백 안 try/except).
+    _register_job_run_listener(scheduler)
 
     # task 00149-1 — jobstore 의 모든 잡의 next_run_time 을 cron/interval 표현식
     # 기준으로 현재 시각 이후 첫 fire-time 으로 강제 재계산. \"지나간 절대 시각\"
@@ -702,8 +805,9 @@ GC_ORPHAN_DEFAULT_CRON: str = "0 4 * * *"
 # job_id prefix — cron / interval 과 별개로 GC 잡임을 식별하기 위함.
 JOB_ID_PREFIX_GC_ORPHAN: str = "gc-orphan"
 
-# job.name prefix — list_schedules 가 trigger_spec 을 복원하는 패턴.
-JOB_NAME_GC_ORPHAN_PREFIX: str = "gc-orphan-cron:"
+# task 00149-2 — JOB_NAME_GC_ORPHAN_PREFIX 는 jobstore 가 cron 표현식 복원에
+# 사용하므로 ``app/scheduler/constants.py`` 로 이전됐다. 본 모듈은 그 상수를
+# import 해 재노출만 한다 (외부 호환성 유지).
 
 
 def add_gc_orphan_cron_schedule(

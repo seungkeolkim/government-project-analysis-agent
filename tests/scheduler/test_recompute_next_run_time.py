@@ -197,16 +197,22 @@ def test_recompute_advances_stale_daily_report_cron_job(
 def test_recompute_reinterprets_legacy_utc_cron_trigger_to_kst(
     running_scheduler: None,
 ) -> None:
-    """UTC timezone 으로 직렬화된 legacy cron 잡이 KST 기반 trigger 로 재구성된다.
+    """UTC timezone 으로 시도된 legacy cron 잡이 KST 기반 trigger 로 자동 재구성된다.
 
-    배경: task 00040-4 가 도입한 \"tz 재해석\" 책임을 본 task 가 흡수했다.
-    기존 ``_reinterpret_existing_jobs_to_kst`` 는 timezone 이 다른 잡만 처리했지
-    만, 새 ``_recompute_all_jobs_next_run_time`` 은 모든 잡을 한 흐름으로
-    처리한다 — 따라서 UTC 잡도 여전히 KST 로 정정되어야 한다.
+    배경:
+        task 00040-4 → 00149-1 이 ``_recompute_all_jobs_next_run_time`` 에 흡수한
+        \"tz 재해석\" 책임이, task 00149-2 의 ``JsonSchedulerJobStore`` 도입으로
+        **저장 레이어 자체** 에서 더 근본적으로 차단된다. 새 jobstore 는 cron 잡
+        의 trigger 객체를 직렬화하지 않고 cron_expression 컬럼만 저장하고, 읽을
+        때마다 ``build_cron_trigger(expr, timezone=KST)`` 로 재생성한다 — 따라서
+        UTC timezone 으로 잡을 \"박을 수 있는\" 경로 자체가 없다.
 
-    재현: KST cron 잡을 정상 등록한 뒤 trigger 만 UTC 로 강제 교체
-    (modify_job(trigger=…)) → 재계산 호출 → trigger.timezone 이 다시 KST 가
-    되고 next_run_time 도 함께 갱신.
+    회귀 가드:
+        - 호출자가 ``modify_job(trigger=UTC_trigger)`` 로 UTC trigger 를 강제로
+          밀어넣어도, 다음 ``get_job`` 은 jobstore 의 reconstitute 를 거쳐
+          KST trigger 를 돌려준다. (저장 레이어에서 컨벤션 강제.)
+        - stale next_run_time 도 ``_recompute_all_jobs_next_run_time`` 호출 후
+          현재 시각 이후로 advance 된다.
     """
     from apscheduler.triggers.cron import CronTrigger
 
@@ -215,21 +221,25 @@ def test_recompute_reinterprets_legacy_utc_cron_trigger_to_kst(
     )
     scheduler = _get_or_build_scheduler()
 
-    # trigger 만 UTC 로 갈아끼워 legacy 상태 재현 — modify_job 은 next_run_time
-    # 을 trigger 기준으로 재계산하지 않으므로 stale 도 함께 박는다.
+    # UTC trigger 로 modify 를 시도 — JsonSchedulerJobStore 가 cron_expression 만
+    # 저장하므로, 다음 lookup 에서는 KST 로 재생성된다 (저장 레이어 보호).
     utc_trigger = CronTrigger.from_crontab("*/15 * * * *", timezone=UTC)
     scheduler.modify_job(summary.job_id, trigger=utc_trigger)
+    # stale next_run_time 박기 — modify_job 은 trigger.get_next_fire_time 을
+    # 거치지 않아 의도된 stale 상태 재현 가능.
     stale = now_utc() - timedelta(hours=2)
     scheduler.modify_job(summary.job_id, next_run_time=stale)
 
-    # legacy 상태 확인 — timezone 이 UTC.
+    # task 00149-2 — 저장 레이어가 cron 잡 timezone 을 KST 로 자동 정정함을 확인.
     before_job = scheduler.get_job(summary.job_id)
-    assert getattr(before_job.trigger, "timezone", None) == UTC
+    assert getattr(before_job.trigger, "timezone", None) == KST, (
+        "JsonSchedulerJobStore 는 cron 잡 trigger 를 항상 KST 로 재구성해야 한다 "
+        "(저장 레이어에서 timezone 컨벤션 강제 — task 00149-2)."
+    )
 
-    # 본 task 의 핵심 호출.
+    # task 00149-1 — 재계산 호출 후 stale next_run_time 이 advance 됨을 검증.
     _recompute_all_jobs_next_run_time(scheduler)
 
-    # KST 로 재구성됐는지 + next_run_time 도 advance 됐는지 함께 검증.
     after_job = scheduler.get_job(summary.job_id)
     assert getattr(after_job.trigger, "timezone", None) == KST
     assert after_job.next_run_time is not None
