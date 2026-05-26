@@ -37,7 +37,7 @@ JOB_NAME_INTERVAL_PREFIX: Final[str] = "interval:"
 # 백업 잡은 항상 1건만 존재한다. 고정 ID 를 사용해 중복 등록을 방지한다.
 JOB_ID_BACKUP: Final[str] = "backup-db"
 # job.name 에 저장할 prefix. 예) "backup-cron:0 3 * * *"
-# _reinterpret_existing_jobs_to_kst 가 이 prefix 로 cron 표현식을 복원한다.
+# _recompute_all_jobs_next_run_time 가 이 prefix 로 cron 표현식을 복원한다.
 JOB_NAME_BACKUP_PREFIX: Final[str] = "backup-cron:"
 
 # ── Daily Report 잡 식별자 (task 00125-7 / Phase A-3) ──────────────────────────
