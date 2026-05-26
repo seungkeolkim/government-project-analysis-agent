@@ -35,6 +35,7 @@ from app.scheduler.constants import (
     JOB_NAME_BACKUP_PREFIX,
     JOB_NAME_CRON_PREFIX,
     JOB_NAME_DAILY_REPORT_PREFIX,
+    JOB_NAME_GC_ORPHAN_PREFIX,
     JOB_NAME_INTERVAL_PREFIX,
     MAX_INTERVAL_HOURS,
     SCHEDULER_JOBS_TABLENAME,
@@ -61,6 +62,11 @@ from app.scheduler.single_instance import (
 # CronTrigger.from_crontab 은 요일 숫자를 변환 없이 넘겨 '1-5'(월~금) 가 화~토로
 # 어긋나므로, 모든 cron trigger 생성은 이 헬퍼를 거치도록 통일한다.
 from app.scheduler.cron import build_cron_trigger
+
+# task 00149-2 — APScheduler 의 기본 SQLAlchemyJobStore(BLOB pickle) 대신
+# 구조화 JSON / cron_expression / 상태 타임스탬프 컬럼화된 자체 jobstore 를 쓴다.
+# 운영자가 sqlite3 직접 조회로 잡 상태를 진단할 수 있게 한다.
+from app.scheduler.jobstore import JsonSchedulerJobStore
 
 # ──────────────────────────────────────────────────────────────
 # 예외
@@ -115,16 +121,19 @@ _scheduler_lock: threading.Lock = threading.Lock()
 def _build_scheduler() -> Any:
     """BackgroundScheduler 를 새로 생성한다.
 
-    SQLAlchemyJobStore 는 ``app.db.session.get_engine()`` 의 엔진을 재사용해
-    같은 SQLite 파일에 scheduler_jobs 테이블을 둔다. alembic 관리 밖이며,
-    APScheduler 가 최초 start 시 ``CREATE TABLE IF NOT EXISTS`` 를 실행한다.
+    task 00149-2 — 잡 직렬화는 ``JsonSchedulerJobStore`` 가 담당한다. 기존
+    APScheduler 의 ``SQLAlchemyJobStore`` 는 ``(id, next_run_time FLOAT,
+    job_state LargeBinary[pickle])`` 3컬럼 BLOB 스키마를 런타임에 자동 생성
+    했지만, 본 task 부터는 Alembic 마이그레이션이 신 스키마를 미리 생성하고
+    본 jobstore 가 그 컬럼들로 잡을 직렬화/역직렬화한다. 운영자가 sqlite3 직접
+    조회로 cron 표현식 / 다음 실행 시각 / 최근 성공·실패 시각을 한 줄 SQL 로
+    확인할 수 있게 된다.
     """
     # 의존성(apscheduler)은 import 가 늦을수록 낫다 — 호환성 문제를 런타임에만 노출.
     # 00025-2 의 'python-multipart 패턴: 선언만 추가, import 는 쓰는 순간에' 와 동일 정책.
-    from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
     from apscheduler.schedulers.background import BackgroundScheduler
 
-    jobstore = SQLAlchemyJobStore(
+    jobstore = JsonSchedulerJobStore(
         engine=get_engine(),
         tablename=SCHEDULER_JOBS_TABLENAME,
     )
@@ -163,63 +172,70 @@ def is_scheduler_running() -> bool:
         return bool(getattr(_scheduler, "running", False))
 
 
-def _reinterpret_existing_jobs_to_kst(scheduler: Any) -> int:
-    """jobstore 에 남아 있는 기존 잡의 trigger timezone 을 KST 로 재해석한다.
+def _recompute_all_jobs_next_run_time(scheduler: Any) -> int:
+    """jobstore 의 모든 잡에 대해 cron/interval trigger 기준으로 ``next_run_time``
+    을 현재 시각 기준으로 강제 재계산한다 (task 00149-1).
 
-    배경 (사용자 원문 task 00040 + 00040-4 guidance):
-        APScheduler 의 ``BackgroundScheduler.timezone`` 을 본 task 에서 UTC →
-        KST 로 변경했다. ``SQLAlchemyJobStore`` 에 직렬화돼 있던 기존 잡들은
-        예전 timezone(UTC) 정보를 담은 trigger 를 그대로 들고 있어, 그대로 두면
-        \"저장 당시 UTC 09:30 = 현재 의도 KST 18:30\" 처럼 9시간 어긋난 시각에
-        실행된다. 본 헬퍼는 trigger.timezone 이 KST 가 아닌 잡을 찾아 같은
-        cron 표현식 / interval 시간으로 KST 기반 trigger 를 재구성하고
-        ``modify_job(trigger=...)`` 로 교체한다. 새 ``next_run_time`` 은
-        APScheduler 가 자동 재계산한다.
+    배경 (사용자 원문 task 00149):
+        APScheduler 의 ``SQLAlchemyJobStore`` 는 ``next_run_time`` 을 **저장된
+        절대 epoch float** 으로 들고 있어, 시스템이 꺼져 있던 동안 그 시각이
+        지나가면 다음 회차로 자동 advance 되지 않는다. 다음 worker 가 떠도 그
+        stale 시각이 그대로 남고, 단일 인스턴스 lock 점유·새 worker reload·일시
+        적 ASGI 종료 등 어떤 이유로든 그 순간 발화가 누락되면 **영구적으로**
+        잡이 멈춘다. 사용자 원문이 진단한 daily-report 09:30 누락 사고가 이
+        패턴이다 — ``select * from scheduler_jobs`` 의 daily-report row 가
+        09:50 시점에도 09:30 epoch 그대로 남아 있었다.
 
-    구현 결정 (guidance 의 옵션 (a) 자동 detect + reschedule 채택):
-        - cron 잡: ``Job.name`` 에 ``JOB_NAME_CRON_PREFIX`` + cron 표현식이 그대로
-          저장돼 있다 (``_job_name_for``). 그 표현식을 다시
-          ``CronTrigger.from_crontab(..., timezone=KST)`` 로 파싱해 새 trigger
-          를 만든다.
+        근본 수정 방향: ``cron 표현식을 source of truth`` 로 보고, 스케줄러가
+        살아나는 모든 순간(=startup)에 **모든 잡의 next_run_time 을 무조건
+        재계산** 한다. 그러면 stale 절대 시각이 발화되지 못한 채 남아 있을
+        구조적 여지 자체가 없어진다.
+
+    재계산 정책 (timezone 동일/상이 모두 한 흐름으로 통합):
+        - cron 잡: ``Job.name`` 에 ``JOB_NAME_*_PREFIX`` + cron 표현식이 저장돼
+          있다 (``_job_name_for``). 그 표현식을 ``build_cron_trigger`` 로 다시
+          파싱해 **KST 기반 새 trigger** 를 만들어 ``reschedule_job`` 에 넘긴다.
+          이렇게 하면 legacy(UTC) timezone 으로 직렬화된 잡도 함께 KST 로 정정
+          되고(=00040-4 의 tz 재해석 책임을 본 함수가 흡수), 동시에
+          ``reschedule_job`` 의 ``trigger.get_next_fire_time(None, now)`` 가
+          호출돼 next_run_time 이 \"now 이후 첫 fire-time\" 으로 자동 advance
+          된다 — 지나간 절대 시각이 자동 보정된다.
         - interval 잡: ``trigger.interval`` (timedelta) 에서 시간을 복원하고
-          ``IntervalTrigger(hours=..., timezone=KST)`` 로 재생성한다. 시간
-          단위로 떨어지지 않는 비표준 interval 은 ``seconds=`` 로 저장한다.
+          ``IntervalTrigger(..., timezone=KST)`` 로 재생성해 같은 패턴으로
+          reschedule_job 한다.
         - Job.name 에 spec 이 없거나 파싱이 실패한 잡, cron/interval 외 trigger
           는 건너뛰고 경고 로그만 남긴다 — 운영자가 수동 재등록해야 함을 알린다.
-        - 자동 detect 를 권장한 이유: 운영자가 재기동 직후에 admin/schedule 탭
-          을 열기 전까지 \"잘못된 시각에 잡이 실행될\" 위험을 코드 자체로 차단.
-          코드 복잡도는 spec 파싱 한 번으로 제한적이다.
 
     ``modify_job(trigger=...)`` 가 아니라 ``reschedule_job(trigger=...)`` 를 쓰는
-    이유: 전자는 trigger 객체만 교체하고 ``next_run_time`` 은 옛 값을 유지한다.
-    후자는 새 trigger 의 ``get_next_fire_time`` 으로 ``next_run_time`` 까지 재
-    계산하므로 본 헬퍼의 의도(\"KST 기준으로 다음 실행 시각을 다시 계산\") 에
-    부합한다.
+    이유: 전자는 trigger 객체만 교체하고 ``next_run_time`` 은 옛 값(=stale 가능)
+    을 유지한다. 후자는 새 trigger 의 ``get_next_fire_time`` 으로 now 이후 첫
+    fire-time 을 다시 계산하므로 \"지나간 시각 자동 보정 + cron 기반 재계산\" 의
+    의도와 정확히 일치한다 (APScheduler 3.x ``BaseScheduler.reschedule_job``
+    구현 참조).
 
     Args:
-        scheduler: 이미 ``start()`` 된 BackgroundScheduler. ``modify_job`` 호출이
-            가능해야 한다.
+        scheduler: 이미 ``start()`` 된 BackgroundScheduler. ``reschedule_job``
+            호출이 가능해야 한다.
 
     Returns:
-        실제로 재해석되어 trigger 가 교체된 잡의 개수. 등록 잡이 0건이거나
-        모두 이미 KST 면 0.
+        실제로 재계산되어 ``next_run_time`` 이 갱신된 잡의 개수. 등록 잡이 0건
+        이거나 모두 reschedule 실패면 0.
     """
     # apscheduler 모듈은 lazy import (호환성 문제를 런타임에만 노출).
     from apscheduler.triggers.cron import CronTrigger
     from apscheduler.triggers.interval import IntervalTrigger
 
-    reinterpreted_count = 0
+    recomputed_count = 0
     for job in scheduler.get_jobs():
         old_trigger = job.trigger
         old_timezone = getattr(old_trigger, "timezone", None)
-        # ZoneInfo 비교 — 같은 키('Asia/Seoul')라면 ``==`` 가 True.
-        if old_timezone == KST:
-            continue
+        old_next_run_time = job.next_run_time
 
         if isinstance(old_trigger, CronTrigger):
             # Job.name 의 prefix 를 벗겨 원본 cron 표현식 복원.
             # scrape 잡: "cron:0 3 * * *", backup 잡: "backup-cron:0 3 * * *",
-            # daily report 잡: "daily-report-cron:0 9 * * 1-5"
+            # daily report 잡: "daily-report-cron:0 9 * * 1-5",
+            # GC 잡: "gc-orphan-cron:0 4 * * *"
             if isinstance(job.name, str) and job.name.startswith(JOB_NAME_CRON_PREFIX):
                 cron_expression = job.name[len(JOB_NAME_CRON_PREFIX):]
             elif isinstance(job.name, str) and job.name.startswith(JOB_NAME_BACKUP_PREFIX):
@@ -228,9 +244,12 @@ def _reinterpret_existing_jobs_to_kst(scheduler: Any) -> int:
             elif isinstance(job.name, str) and job.name.startswith(JOB_NAME_DAILY_REPORT_PREFIX):
                 # task 00125-7 — daily report 잡 prefix 인식
                 cron_expression = job.name[len(JOB_NAME_DAILY_REPORT_PREFIX):]
+            elif isinstance(job.name, str) and job.name.startswith(JOB_NAME_GC_ORPHAN_PREFIX):
+                # task 00041-5 — GC 고아 첨부 잡 prefix 인식
+                cron_expression = job.name[len(JOB_NAME_GC_ORPHAN_PREFIX):]
             else:
                 logger.warning(
-                    "tz 재해석 스킵 — cron job.name 파싱 실패: job_id={} name={!r}",
+                    "next_run_time 재계산 스킵 — cron job.name 파싱 실패: job_id={} name={!r}",
                     job.id, job.name,
                 )
                 continue
@@ -242,7 +261,8 @@ def _reinterpret_existing_jobs_to_kst(scheduler: Any) -> int:
                 new_trigger = build_cron_trigger(cron_expression, timezone=KST)
             except Exception as exc:
                 logger.warning(
-                    "tz 재해석 스킵 — cron 표현식 재파싱 실패: job_id={} expr={!r} err={}",
+                    "next_run_time 재계산 스킵 — cron 표현식 재파싱 실패: "
+                    "job_id={} expr={!r} err={}",
                     job.id, cron_expression, exc,
                 )
                 continue
@@ -258,7 +278,8 @@ def _reinterpret_existing_jobs_to_kst(scheduler: Any) -> int:
                 new_trigger = IntervalTrigger(seconds=total_seconds, timezone=KST)
         else:
             logger.warning(
-                "tz 재해석 스킵 — 지원하지 않는 trigger 종류: job_id={} trigger={!r}",
+                "next_run_time 재계산 스킵 — 지원하지 않는 trigger 종류: "
+                "job_id={} trigger={!r}",
                 job.id, type(old_trigger).__name__,
             )
             continue
@@ -266,24 +287,121 @@ def _reinterpret_existing_jobs_to_kst(scheduler: Any) -> int:
         try:
             # reschedule_job 은 trigger 교체 + next_run_time 재계산을 함께 수행.
             # modify_job 은 trigger 만 갈고 next_run_time 은 옛 값 유지라 부적합.
+            # 이 호출이 본 함수의 핵심 — \"stale 절대 시각 → now 이후 첫
+            # fire-time\" 자동 보정이 trigger.get_next_fire_time(None, now) 으로
+            # 일어난다.
             scheduler.reschedule_job(job.id, trigger=new_trigger)
         except Exception as exc:
             logger.warning(
-                "tz 재해석 실패(reschedule_job 예외): job_id={} err={}",
+                "next_run_time 재계산 실패(reschedule_job 예외): job_id={} err={}",
                 job.id, exc,
             )
             continue
 
-        reinterpreted_count += 1
-        # 재계산된 next_run_time 도 함께 노출해 운영자가 의도된 KST 시각인지
-        # docker logs 에서 즉시 확인할 수 있도록 한다.
+        recomputed_count += 1
+        # 재계산된 next_run_time 을 한 줄에 함께 노출해 운영자가 의도된 KST
+        # 시각인지, 그리고 \"stale 시각 → advance\" 가 실제로 일어났는지를
+        # docker logs 만으로 즉시 진단할 수 있게 한다. acceptance criteria 의
+        # \"docker logs 에서 'APScheduler next_run_time 재계산 완료' 로그가 모든
+        # 잡에 대해 1회씩 찍힌다\" 요건을 충족.
         updated = scheduler.get_job(job.id)
         logger.info(
-            "tz 재해석 완료: job_id={} old_tz={} new_tz=KST next_run_time={}",
-            job.id, old_timezone, getattr(updated, "next_run_time", None),
+            "APScheduler next_run_time 재계산 완료: job_id={} old_tz={} new_tz=KST "
+            "old_next_run_time={} new_next_run_time={}",
+            job.id,
+            old_timezone,
+            old_next_run_time,
+            getattr(updated, "next_run_time", None),
         )
 
-    return reinterpreted_count
+    return recomputed_count
+
+
+def _register_job_run_listener(scheduler: Any) -> None:
+    """잡 실행 이벤트를 jobstore 의 상태 컬럼에 기록하는 listener 를 등록한다.
+
+    task 00149-2 — 운영 가시성 보강. scheduler_jobs 테이블의 ``last_run_at`` /
+    ``last_success_at`` / ``last_fail_at`` / ``last_error_message`` 컬럼을 잡
+    실행 종료 시각에 동기로 채워, 운영자가 sqlite3 직접 조회로 \"마지막 성공
+    실행\" / \"마지막 실패와 에러\" 를 1줄 SQL 로 확인할 수 있게 한다.
+
+    이벤트 처리 (3종):
+        - ``EVENT_JOB_EXECUTED`` → ``record_job_success`` (last_run_at +
+          last_success_at 동시 갱신).
+        - ``EVENT_JOB_ERROR`` → ``record_job_failure`` (last_run_at +
+          last_fail_at + last_error_message 동시 갱신).
+        - ``EVENT_JOB_MISSED`` → ``record_job_failure`` with \"missed\" 메시지
+          — misfire_grace_time 을 넘긴 누락 사고도 fail 흐름으로 기록한다.
+
+    Args:
+        scheduler: 이미 ``start()`` 된 BackgroundScheduler. ``add_listener`` 가
+            가능한 상태여야 한다.
+
+    예외 정책:
+        listener 콜백의 모든 예외는 swallow + ``logger.exception``. 본 listener
+        자체가 실패해도 다음 잡 발사가 막히지 않도록 한다.
+    """
+    # lazy import — apscheduler 의존성을 런타임에만 노출 (다른 함수와 동일 정책).
+    from apscheduler.events import (
+        EVENT_JOB_ERROR,
+        EVENT_JOB_EXECUTED,
+        EVENT_JOB_MISSED,
+    )
+
+    def _listener(event: Any) -> None:
+        """잡 실행 이벤트 1건을 jobstore 컬럼에 반영한다.
+
+        event 는 ``JobExecutionEvent`` (EVENT_JOB_EXECUTED / EVENT_JOB_ERROR /
+        EVENT_JOB_MISSED 공통 base) 이며 ``.code`` / ``.job_id`` / ``.exception``
+        을 갖는다. 본 콜백은 jobstore 의 helper 메서드만 호출하므로 동기 SQL
+        UPDATE 1건만 발급된다 — 잡 함수 본체의 실행 흐름을 차단하지 않는다.
+        """
+        try:
+            jobstore = getattr(scheduler, "_jobstores", {}).get("default")
+            if not isinstance(jobstore, JsonSchedulerJobStore):
+                # 기본 jobstore 가 JsonSchedulerJobStore 가 아니면(테스트 환경
+                # 등) 상태 컬럼 갱신 자체를 스킵한다 — 회귀 안전.
+                return
+
+            if event.code == EVENT_JOB_EXECUTED:
+                jobstore.record_job_success(event.job_id)
+            elif event.code == EVENT_JOB_ERROR:
+                exception = getattr(event, "exception", None)
+                error_message = (
+                    f"{type(exception).__name__}: {exception}"
+                    if exception is not None
+                    else "unknown error"
+                )
+                jobstore.record_job_failure(
+                    event.job_id, error_message=error_message,
+                )
+            elif event.code == EVENT_JOB_MISSED:
+                # misfire_grace_time 초과로 발사조차 못한 케이스. 사용자 원문이
+                # 진단한 누락 시나리오의 일종이라 fail 흐름으로 기록한다.
+                jobstore.record_job_failure(
+                    event.job_id,
+                    error_message="missed: misfire_grace_time 초과로 발사 누락",
+                )
+        except Exception as exc:
+            # listener 자체가 던지는 예외는 swallow — APScheduler 의 다른 잡
+            # 흐름이 막히지 않게 한다. 디버깅용 logger.exception 만 남긴다.
+            logger.exception(
+                "scheduler_jobs 상태 컬럼 갱신 실패(잡 실행 흐름은 정상 유지): "
+                "job_id={} code={} err={}: {}",
+                getattr(event, "job_id", "?"),
+                getattr(event, "code", "?"),
+                type(exc).__name__,
+                exc,
+            )
+
+    scheduler.add_listener(
+        _listener,
+        EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED,
+    )
+    logger.debug(
+        "scheduler_jobs 상태 컬럼 listener 등록 완료 "
+        "(EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED)"
+    )
 
 
 def start() -> None:
@@ -292,8 +410,13 @@ def start() -> None:
     웹 startup 시점에 ``create_app`` 이 호출한다. 스케줄러가 혼자 떠서 잡을
     감시·실행하고, 실제 스크래퍼 기동은 job_runner.scheduled_scrape 를 통한다.
 
-    task 00040-4 — start 직후 jobstore 의 기존 잡을 KST 기준으로 재해석한다
-    (``_reinterpret_existing_jobs_to_kst`` 참조). 등록 잡이 0건이면 no-op.
+    task 00149-1 — start 직후 jobstore 의 모든 잡에 대해 cron/interval 표현식
+    기준으로 ``next_run_time`` 을 강제 재계산한다
+    (``_recompute_all_jobs_next_run_time`` 참조). 이 호출이 \"지나간 절대 시각으로
+    저장된 next_run_time 이 영구 누락을 일으키는\" 구조적 결함의 근본 차단점이다.
+    timezone 동일 여부와 무관하게 모든 잡을 ``reschedule_job(trigger=...)`` 으로
+    재계산하므로, task 00040-4 의 \"UTC 로 직렬화된 legacy 잡 KST 재해석\" 책임도
+    본 호출이 흡수한다. 등록 잡이 0건이면 no-op.
 
     task 00131 — cron 중복 실행 버그 수정. 스케줄러를 실제로 띄우기 전에
     프로세스 수준 단일 인스턴스 flock 을 시도한다. lock 획득에 실패하면(=다른
@@ -332,21 +455,30 @@ def start() -> None:
         os.getpid(), SCHEDULER_JOBS_TABLENAME, DEFAULT_MISFIRE_GRACE_TIME_SEC,
     )
 
-    # jobstore 의 기존 잡 trigger 를 KST 기준으로 자동 재해석.
+    # task 00149-2 — 잡 실행 결과를 jobstore 의 last_run_at / last_success_at /
+    # last_fail_at / last_error_message 컬럼에 기록하는 listener 를 등록한다.
+    # 운영자가 sqlite3 직접 조회로 \"마지막에 잡이 언제 돌았고 성공했는지\" 를
+    # 즉시 확인할 수 있게 한다. listener 자체가 던지는 예외는 swallow 해
+    # APScheduler 의 다른 잡 발사 흐름을 막지 않는다 (콜백 안 try/except).
+    _register_job_run_listener(scheduler)
+
+    # task 00149-1 — jobstore 의 모든 잡의 next_run_time 을 cron/interval 표현식
+    # 기준으로 현재 시각 이후 첫 fire-time 으로 강제 재계산. \"지나간 절대 시각\"
+    # 으로 인한 영구 누락 차단의 핵심 호출.
     try:
-        reinterpreted = _reinterpret_existing_jobs_to_kst(scheduler)
+        recomputed = _recompute_all_jobs_next_run_time(scheduler)
     except Exception as exc:
-        # 재해석 실패가 스케줄러 기동 자체를 망가뜨리지 않도록 방어. 운영자는
+        # 재계산 실패가 스케줄러 기동 자체를 망가뜨리지 않도록 방어. 운영자는
         # admin/schedule 탭의 next_run_time 을 보고 수동 재등록할 수 있다.
         logger.exception(
-            "APScheduler tz 재해석 실패(스킵): {}: {}",
+            "APScheduler next_run_time 재계산 실패(스킵): {}: {}",
             type(exc).__name__, exc,
         )
-        reinterpreted = 0
-    if reinterpreted:
+        recomputed = 0
+    if recomputed:
         logger.info(
-            "APScheduler tz 재해석: {}건의 기존 잡을 KST 기준으로 재계산",
-            reinterpreted,
+            "APScheduler next_run_time 재계산: {}건의 잡을 현재 시각 기준으로 갱신",
+            recomputed,
         )
 
 
@@ -673,8 +805,9 @@ GC_ORPHAN_DEFAULT_CRON: str = "0 4 * * *"
 # job_id prefix — cron / interval 과 별개로 GC 잡임을 식별하기 위함.
 JOB_ID_PREFIX_GC_ORPHAN: str = "gc-orphan"
 
-# job.name prefix — list_schedules 가 trigger_spec 을 복원하는 패턴.
-JOB_NAME_GC_ORPHAN_PREFIX: str = "gc-orphan-cron:"
+# task 00149-2 — JOB_NAME_GC_ORPHAN_PREFIX 는 jobstore 가 cron 표현식 복원에
+# 사용하므로 ``app/scheduler/constants.py`` 로 이전됐다. 본 모듈은 그 상수를
+# import 해 재노출만 한다 (외부 호환성 유지).
 
 
 def add_gc_orphan_cron_schedule(

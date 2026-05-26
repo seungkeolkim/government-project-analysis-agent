@@ -37,7 +37,7 @@ JOB_NAME_INTERVAL_PREFIX: Final[str] = "interval:"
 # 백업 잡은 항상 1건만 존재한다. 고정 ID 를 사용해 중복 등록을 방지한다.
 JOB_ID_BACKUP: Final[str] = "backup-db"
 # job.name 에 저장할 prefix. 예) "backup-cron:0 3 * * *"
-# _reinterpret_existing_jobs_to_kst 가 이 prefix 로 cron 표현식을 복원한다.
+# _recompute_all_jobs_next_run_time 가 이 prefix 로 cron 표현식을 복원한다.
 JOB_NAME_BACKUP_PREFIX: Final[str] = "backup-cron:"
 
 # ── Daily Report 잡 식별자 (task 00125-7 / Phase A-3) ──────────────────────────
@@ -49,6 +49,14 @@ JOB_ID_DAILY_REPORT: Final[str] = "daily-report"
 # job.name 에 저장할 prefix. 예) "daily-report-cron:0 9 * * 1-5"
 JOB_NAME_DAILY_REPORT_PREFIX: Final[str] = "daily-report-cron:"
 
+# ── GC 고아 첨부 파일 잡 식별자 (task 00041-5) ───────────────────────────────
+# Phase 5a 의 고아 첨부 파일 GC 잡. service.py 의 ``add_gc_orphan_cron_schedule``
+# 가 등록하고, ``_recompute_all_jobs_next_run_time`` / ``JsonSchedulerJobStore``
+# 가 cron 표현식 복원에 사용한다. service 모듈 후반부에 정의돼 있던 값을
+# constants.py 로 옮긴 이유는 task 00149-2 의 신규 jobstore 가 본 prefix 를
+# 참조해야 하는데 service.py 와 순환 import 가 생기기 때문이다.
+JOB_NAME_GC_ORPHAN_PREFIX: Final[str] = "gc-orphan-cron:"
+
 
 __all__ = [
     "DEFAULT_MISFIRE_GRACE_TIME_SEC",
@@ -59,6 +67,7 @@ __all__ = [
     "JOB_NAME_BACKUP_PREFIX",
     "JOB_NAME_CRON_PREFIX",
     "JOB_NAME_DAILY_REPORT_PREFIX",
+    "JOB_NAME_GC_ORPHAN_PREFIX",
     "JOB_NAME_INTERVAL_PREFIX",
     "MAX_INTERVAL_HOURS",
     "SCHEDULER_JOBS_TABLENAME",
