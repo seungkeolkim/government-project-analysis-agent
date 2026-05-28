@@ -181,10 +181,11 @@ def _apply_canonical(
 
     매칭 우선순위 (task 00151 이후):
       1. canonical_key 정확일치 — 기존 동일 키 CanonicalProject 사용.
-      2. cross-source fallback (official scheme 한정) — 동일 ancmNo prefix 의
-         다른 source 1건이 이미 canonical_group 을 갖고 있고, title prefix 가
-         일치하면 그 group 을 공유. 173/174 같은 same-source 다중 sub-business
-         케이스는 매칭 거부.
+      2. cross-source fallback (official scheme 한정) — 동일 ancmNo prefix 아래
+         NTIS suffix 절단 title 이 본 row 와 동치인 cross-source 후보가 정확히 1건
+         이고, 같은 source 의 동치 title 충돌(multi-sub-business under umbrella) 이
+         없을 때 그 partner 의 canonical_group_id 를 공유. 173/174 같은 same-source
+         다중 sub-business 케이스는 후보가 0건이 되어 자연 거부된다.
       3. 신규 CanonicalProject 생성.
 
     Args:
@@ -272,14 +273,34 @@ def _find_cross_source_canonical_group(
     task 00151: 173/174 false-positive 수정 이후, canonical_key 는 NTIS suffix 를
     그대로 보존하므로 IRIS title 과 NTIS title (suffix 부착) 이 같은 과제여도
     canonical_key 자체는 다르다. 이때 동일 ancmNo prefix(`official:<X>::`) 를
-    공유하는 다른 source 의 row 가 정확히 1건이고 NTIS suffix 절단 형태로 title
-    prefix 가 일치하면 같은 과제로 보고 group 을 공유한다.
+    공유하는 다른 source 의 row 중 'NTIS suffix 절단 title 동치' 인 후보가 정확히
+    1건일 때만 같은 과제로 보고 group 을 공유한다.
 
-    매칭 거부 조건 (sub-business 분기 가능성):
-      - 같은 source_type 의 다른 announcement 가 같은 ancmNo prefix 아래 이미 있다.
-        → 173/174 같은 NTIS 다중 sub-business 케이스가 잘못 합쳐지지 않도록 막는다.
-      - cross-source 쪽 후보가 2건 이상이다.
-      - title prefix 일치하지 않는다 (NTIS suffix 절단 후에도 본문이 다름).
+    매칭 거부 조건:
+      1. ``same_source_title_matches`` 가 비어 있지 않다 — 동일 source_type 의 다른
+         row 가 *같은 strip-title* 을 가졌다는 뜻은 동일 ancmNo 아래 동일 컨텐츠로
+         보이는 같은 source row 가 둘 이상 존재한다는 뜻이므로, 어느 한쪽으로
+         cross-source 와 합치는 결정이 모호하다. (예: 한 IRIS umbrella 가 2건의 NTIS
+         sub-business 와 모두 title-strip 일치하는 가상의 케이스 — 이 때 NTIS 둘
+         사이의 sub-business 구분이 사라지는 false-merge 를 피하기 위해 반대편 NTIS
+         처리 시점에 same-source title 충돌을 감지해 매칭 거부.)
+      2. ``cross_source_title_matches`` 의 개수가 1 이 아니다 — 0건이면 매칭 대상
+         자체가 없고, 2건 이상이면 어떤 cross-source 와 합쳐야 할지 모호하다.
+      3. cross-source 후보의 ``canonical_group_id`` 가 아직 None — 동일 트랜잭션
+         이전 처리 순서에서 partner 가 group 을 받지 못한 상태이므로, 이번에는
+         넘기고 partner 측이 본 row 를 candidate 로 보면서 매칭한다 (대칭성).
+
+    title-strip 동치성은 ``_titles_match_via_ntis_suffix`` 가 판정한다. NTIS suffix
+    ``_(YYYY)<사업명>`` 절단 후 NFKC + 공백 제거 결과가 같으면 같은 과제로 본다.
+
+    173/174 사고 대상은 cross_source_title_matches 가 0건이라 자연스럽게 거부된다.
+    (동일 ancmNo 아래 IRIS 가 없고 NTIS 끼리만 있는 케이스.)
+    그룹 17 / 121 같은 1:1 cross-source 묶음은 cross_source_title_matches=[partner]
+    이고 same_source_title_matches=[] 라서 그대로 묶인다.
+    그룹 121 변형(IRIS=133 + NTIS=156 -플랫폼형 + NTIS=162 -소재HUB) 같은 1:多 케이스
+    에서는 ann 156 의 title strip 이 ann 133 과 다르므로 same_source_title_matches
+    에 끼지 않고, ann 162 가 ann 133 과 정확히 1건 cross_source title 매칭이 되어
+    이 쌍만 그대로 묶인다. ann 156 은 매칭 후보가 없어 자기 group 으로 떨어진다.
 
     Args:
         session:                호출자 세션.
@@ -311,24 +332,33 @@ def _find_cross_source_canonical_group(
     if not candidates:
         return None
 
-    same_source = [c for c in candidates if c.source_type == current_announcement.source_type]
-    cross_source = [c for c in candidates if c.source_type != current_announcement.source_type]
+    # title-strip 기준으로 후보를 분류. same-source/cross-source 각각 'strip-title
+    # 이 나와 동치인 후보' 만 추린다. 비-동치 후보는 다른 과제이므로 본 매칭
+    # 결정에 영향을 주지 않는다.
+    same_source_title_matches = [
+        c
+        for c in candidates
+        if c.source_type == current_announcement.source_type
+        and _titles_match_via_ntis_suffix(current_title, c.title or "")
+    ]
+    cross_source_title_matches = [
+        c
+        for c in candidates
+        if c.source_type != current_announcement.source_type
+        and _titles_match_via_ntis_suffix(current_title, c.title or "")
+    ]
 
-    # same source 가 이미 있으면 sub-business 분기 가능성 — 매칭 거부.
-    # (173/174 case: NTIS 가 동일 ancmNo 아래 별개 sub-business 2건을 게시.)
-    if same_source:
+    # same-source 가 같은 strip-title 을 가졌다 — multi-sub-business under one umbrella
+    # 가능성. 어느 한쪽으로 cross-source 묶기 결정이 모호하므로 거부.
+    if same_source_title_matches:
         return None
 
-    # cross-source 후보는 정확히 1건일 때만 매칭 (모호한 다대일 매칭 차단).
-    if len(cross_source) != 1:
+    # cross-source 도 strip-title 일치가 정확히 1건일 때만 매칭.
+    if len(cross_source_title_matches) != 1:
         return None
 
-    partner = cross_source[0]
+    partner = cross_source_title_matches[0]
     if partner.canonical_group_id is None:
-        return None
-
-    # title prefix 동치성 검사 — NTIS suffix 절단한 형태가 같은 과제임을 확인.
-    if not _titles_match_via_ntis_suffix(current_title, partner.title or ""):
         return None
 
     return session.get(CanonicalProject, partner.canonical_group_id)

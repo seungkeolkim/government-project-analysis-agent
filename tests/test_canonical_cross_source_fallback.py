@@ -70,6 +70,14 @@ _GROUP_152_NTIS_TITLE_174 = (
     "_(2026)글로벌공급망첨단소재기술개발-나노커넥트 공고"
 )
 
+# 그룹 121 변형 — 동일 ancmNo 아래 IRIS umbrella 1건 + NTIS sub-business 2건.
+# 운영 DB 실측: ann 133 (IRIS umbrella), ann 156 (NTIS, "-플랫폼형" suffix
+# 는 NTIS pattern 이 아님 → strip 결과가 IRIS 와 다름), ann 162 (NTIS, "_(YYYY)X"
+# NTIS suffix 부착 → strip 결과가 IRIS 와 동치).
+_GROUP_121_VARIANT_NTIS_TITLE_PLATFORM = (
+    "2026년도 나노소재기술개발사업 신규과제 3차 재공모-플랫폼형"
+)
+
 
 def _payload(
     *,
@@ -240,6 +248,73 @@ def test_same_source_subbusiness_announcements_get_separate_groups(
     )
     assert ann_173.canonical_key != ann_174.canonical_key, (
         "173/174 의 canonical_key 본문(NTIS suffix 보존) 자체가 달라야 한다."
+    )
+
+
+def test_iris_umbrella_with_ntis_subbusinesses_preserves_matching_pair_only(
+    db_session: Session,
+) -> None:
+    """동일 ancmNo 아래 IRIS umbrella 1건 + NTIS sub-business 2건 케이스.
+
+    운영 DB 실측 케이스(ann 133 / 156 / 162, ancmNo 2026-0601호) 회귀.
+
+    - IRIS title 과 NTIS title strip 이 동치인 한 쌍(133, 162) 은 같은 group 으로 유지.
+    - 다른 NTIS sub-business(156, "-플랫폼형" suffix — NTIS pattern 아님) 는
+      IRIS umbrella 와 title strip 이 다르므로 cross-source 매칭 후보에서
+      배제되고, 자기 group 으로 떨어진다.
+
+    같은 strip 을 공유하는 same-source 가 없으므로(156 strip ≠ 162 strip ≠ IRIS strip)
+    matching pair 만 안전히 유지된다.
+    """
+    iris_result = upsert_announcement(
+        db_session,
+        _payload(
+            source_type="IRIS",
+            source_announcement_id="IRIS-0601",
+            title=_GROUP_121_IRIS_TITLE,
+            ancm_no=_GROUP_121_ANCM_NO,
+        ),
+    )
+    ntis_platform_result = upsert_announcement(
+        db_session,
+        _payload(
+            source_type="NTIS",
+            source_announcement_id="NTIS-0601-platform",
+            title=_GROUP_121_VARIANT_NTIS_TITLE_PLATFORM,
+            ancm_no=_GROUP_121_ANCM_NO,
+        ),
+    )
+    ntis_hub_result = upsert_announcement(
+        db_session,
+        _payload(
+            source_type="NTIS",
+            source_announcement_id="NTIS-0601-hub",
+            title=_GROUP_121_NTIS_TITLE,
+            ancm_no=_GROUP_121_ANCM_NO,
+        ),
+    )
+
+    iris_group = iris_result.announcement.canonical_group_id
+    platform_group = ntis_platform_result.announcement.canonical_group_id
+    hub_group = ntis_hub_result.announcement.canonical_group_id
+
+    assert iris_group is not None
+    assert platform_group is not None
+    assert hub_group is not None
+
+    # IRIS umbrella 와 strip 이 일치하는 NTIS(-소재HUB) 는 같은 group.
+    assert iris_group == hub_group, (
+        "IRIS umbrella 와 strip-title 이 동치인 NTIS(-소재HUB) 는 같은 group 이어야 한다. "
+        f"(IRIS={iris_group}, NTIS-hub={hub_group})"
+    )
+    # strip 이 다른 NTIS(-플랫폼형) 는 IRIS umbrella 와 별개 group.
+    assert platform_group != iris_group, (
+        "IRIS strip 과 다른 NTIS(-플랫폼형) 는 별개 group 이어야 한다. "
+        f"(IRIS={iris_group}, NTIS-platform={platform_group})"
+    )
+    # 두 NTIS sub-business 도 서로 다른 group.
+    assert platform_group != hub_group, (
+        "서로 다른 NTIS sub-business 는 서로 다른 group 이어야 한다."
     )
 
 
