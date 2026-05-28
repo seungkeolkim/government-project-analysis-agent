@@ -77,7 +77,7 @@ from loguru import logger
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session, selectinload
 
-from app.canonical import compute_canonical_key
+from app.canonical import compute_canonical_key, strip_ntis_business_suffix
 from app.db.models import (
     Announcement,
     AnnouncementStatus,
@@ -179,6 +179,14 @@ def _apply_canonical(
     예외 격리: 내부 오류 발생 시 canonical_group_id=NULL 을 유지한 채 경고 로그만 남긴다.
     공고 단위 UPSERT 흐름이 canonical 실패로 중단되지 않도록 보장한다.
 
+    매칭 우선순위 (task 00151 이후):
+      1. canonical_key 정확일치 — 기존 동일 키 CanonicalProject 사용.
+      2. cross-source fallback (official scheme 한정) — 동일 ancmNo prefix 의
+         다른 source 1건이 이미 canonical_group 을 갖고 있고, title prefix 가
+         일치하면 그 group 을 공유. 173/174 같은 same-source 다중 sub-business
+         케이스는 매칭 거부.
+      3. 신규 CanonicalProject 생성.
+
     Args:
         session:       호출자 세션 (flush 포함, commit 은 호출자 책임).
         announcement:  canonical 필드를 적용할 Announcement 인스턴스.
@@ -195,10 +203,25 @@ def _apply_canonical(
             deadline_at=clean_payload.get("deadline_at"),
         )
 
-        # canonical_key 로 기존 CanonicalProject 를 조회한다.
+        # 1. canonical_key 정확일치 매칭.
         cp = session.execute(
             select(CanonicalProject).where(CanonicalProject.canonical_key == result.canonical_key)
         ).scalar_one_or_none()
+
+        match_source = "exact" if cp is not None else None
+
+        # 2. cross-source fallback — official scheme 에서만 적용.
+        #    동일 ancmNo prefix(`official:<normalized_ancm_no>::`) 의 다른 source
+        #    announcement 가 1건이고 title prefix 가 일치하면 그 group 공유.
+        if cp is None and result.canonical_scheme == "official":
+            cp = _find_cross_source_canonical_group(
+                session,
+                current_announcement=announcement,
+                current_canonical_key=result.canonical_key,
+                current_title=clean_payload.get("title") or "",
+            )
+            if cp is not None:
+                match_source = "cross_source_fallback"
 
         if cp is None:
             # 신규 canonical group 생성 — representative 정보는 최초 수집 시각 기준으로 저장.
@@ -218,7 +241,8 @@ def _apply_canonical(
             )
         else:
             logger.debug(
-                "canonical 기존 그룹 매칭: key={} group_id={}",
+                "canonical 기존 그룹 매칭({}): key={} group_id={}",
+                match_source,
                 result.canonical_key,
                 cp.id,
             )
@@ -234,6 +258,103 @@ def _apply_canonical(
             announcement.id,
             exc,
         )
+
+
+def _find_cross_source_canonical_group(
+    session: Session,
+    *,
+    current_announcement: Announcement,
+    current_canonical_key: str,
+    current_title: str,
+) -> CanonicalProject | None:
+    """동일 ancmNo prefix 의 cross-source 짝을 찾아 canonical_group 을 공유한다.
+
+    task 00151: 173/174 false-positive 수정 이후, canonical_key 는 NTIS suffix 를
+    그대로 보존하므로 IRIS title 과 NTIS title (suffix 부착) 이 같은 과제여도
+    canonical_key 자체는 다르다. 이때 동일 ancmNo prefix(`official:<X>::`) 를
+    공유하는 다른 source 의 row 가 정확히 1건이고 NTIS suffix 절단 형태로 title
+    prefix 가 일치하면 같은 과제로 보고 group 을 공유한다.
+
+    매칭 거부 조건 (sub-business 분기 가능성):
+      - 같은 source_type 의 다른 announcement 가 같은 ancmNo prefix 아래 이미 있다.
+        → 173/174 같은 NTIS 다중 sub-business 케이스가 잘못 합쳐지지 않도록 막는다.
+      - cross-source 쪽 후보가 2건 이상이다.
+      - title prefix 일치하지 않는다 (NTIS suffix 절단 후에도 본문이 다름).
+
+    Args:
+        session:                호출자 세션.
+        current_announcement:   매칭 대상 announcement (id 가 None 일 수 있음 —
+                                INSERT flush 전에 호출되는 경우 같은 row 가 후보로
+                                딸려 오지 않도록 id 비교는 가드만 한다).
+        current_canonical_key:  계산된 canonical_key (`official:...::...`).
+        current_title:          현재 announcement 의 원본 title.
+
+    Returns:
+        매칭된 CanonicalProject 또는 None.
+    """
+    # canonical_key 에서 ancmNo prefix(`official:<normalized_ancm_no>::`) 만 추출.
+    # 구분자 `::` 는 ancmNo 와 title 사이에서 정확히 1회 등장 (canonical.py 보증).
+    separator_index = current_canonical_key.find("::")
+    if separator_index < 0:
+        return None
+    ancm_no_prefix = current_canonical_key[: separator_index + len("::")]
+
+    # 동일 ancmNo prefix 의 다른 is_current=True announcement 들을 조회.
+    candidates_stmt = select(Announcement).where(
+        Announcement.is_current.is_(True),
+        Announcement.canonical_key.like(f"{ancm_no_prefix}%"),
+    )
+    if current_announcement.id is not None:
+        candidates_stmt = candidates_stmt.where(Announcement.id != current_announcement.id)
+
+    candidates = list(session.execute(candidates_stmt).scalars().all())
+    if not candidates:
+        return None
+
+    same_source = [c for c in candidates if c.source_type == current_announcement.source_type]
+    cross_source = [c for c in candidates if c.source_type != current_announcement.source_type]
+
+    # same source 가 이미 있으면 sub-business 분기 가능성 — 매칭 거부.
+    # (173/174 case: NTIS 가 동일 ancmNo 아래 별개 sub-business 2건을 게시.)
+    if same_source:
+        return None
+
+    # cross-source 후보는 정확히 1건일 때만 매칭 (모호한 다대일 매칭 차단).
+    if len(cross_source) != 1:
+        return None
+
+    partner = cross_source[0]
+    if partner.canonical_group_id is None:
+        return None
+
+    # title prefix 동치성 검사 — NTIS suffix 절단한 형태가 같은 과제임을 확인.
+    if not _titles_match_via_ntis_suffix(current_title, partner.title or ""):
+        return None
+
+    return session.get(CanonicalProject, partner.canonical_group_id)
+
+
+def _titles_match_via_ntis_suffix(title_a: str, title_b: str) -> bool:
+    """두 title 이 NTIS suffix 절단 후 prefix 매칭으로 동일 과제인지 판정한다.
+
+    NTIS 통합공고는 `<원본 공고명> _(YYYY)<사업명>` 패턴을 띤다. IRIS title 은
+    suffix 가 없는 prefix 부분만 게시된다. 따라서 두 title 의 `strip_ntis_business_suffix`
+    결과 (NFKC + suffix 절단 + 공백 제거) 가 같으면 같은 과제로 본다.
+
+    엄격한 정확일치만 허용한다 — 한쪽이 다른 쪽의 부분문자열인 것만으로는 부족
+    (수동 부분 일치는 false-positive 위험). NTIS suffix 패턴이 둘 다 없거나
+    한쪽만 있는 경우도 절단 결과 비교 로직이 자연스럽게 처리한다.
+
+    Args:
+        title_a: 비교 대상 title 1.
+        title_b: 비교 대상 title 2.
+
+    Returns:
+        suffix 절단·공백 제거 후 두 정규화 결과가 같으면 True.
+    """
+    stripped_a = strip_ntis_business_suffix(title_a)
+    stripped_b = strip_ntis_business_suffix(title_b)
+    return bool(stripped_a) and stripped_a == stripped_b
 
 
 @dataclass

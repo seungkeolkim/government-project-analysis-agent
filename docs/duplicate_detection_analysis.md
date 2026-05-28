@@ -416,6 +416,22 @@ fuzzy scheme (ancmNo 부재 시 — 현행 그대로):
 > 재계산 완료됐다. 본 문서는 결정의 **근거 자료** 로 보존된다. 현재 canonical 키 포맷·정규화 규칙은
 > `docs/canonical_identity_design.md §4-1 / §11-6` 와 `app/canonical.py` 가 source of truth 다.
 
+> **task 00151 후속 갱신 (2026-05-28)**: §5-1 의 NTIS suffix 정규화(`\s*_\([0-9]{4}\).*$`
+> 무조건 절단)는 추가 false-positive 의 원인이 되어 제거되었다. 같은 ancmNo
+> `과학기술정보통신부 공고 제2026-0627호` 아래 NTIS 가 두 sub-business 공고를 별도 row 로
+> 게시한 경우(ann 173 = `_(2026)국가전략기술미래소재기술개발(미래소재) 공고`, ann 174 =
+> `_(2026)글로벌공급망첨단소재기술개발-나노커넥트 공고`) suffix 가 sub-business 식별자
+> 역할을 하므로 무조건 절단하면 서로 다른 공고가 같은 canonical_key 로 합쳐졌다.
+>
+> 새 정책은 **canonical_key 본문은 full title (suffix 보존)** 로 두고, IRIS↔NTIS
+> cross-source 매칭(예: 그룹 17 ann 17+35, 그룹 121 ann 133+162) 은
+> `app/db/repository.py::_find_cross_source_canonical_group` 의 fallback 단계가 담당한다.
+> fallback 은 동일 ancmNo prefix 아래 (a) same source_type 다른 row 가 없고, (b)
+> cross-source 후보가 정확히 1건이며, (c) NTIS suffix 절단 후 title 이 동치일 때만
+> partner 의 canonical_group_id 를 공유한다. 173/174 처럼 same-source 다중 sub-business
+> 가 등장하면 (a) 가드로 매칭이 거부되어 분리가 보장된다. 자세한 사양은
+> `docs/canonical_identity_design.md §4-1 / §4-1b / §11-7`.
+
 ---
 
 ## 9. 참고
