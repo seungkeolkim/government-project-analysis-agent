@@ -4,10 +4,10 @@
 결정적 단위 테스트로 고정한다.
 
 1. **false-positive 분리** — 동일 공고번호 + 다른 공고명 인 경우 서로 다른
-   canonical_key 가 나와야 한다 (분석 §3-2 group 5, 25).
+   canonical_key 가 나와야 한다 (분석 §3-2 group 5, 25; task 00151 에서 추가된
+   173/174 NTIS sub-business 케이스).
 2. **cross-source 유지** — 동일 공고번호 + 동일/등가 공고명 인 경우 같은
-   canonical_key 가 나와야 한다 (분석 §3-2 group 16, 17, 18, 20, 그리고 NTIS
-   suffix 정규화로 매칭되는 group 15).
+   canonical_key 가 나와야 한다 (분석 §3-2 group 16, 17, 18, 20).
 
 두 입력의 canonical_key 가 같은지/다른지를 비교하는 형태로 작성하여
 title 정규화의 세부 변경(예: 추가 정규식)에 강건하게 한다. 단, 한 건은
@@ -15,6 +15,18 @@ title 정규화의 세부 변경(예: 추가 정규식)에 강건하게 한다. 
 포맷의 회귀를 잡는다.
 
 ancmNo 변이는 분석 §4-1 표에 기재된 원문을 그대로 사용한다.
+
+task 00151 변경 노트 (2026-05-28):
+  이전 단위 테스트의 ``group_15_iris_ntis_large_accelerator_with_ntis_suffix``
+  케이스는 NTIS suffix(`_(YYYY)<사업명>`) 절단으로 IRIS title 과 NTIS title 의
+  canonical_key 가 같아지는지를 검사했다. 그러나 이 절단이 173/174 처럼
+  동일 ancmNo 아래 별개 NTIS sub-business 를 잘못 합치는 false-positive 의
+  원인이었다. 새 로직(`app/canonical.py::_normalize_official_title`) 은 suffix
+  를 보존하므로 두 입력의 canonical_key 자체는 다르고, 같은 그룹으로의 매칭
+  은 `app/db/repository.py::_apply_canonical` 의 cross-source fallback 이
+  담당한다. 본 단위 테스트에서는 ``group_15`` 케이스를 SAME_KEY_CASES 에서
+  제거하고, ``test_cross_source_fallback`` 통합 테스트가 동등 의도를 더
+  엄격하게(같은 canonical_group_id 인지) 검증한다.
 """
 
 from __future__ import annotations
@@ -102,14 +114,6 @@ SAME_KEY_CASES: list[tuple[str, str, str, str, str]] = [
         "2026년도 가속기핵심기술개발사업 신규과제 공고",
     ),
     (
-        # 분석 §5-1, §3-2 group 15. NTIS suffix '_(2026)<사업명>' 절단으로 매칭.
-        "group_15_iris_ntis_large_accelerator_with_ntis_suffix",
-        "과학기술정보통신부 공고 제2026 -0485호",
-        "2026년도 대형가속기 기술개발·진흥 지원체계 구축 신규과제 재공모 ",
-        "과학기술정보통신부 공고 제2026 -0485호",
-        "2026년도 대형가속기 기술개발·진흥 지원체계 구축 신규과제 재공모 _(2026)2026년도 대형가속기정책센터 신규과제 재공모",
-    ),
-    (
         # 분석 §5-2, §3-2 group 20. IRIS 측 title 의 leading whitespace 가 정규화로 흡수.
         "group_20_leading_whitespace_normalized",
         "과학기술정보통신부 공고 제2026-0444호",
@@ -168,6 +172,19 @@ _GROUP_25_TITLE_GANGWON_1_2 = "2026년도 강원 1-2 신규과제 공고"
 _GROUP_25_TITLE_GANGWON_4_1 = "2026년도 강원 4-1 신규과제 공고"
 _GROUP_25_TITLE_GANGWON_5 = "2026년도 강원 5 신규과제 공고"
 
+# group 152 (task 00151 추적 대상): 동일 ancmNo 아래 NTIS 가 두 개의 sub-business
+# 공고를 별도 row 로 게시한 케이스. title 말미의 '_(YYYY)<사업명>' 부분이
+# sub-business 식별자이므로 두 입력은 서로 다른 canonical_key 를 가져야 한다.
+_GROUP_152_ANCM_NO = "과학기술정보통신부 공고 제2026-0627호"
+_GROUP_152_TITLE_173 = (
+    "2026년도 나노소재기술개발사업 신규과제 4차 재공모"
+    "_(2026)국가전략기술미래소재기술개발(미래소재) 공고"
+)
+_GROUP_152_TITLE_174 = (
+    "2026년도 나노소재기술개발사업 신규과제 4차 재공모"
+    "_(2026)글로벌공급망첨단소재기술개발-나노커넥트 공고"
+)
+
 # (case_id, ancm_no_a, title_a, ancm_no_b, title_b)
 DIFFERENT_KEY_CASES: list[tuple[str, str, str, str, str]] = [
     (
@@ -220,6 +237,17 @@ DIFFERENT_KEY_CASES: list[tuple[str, str, str, str, str]] = [
         _GROUP_25_TITLE_GANGWON_4_1,
         _GROUP_25_ANCM_NO,
         _GROUP_25_TITLE_GANGWON_5,
+    ),
+    (
+        # task 00151 — 173/174 false-positive. 동일 ancmNo 아래 NTIS 가 별도
+        # row 로 게시한 두 sub-business 가 절대 같은 canonical_key 로 합쳐지지
+        # 않도록 고정한다. (이전 _NTIS_TITLE_SUFFIX 절단 로직이 두 입력을
+        # 잘못 합쳤다.)
+        "group_152_ntis_subbusiness_nanonconnect_vs_misojae",
+        _GROUP_152_ANCM_NO,
+        _GROUP_152_TITLE_173,
+        _GROUP_152_ANCM_NO,
+        _GROUP_152_TITLE_174,
     ),
 ]
 

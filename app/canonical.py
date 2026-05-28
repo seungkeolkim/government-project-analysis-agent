@@ -97,8 +97,22 @@ _FUZZY_TITLE_MAX_LEN = 50
 
 # NTIS 통합공고가 제목 말미에 부착하는 사업명 suffix 패턴.
 # 예) '... 신규과제 재공모 _(2026)2026년도 대형가속기정책센터 신규과제 재공모'
-# leading `\s*` 가 매칭되어야 하므로 NFKC 직후, 공백 전체 제거 이전 단계에 적용한다
-# (분석 §5-1, §8-3 참조).
+# leading `\s*` 가 매칭되어야 하므로 NFKC 직후, 공백 전체 제거 이전 단계에 적용한다.
+#
+# task 00151 변경 (2026-05-28):
+#   원래 _normalize_official_title 이 이 패턴을 무조건 절단하여 canonical_key 본문
+#   에서 suffix 부분을 제거했다. 그러나 NTIS 가 동일 ancmNo 아래 서로 다른
+#   sub-business 공고를 별도 row 로 게시하는 케이스(ann 173/174 — ancmNo
+#   2026-0627호 아래 '국가전략기술미래소재기술개발(미래소재)' vs
+#   '글로벌공급망첨단소재기술개발-나노커넥트')에서는 suffix 가 sub-business 식별자
+#   역할을 하므로 절단하면 서로 다른 공고가 같은 canonical_key 로 잘못 묶인다.
+#
+#   현재 canonical_key 합성에서는 이 패턴을 **절단하지 않는다** — full title 을
+#   그대로 사용해 sub-business 별로 분리되는 결정론적 키를 만든다. cross-source
+#   매칭(IRIS title prefix + NTIS title with suffix 가 동일 과제인 케이스)은
+#   `app/db/repository.py::_apply_canonical` 의 fallback 매칭 분기가 담당한다.
+#   여기서는 fallback 매칭의 prefix 비교 헬퍼(`strip_ntis_business_suffix`) 가
+#   여전히 이 정규식을 사용하므로 정의 자체는 보존한다.
 _NTIS_TITLE_SUFFIX = re.compile(r"\s*_\([0-9]{4}\).*$")
 
 
@@ -125,9 +139,15 @@ def _normalize_official_title(title: str) -> str:
 
     처리 순서:
     1. NFKC 유니코드 정규화 — 전각/반각, 합성 한글 등 표기 변이 흡수.
-    2. NTIS suffix 절단 — `_(YYYY)<사업명>` 형태의 부착부 제거 (분석 §5-1).
-       leading `\\s*` 매칭이 필요하므로 공백 제거 이전에 적용한다.
-    3. 모든 공백 문자 제거 — leading/trailing whitespace, 단어 사이 공백 변이 흡수.
+    2. 모든 공백 문자 제거 — leading/trailing whitespace, 단어 사이 공백 변이 흡수.
+
+    task 00151 변경 (2026-05-28):
+      이전 버전은 NFKC 직후 `_NTIS_TITLE_SUFFIX` 절단 단계를 두어 NTIS 통합공고가
+      말미에 부착하는 `_(YYYY)<사업명>` 부분을 일괄 제거했다. 그러나 동일 ancmNo
+      아래 NTIS 가 서로 다른 sub-business 공고를 별개 row 로 게시하는 케이스(173/174)
+      에서는 그 suffix 가 sub-business 식별자라 잘못 합쳐졌다. 이제 canonical_key
+      는 sub-business 별 분리를 위해 full title 을 보존하고, 동일 과제의 IRIS↔NTIS
+      cross-source 묶음 유지는 `_apply_canonical` 의 fallback 매칭이 담당한다.
 
     빈 문자열/None 입력은 빈 문자열을 반환한다 (호출 측에서 이 경우
     동일 ancmNo 끼리는 묶이는 결과가 됨 — 사실상 현행 official 키와 동일 동작).
@@ -137,6 +157,34 @@ def _normalize_official_title(title: str) -> str:
 
     Returns:
         정규화된 제목 문자열. 정확일치 비교를 전제로 하므로 길이 제한은 두지 않는다.
+    """
+    if not title:
+        return ""
+    nfkc = unicodedata.normalize("NFKC", title)
+    return re.sub(r"\s+", "", nfkc)
+
+
+def strip_ntis_business_suffix(title: str) -> str:
+    """NTIS 통합공고 title 말미의 `_(YYYY)<사업명>` suffix 를 절단한 정규화 결과를 반환한다.
+
+    fallback cross-source 매칭(`app/db/repository.py::_apply_canonical`)에서
+    IRIS title 과 NTIS title 의 prefix 동치성 비교에 사용한다. 본 함수는
+    canonical_key 생성에는 더 이상 관여하지 않으며(태스크 00151 이후) 매칭 전용
+    헬퍼이다.
+
+    처리 순서:
+      1. NFKC 정규화
+      2. `_NTIS_TITLE_SUFFIX` 매칭 시 suffix 절단
+      3. 공백 전체 제거
+
+    빈 문자열/None 입력은 빈 문자열을 반환한다.
+
+    Args:
+        title: 원본 공고 제목.
+
+    Returns:
+        suffix 절단·공백 제거를 거친 정규화 문자열. cross-source 매칭에서
+        IRIS title 의 결과와 같으면 같은 과제로 본다.
     """
     if not title:
         return ""
@@ -192,4 +240,4 @@ def _normalize_agency(agency: str | None) -> str:
     return _FUZZY_STRIP.sub("", nfkc)
 
 
-__all__ = ["CanonicalKeyResult", "compute_canonical_key"]
+__all__ = ["CanonicalKeyResult", "compute_canonical_key", "strip_ntis_business_suffix"]
