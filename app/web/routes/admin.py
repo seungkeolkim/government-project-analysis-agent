@@ -2040,7 +2040,7 @@ def backup_page(
     logger.debug("admin.backup_page 진입: user_id={}", current_user.id)
     with session_scope() as session:
         settings = get_backup_settings(session)
-        history = list_backup_history(session)
+        history = list_backup_history(session, limit=20)
 
     backup_files = list_backup_files()
 
