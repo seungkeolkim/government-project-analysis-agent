@@ -252,3 +252,52 @@ def test_backup_run_exception_flash(
     resp = admin_client.post("/admin/backup/run", follow_redirects=False)
     assert resp.status_code == 303
     assert "error" in resp.headers["location"]
+
+
+# ──────────────────────────────────────────────────────────────
+# GET /admin/backup — 백업 이력 20개 제한 (task 00152)
+# ──────────────────────────────────────────────────────────────
+
+
+def test_backup_page_history_limited_to_20(
+    admin_client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """백업 이력이 25개 있어도 /admin/backup 은 최신 20개만 반환한다."""
+    from app.db.models import BackupHistory
+    from app.timezone import now_utc
+
+    monkeypatch.setattr(
+        "app.web.routes.admin.list_backup_files",
+        lambda: [],
+    )
+
+    # 25개 이력을 시간 순으로 삽입 (oldest → newest)
+    total = 25
+    histories = [
+        BackupHistory(
+            executed_at=now_utc().replace(microsecond=i),
+            trigger="scheduled",
+            target_files=["data/app.sqlite3"],
+            backup_files=[f"data/backups/app_{i:05d}.sqlite3"],
+            success=True,
+            error_message=None,
+            duration_seconds=0.1,
+            total_size_bytes=1024,
+        )
+        for i in range(total)
+    ]
+    db_session.add_all(histories)
+    db_session.commit()
+
+    resp = admin_client.get("/admin/backup", follow_redirects=False)
+    assert resp.status_code == 200
+
+    # 가장 최신 20개 파일명만 포함되어야 한다 (i=5..24)
+    for i in range(5, total):
+        assert f"app_{i:05d}.sqlite3" in resp.text, f"최신 이력 {i} 가 페이지에 없음"
+
+    # i=0..4 (오래된 5개)는 포함되지 않아야 한다
+    for i in range(5):
+        assert f"app_{i:05d}.sqlite3" not in resp.text, f"오래된 이력 {i} 가 잘못 포함됨"
