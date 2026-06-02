@@ -53,15 +53,21 @@
 
         <div class="suggestion-form__row">
             <label class="suggestion-form__label" for="suggestion-body">본문 *</label>
-            {# textarea 안의 본문은 Jinja2 자동 escape 가 적용되며, 줄바꿈은
-               textarea 가 그대로 보존한다(|safe 사용 금지). #}
+            {# textarea 안의 본문은 Jinja2 자동 escape 가 적용된다(|safe 금지).
+               리치 텍스트 에디터(task 00153-2)가 이 textarea 를 숨기고 편집 영역으로
+               대체하며, data-initial-format 으로 기존 본문이 HTML 인지 평문인지
+               알려 줘 에디터가 서식을 그대로 로드(html) 하거나 줄바꿈을 보존(plain)
+               하게 한다. #}
             <textarea
                 class="suggestion-form__textarea"
                 id="suggestion-body"
                 name="body"
+                data-rich-editor
+                data-initial-format="{{ suggestion.body_format }}"
                 required
                 maxlength="20000"
             >{{ suggestion.body }}</textarea>
+            <input type="hidden" name="body_format" value="html">
         </div>
 
         <div class="suggestion-form__row suggestion-form__row--inline">
@@ -83,4 +89,9 @@
         </div>
     </form>
 </section>
+{% endblock %}
+
+{% block extra_scripts %}
+{# 리치 텍스트 에디터 — data-rich-editor textarea 가 없으면 무해(no-op). #}
+<script src="/static/js/rich_text_editor.js" defer></script>
 {% endblock %}

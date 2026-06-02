@@ -49,14 +49,19 @@
 
         <div class="suggestion-form__row">
             <label class="suggestion-form__label" for="notice-body">본문 *</label>
-            {# textarea 안의 본문은 Jinja2 자동 escape. |safe 사용 금지. #}
+            {# textarea 안의 본문은 Jinja2 자동 escape(|safe 금지). 리치 텍스트
+               에디터(task 00153-2)가 이 textarea 를 숨기고 편집 영역으로 대체하며,
+               data-initial-format 으로 기존 본문 포맷(html/plain)을 알려 준다. #}
             <textarea
                 class="suggestion-form__textarea"
                 id="notice-body"
                 name="body"
+                data-rich-editor
+                data-initial-format="{{ notice.body_format }}"
                 required
                 maxlength="20000"
             >{{ notice.body }}</textarea>
+            <input type="hidden" name="body_format" value="html">
         </div>
 
         <div class="suggestion-form__actions">
@@ -65,4 +70,9 @@
         </div>
     </form>
 </section>
+{% endblock %}
+
+{% block extra_scripts %}
+{# 리치 텍스트 에디터 — data-rich-editor textarea 가 없으면 무해(no-op). #}
+<script src="/static/js/rich_text_editor.js" defer></script>
 {% endblock %}
