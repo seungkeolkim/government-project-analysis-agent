@@ -366,6 +366,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
+- [00154] 리치 텍스트 에디터 본문 영역 빈 상태 배경색 흰색 고정 — `.rich-text-editor__content`에 `background-color:#ffffff` + `box-sizing:border-box` 추가; 제목·이메일·댓글 입력칸과 시각 일관성 확보 — 2026-06-02
 - [00153] 게시판 게시글 리치 텍스트 편집기 도입 — `body_format` 컬럼 + 멱등 마이그레이션 + bs4 기반 허용목록 HTML sanitizer(`app/suggestions/sanitize.py`) + `contenteditable`/`execCommand` 자체 에디터(`static/js/rich_text_editor.js`, 외부 CDN·npm 빌드 없음) + 상세 화면 서식 렌더링 CSS; Word/Outlook 붙여넣기 포함 E2E 검증; 기존 평문 게시글 하위 호환 — 2026-06-02
 - [00152] 관리자 백업 이력 화면 최근 20개로 표시 제한 — backup_page 라우트에서 list_backup_history 호출 시 limit=20 지정; 20개 초과 시 최신 20개만 표시됨을 검증하는 테스트 추가 — 2026-05-29
 - [00151] canonical_key를 full title 보존으로 전환 + _apply_canonical cross-source fallback 매칭 신설 + DB 정정 — NTIS suffix 무조건 절단이 동일 ancmNo 아래 서로 다른 sub-business(173/174)를 같은 키로 잘못 묶은 버그 수정. canonical_key는 NTIS suffix 보존, IRIS↔NTIS 동일과제 묶음은 `strip_ntis_business_suffix` 기반 fallback(후보 1건 한정)으로 이전; 운영 DB 재계산·검증 완료 — 2026-05-28
@@ -375,4 +376,3 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - [00147] cron 요일 필드 변환 버그 수정 — APScheduler 3.x `from_crontab()` 이 표준 crontab 요일 숫자를 변환하지 않아 `1-5`(월~금)가 화~토로 실행되던 문제. `app/scheduler/cron.make_cron_trigger()` 헬퍼 신설(`(crontab_num - 1) % 7` 보정) 후 스케줄러 내 모든 `from_crontab` 호출부(공고 수집·GC·백업·Daily Report·startup 재해석 5곳) 교체; 재기동 시 기존 잡도 자동 재스케줄 — 2026-05-22
 - [00146] 데일리 리포트 테스트 발송 콤마 구분 다중 수신자 지원 — BE: `DailyReportTestSendIn.recipient` max_length 2000자 확장, `_resolve_test_send_recipients()` 가 콤마 분리·trim·이메일 검증·리스트 반환; FE: 입력 필드 `type=text` 전환, 콤마 구분 placeholder·안내 문구 추가, 성공 메시지에 수신자/성공/실패 수 표시; 테스트 발송 라우트에만 적용(전체 발송 로직 무변경) — 2026-05-22
 - [00145] 데일리 리포트 메일 푸터 문구 개선 (시스템 URL 포함 + 수신 거부 안내) — 푸터를 3줄로 재구성: "발송되었습니다. (시스템URL)" + "데스크톱 환경 최적화 안내" + "계정설정→이메일 알림 수신 해제 안내"; `build_daily_report_text_body`·`build_daily_report_html_body` 에 `public_base_url` 키워드 인자 추가; `run_daily_report` 에서 `SETTING_KEY_APP_PUBLIC_BASE_URL`(fallback `DEFAULT_APP_PUBLIC_BASE_URL`) 로드 후 빌더에 전달 — '공고 상세 보기' 링크와 동일 URL 소스 일관성 유지 — 2026-05-22
-- [00144] 데일리 리포트 메일 수신인 admin 제약 제거 + 「Daily Report」 설정 카드 UI 개선 — `collect_admin_recipient_emails`→`collect_recipient_emails` rename 후 `is_admin` 필터 제거(수신 대상 = 유효 이메일 보유 + `email_subscribed=True` 인 전체 사용자); `send-now`·스케줄 잡 모두 동일 정책 적용; 설정 응답 스키마 `admin_emails`/`admin_count_*` → `recipients`/`recipient_count_*` rename; FE 의 admin 한정 문구 정리. 「Daily Report 활성화」 체크박스를 '메일 전송 기능 활성화' 토글처럼 변경 즉시 PUT 반영(실패 시 롤백)으로 전환, 「저장」 버튼을 '지금 발송' 옆에서 Cron 입력 필드 옆으로 이동해 Cron 저장 전용으로 정리 — 2026-05-22
