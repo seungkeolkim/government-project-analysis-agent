@@ -68,6 +68,7 @@ from app.suggestions import (
     update_suggestion_acceptance,
     update_suggestion_comment,
 )
+from app.web.board_body import prepare_board_body
 from app.web.template_filters import register_kst_filters
 
 router = APIRouter(tags=["suggestions"])
@@ -335,6 +336,7 @@ def create_suggestion_route(
     password: str = Form(...),
     is_secret: str | None = Form(default=None),
     contact_email: str | None = Form(default=None),
+    body_format: str | None = Form(default=None),
     current_user: User = Depends(current_user_required),
     suggestions_session: Session = Depends(_suggestions_db_session),
 ) -> RedirectResponse:
@@ -364,9 +366,8 @@ def create_suggestion_route(
     title_normalized = _validate_required_text(
         title, field_label="제목", max_length=_TITLE_MAX_LENGTH
     )
-    body_normalized = _validate_required_text(
-        body, field_label="본문", max_length=_BODY_MAX_LENGTH
-    )
+    # 본문은 포맷에 따라 평문 검증 또는 HTML 정화를 거친다(공용 헬퍼).
+    body_normalized, body_format_normalized = prepare_board_body(body, body_format)
     password_normalized = _validate_post_password(password)
     is_secret_bool = is_secret is not None and is_secret.strip() != ""
 
@@ -381,6 +382,7 @@ def create_suggestion_route(
             author_user_id=current_user.id,
             title=title_normalized,
             body=body_normalized,
+            body_format=body_format_normalized,
             password_hash=hash_password(password_normalized),
             is_secret=is_secret_bool,
             # 로그인 사용자명을 그대로 작성자명으로 저장. username 은 모델 단에서
@@ -897,6 +899,7 @@ def update_suggestion_route(
     title: str = Form(...),
     body: str = Form(...),
     is_secret: str | None = Form(default=None),
+    body_format: str | None = Form(default=None),
     main_session: Session = Depends(_main_db_session),
     suggestions_session: Session = Depends(_suggestions_db_session),
     current_user: User = Depends(current_user_required),
@@ -932,9 +935,8 @@ def update_suggestion_route(
     title_normalized = _validate_required_text(
         title, field_label="제목", max_length=_TITLE_MAX_LENGTH
     )
-    body_normalized = _validate_required_text(
-        body, field_label="본문", max_length=_BODY_MAX_LENGTH
-    )
+    # 본문은 포맷에 따라 평문 검증 또는 HTML 정화를 거친다(공용 헬퍼).
+    body_normalized, body_format_normalized = prepare_board_body(body, body_format)
     is_secret_bool = is_secret is not None and is_secret.strip() != ""
 
     # ── UPDATE (트랜잭션은 라우트 끝에서 명시 commit) ──────────────────────
@@ -944,6 +946,7 @@ def update_suggestion_route(
             suggestion_id=suggestion_id,
             title=title_normalized,
             body=body_normalized,
+            body_format=body_format_normalized,
             is_secret=is_secret_bool,
         )
         if result is None:

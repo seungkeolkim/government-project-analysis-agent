@@ -80,6 +80,7 @@ from app.scrape_control import (
     validate_host_project_dir,
 )
 from app.suggestions import (
+    ensure_body_format_columns,
     ensure_deleted_at_columns,
     ensure_suggestion_comment_updated_at_column,
     ensure_updated_at_initial_null_backfill,
@@ -335,6 +336,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # 신규 환경(boards.sqlite3 없음)에서는 아래 init_suggestions_db() 의 create_all
     # 이 nullable updated_at 포함 테이블을 한 번에 만든다.
     ensure_updated_at_initial_null_backfill()
+
+    # task 00153 — 게시글 리치 텍스트 도입. 기존 boards.sqlite3 의 notices·suggestions
+    # 테이블에 body_format 컬럼이 없으면 멱등하게 ADD COLUMN + 'plain' backfill 한다.
+    # 신규 환경(boards.sqlite3 없음)에서는 아래 init_suggestions_db() 의 create_all
+    # 이 body_format 포함 테이블을 한 번에 만든다.
+    ensure_body_format_columns()
 
     # task 00051 — 게시판 별도 DB 의 테이블을 멱등하게 보장한다.
     # 메인 DB(init_db, Alembic) 와 별개의 SQLite 파일이며, 메인 DB reset 시에도

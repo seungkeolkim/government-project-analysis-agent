@@ -22,7 +22,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.notices.models import Notice
-from app.suggestions.models import _utcnow
+from app.suggestions.models import BODY_FORMAT_PLAIN, _utcnow
 
 
 def get_notice_by_id(session: Session, notice_id: int) -> Notice | None:
@@ -103,6 +103,7 @@ def create_notice(
     author_name: str | None,
     title: str,
     body: str,
+    body_format: str = BODY_FORMAT_PLAIN,
 ) -> Notice:
     """새 공지사항 게시글을 생성한다.
 
@@ -117,7 +118,9 @@ def create_notice(
         author_user_id: 작성자(관리자) 의 메인 DB users.id 값.
         author_name: 작성 시점 사용자명. 이후 메인 DB 변경에 무관하게 표기 보존.
         title: 공지사항 제목 (필수).
-        body: 공지사항 본문 (필수).
+        body: 공지사항 본문 (필수). body_format 이 'html' 이면 라우트에서 서버측
+            sanitization 을 거친 안전한 HTML 이 전달된다는 계약.
+        body_format: 본문 저장 포맷('plain' 또는 'html'). 기본값 'plain'(하위 호환).
 
     Returns:
         flush 된 ``Notice`` ORM 인스턴스(``id`` 포함).
@@ -127,6 +130,7 @@ def create_notice(
         author_name=author_name,
         title=title,
         body=body,
+        body_format=body_format,
         # created_at 은 모델 default(_utcnow) 가 채운다.
         # updated_at 은 INSERT 시 NULL (수정 이력 없음 초기값).
     )
@@ -141,6 +145,7 @@ def update_notice(
     notice_id: int,
     title: str,
     body: str,
+    body_format: str = BODY_FORMAT_PLAIN,
 ) -> Notice | None:
     """공지사항 게시글의 제목과 본문을 in-place 갱신한다.
 
@@ -151,7 +156,9 @@ def update_notice(
         session: boards DB ORM 세션.
         notice_id: 갱신 대상 공지사항 PK.
         title: 새 제목 (필수).
-        body: 새 본문 (필수).
+        body: 새 본문 (필수). body_format 이 'html' 이면 라우트에서 sanitization 을
+            거친 안전한 HTML 이 전달된다는 계약.
+        body_format: 본문 저장 포맷('plain' 또는 'html'). 기본값 'plain'(하위 호환).
 
     Returns:
         갱신된 ``Notice`` 인스턴스. 게시글이 존재하지 않으면 ``None`` 반환.
@@ -166,6 +173,7 @@ def update_notice(
         return None
     notice.title = title
     notice.body = body
+    notice.body_format = body_format
     session.flush()
     return notice
 

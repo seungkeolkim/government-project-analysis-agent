@@ -11,9 +11,11 @@
     - display_author_name:  str | None (고아 글이면 None — NULL 마스킹)
     - display_contact_email: str | None (고아 글이면 None — NULL 마스킹)
 
-  렌더 규칙:
-    - 본문(body)은 사용자 입력이라 XSS 위험 → Jinja2 자동 escape 에 의존하고
-      |safe 사용 금지. 줄바꿈은 CSS white-space: pre-wrap 으로 보존한다.
+  렌더 규칙 (task 00153 — 리치 텍스트 도입):
+    - 본문(body)은 body_format 으로 분기한다. 'html' 은 저장 시 서버측
+      sanitization 을 거친 안전한 HTML 이므로 |safe 로 출력(표·폰트 서식 렌더),
+      그 외(평문/하위 호환)는 기존대로 Jinja2 자동 escape + CSS pre-wrap.
+    - 댓글 본문은 평문 유지 — 자동 escape 의존, |safe 절대 금지(범위 외).
     - 비밀글이라도 본 페이지에 도달했다면 (라우트 게이트를 통과한) 작성자
       본인/관리자이므로 본문을 정상 노출한다.
     - 댓글 영역(00051-4)과 관리자 수용여부 모달(00051-5) 자리에 빈 placeholder
@@ -140,7 +142,13 @@
         #}
         <section class="suggestion-detail__section suggestion-detail__section--body">
             <h4 class="suggestion-detail__section-title">본문</h4>
+            {% if suggestion.body_format == 'html' %}
+            {# 리치 텍스트: 저장 시 서버측 sanitization 완료 → |safe 출력. 표시 CSS 는 00153-2. #}
+            <div class="suggestion-detail__body suggestion-detail__body--rich">{{ suggestion.body | safe }}</div>
+            {% else %}
+            {# 평문: |safe 금지. 자동 escape + CSS white-space: pre-wrap 으로 줄바꿈 보존. #}
             <div class="suggestion-detail__body">{{ suggestion.body }}</div>
+            {% endif %}
             {% if suggestion.updated_at is not none %}
             <p class="edited-marker">{{ suggestion.updated_at | kst_format }}에 수정됨</p>
             {% endif %}

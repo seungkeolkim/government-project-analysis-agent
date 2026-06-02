@@ -278,6 +278,92 @@ def ensure_deleted_at_columns() -> None:
         conn.close()
 
 
+def ensure_body_format_columns() -> None:
+    """기존 boards.sqlite3 의 notices·suggestions 테이블에 body_format 컬럼을 추가한다.
+
+    task 00153 — 게시글 리치 텍스트 도입. 게시글 본문을 평문(plain) 또는 정화된
+    리치 텍스트(html) 로 저장하기 위한 포맷 판별 컬럼을 멱등하게 보장한다.
+
+    대상 테이블: notices, suggestions (게시글 본문 전용).
+    제외: suggestion_comments — 댓글은 평문 그대로 유지(사용자 원문 "게시글에만").
+
+    신규 환경(boards.sqlite3 없음)에서는 init_suggestions_db() 의 create_all 이
+    body_format 포함 테이블을 한 번에 만들어주므로, 본 함수는 "기존 boards.sqlite3
+    가 있는데 body_format 컬럼만 빠진" 운영 환경의 무중단 마이그레이션 전용이다.
+
+    ## 처리 순서 (테이블별)
+    1. PRAGMA table_info 로 body_format 컬럼 존재 여부 확인.
+    2. 테이블 자체가 없으면 SKIP — init_suggestions_db() 의 create_all 이 처리한다.
+    3. 컬럼이 없으면 ADD COLUMN(nullable) 후 기존 row 를 'plain' 으로 backfill 한다.
+    4. 이미 있으면 NOOP — 멱등성 보장(여러 번 실행해도 데이터 변화 없음).
+
+    ## SQLite ALTER TABLE 제약 우회
+    SQLite 는 NOT NULL + DEFAULT 를 동시에 가진 컬럼을 ALTER TABLE 로 추가할 수
+    없다. 따라서 DB 레벨은 nullable 로 추가한 뒤 기존 row 를 'plain' 으로 backfill
+    하고, NOT NULL 강제는 ORM(mapped_column nullable=False) 에서만 수행한다
+    (기존 ensure_* 함수와 동일한 관례).
+    """
+    settings = get_settings()
+    boards_path = _resolve_sqlite_path(settings.suggestions_db_url)
+
+    if not boards_path.exists():
+        # 신규 환경 — init_suggestions_db() 가 create_all 로 처리하므로 스킵
+        logger.info(
+            "ensure body_format columns: boards DB 없음 — 신규 환경으로 간주, 건너뜀 ({})",
+            boards_path,
+        )
+        return
+
+    # 게시글 본문을 가진 두 테이블만 대상. 댓글(suggestion_comments) 은 제외한다.
+    target_tables = ["notices", "suggestions"]
+
+    conn = sqlite3.connect(str(boards_path))
+    try:
+        for table_name in target_tables:
+            rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+
+            if not rows:
+                # 테이블이 아직 없으면 SKIP — init_suggestions_db() 가 create_all 로 처리한다
+                logger.info(
+                    "ensure body_format column: 테이블 없음, 건너뜀 ({}, {})",
+                    boards_path,
+                    table_name,
+                )
+                continue
+
+            existing_columns = {row[1] for row in rows}  # row[1] = 컬럼명
+
+            if "body_format" in existing_columns:
+                logger.info(
+                    "ensure body_format column: 이미 존재함 — NOOP ({}, {})",
+                    boards_path,
+                    table_name,
+                )
+                continue
+
+            logger.info(
+                "ensure body_format column: {} 에 body_format 컬럼 추가 시작 ({})",
+                table_name,
+                boards_path,
+            )
+            # ADD COLUMN 은 nullable 로만 추가 (SQLite NOT NULL+DEFAULT 동시 제약 우회).
+            conn.execute(
+                f"ALTER TABLE {table_name} ADD COLUMN body_format VARCHAR(16)"
+            )
+            # 기존 row 는 평문 게시글이므로 'plain' 으로 backfill (멱등: IS NULL 한정).
+            conn.execute(
+                f"UPDATE {table_name} SET body_format = 'plain' WHERE body_format IS NULL"
+            )
+            conn.commit()
+            logger.info(
+                "ensure body_format column: 완료 — {}.body_format 추가 및 backfill ({})",
+                table_name,
+                boards_path,
+            )
+    finally:
+        conn.close()
+
+
 def ensure_updated_at_initial_null_backfill() -> None:
     """notices·suggestions·suggestion_comments 의 updated_at 을 INSERT 시 NULL 정책으로 정착시킨다.
 
@@ -496,5 +582,6 @@ __all__ = [
     "migrate_suggestions_to_boards",
     "ensure_suggestion_comment_updated_at_column",
     "ensure_deleted_at_columns",
+    "ensure_body_format_columns",
     "ensure_updated_at_initial_null_backfill",
 ]

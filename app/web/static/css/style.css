@@ -4317,6 +4317,91 @@ details[open] .user-card__org-summary::before {
     line-height: 1.6;
 }
 
+/*
+  리치 텍스트 에디터 (task 00153-2) — 무의존성 contenteditable 기반.
+  툴바(서식 버튼/폰트/색상/표) + 편집 영역의 chrome 스타일.
+  자산은 모두 static/ 에 self-host(외부 CDN 미사용).
+*/
+.rich-text-editor {
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    overflow: hidden;
+    background: #ffffff;
+}
+
+.rich-text-editor__toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 8px;
+    background: #f9fafb;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.rich-text-editor__btn {
+    padding: 4px 8px;
+    font-size: 13px;
+    line-height: 1.2;
+    background: #ffffff;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    color: #1f2937;
+    cursor: pointer;
+}
+
+.rich-text-editor__btn:hover {
+    background: #eef2ff;
+    border-color: #a5b4fc;
+}
+
+.rich-text-editor__select {
+    padding: 4px 6px;
+    font-size: 13px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    background: #ffffff;
+    color: #1f2937;
+    cursor: pointer;
+}
+
+.rich-text-editor__color {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: #4b5563;
+}
+
+.rich-text-editor__color-label {
+    user-select: none;
+}
+
+.rich-text-editor__color input[type="color"] {
+    width: 28px;
+    height: 24px;
+    padding: 0;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    background: #ffffff;
+    cursor: pointer;
+}
+
+.rich-text-editor__content {
+    min-height: 260px;
+    padding: 12px 14px;
+    font-size: 14px;
+    line-height: 1.6;
+    color: #1f2937;
+    outline: none;
+    overflow-y: auto;
+    max-height: 560px;
+}
+
+.rich-text-editor__content:focus {
+    box-shadow: inset 0 0 0 2px #c7d2fe;
+}
+
 .suggestion-form__actions {
     display: flex;
     gap: 8px;
@@ -4551,6 +4636,70 @@ details[open] .user-card__org-summary::before {
     white-space: pre-wrap;
     word-break: break-word;
     min-height: 80px;
+}
+
+/*
+  리치 텍스트(body_format='html') 본문 표시 (task 00153-2).
+  - 평문용 white-space: pre-wrap 을 normal 로 되돌린다(HTML 마크업이 줄바꿈을
+    관장하므로 공백 보존이 오히려 레이아웃을 망친다).
+  - 저장된 표·폰트·색상 등 인라인 서식이 시각적으로 올바르게 보이도록 한다.
+  표시(.suggestion-detail__body--rich)와 편집(.rich-text-content)에 동일 규칙을
+  적용해 \"작성 화면에서 본 그대로\" 상세에서 렌더되게 한다(WYSIWYG 일관성).
+*/
+.suggestion-detail__body--rich {
+    white-space: normal;
+}
+
+.suggestion-detail__body--rich table,
+.rich-text-content table {
+    border-collapse: collapse;
+    margin: 8px 0;
+    max-width: 100%;
+}
+
+.suggestion-detail__body--rich td,
+.suggestion-detail__body--rich th,
+.rich-text-content td,
+.rich-text-content th {
+    border: 1px solid #999999;
+    padding: 6px 8px;
+    vertical-align: top;
+}
+
+.suggestion-detail__body--rich th,
+.rich-text-content th {
+    background: #f3f4f6;
+    font-weight: 600;
+}
+
+/* 이미지·표가 컨테이너를 넘치지 않게 한다. */
+.suggestion-detail__body--rich img,
+.rich-text-content img {
+    max-width: 100%;
+    height: auto;
+}
+
+/* 목록 마커가 사라지지 않도록 기본 들여쓰기를 복원한다(reset CSS 대비). */
+.suggestion-detail__body--rich ul,
+.rich-text-content ul {
+    list-style: disc;
+    padding-left: 1.6em;
+    margin: 8px 0;
+}
+
+.suggestion-detail__body--rich ol,
+.rich-text-content ol {
+    list-style: decimal;
+    padding-left: 1.6em;
+    margin: 8px 0;
+}
+
+.suggestion-detail__body--rich blockquote,
+.rich-text-content blockquote {
+    margin: 8px 0;
+    padding-left: 12px;
+    border-left: 3px solid #d1d5db;
+    color: #4b5563;
 }
 
 /*

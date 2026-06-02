@@ -25,7 +25,7 @@ from datetime import datetime
 from sqlalchemy import DateTime, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.suggestions.models import Base, _utcnow
+from app.suggestions.models import BODY_FORMAT_PLAIN, Base, _utcnow
 
 
 class Notice(Base):
@@ -77,7 +77,18 @@ class Notice(Base):
     body: Mapped[str] = mapped_column(
         Text,
         nullable=False,
-        doc="공지사항 본문.",
+        doc="공지사항 본문. body_format 에 따라 평문 또는 정화된 HTML 이 저장된다.",
+    )
+
+    # 본문 저장 포맷 판별 (task 00153 — 리치 텍스트 도입).
+    # 건의사항과 동일 정책: DB nullable + server_default('plain'), ORM NOT NULL.
+    # 'plain' = 평문(자동 escape + pre-wrap), 'html' = 서버 정화된 리치 텍스트.
+    body_format: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=BODY_FORMAT_PLAIN,
+        server_default=BODY_FORMAT_PLAIN,
+        doc="본문 저장 포맷. 'plain'=평문, 'html'=정화된 리치 텍스트. 기본값 'plain'.",
     )
 
     # 작성 시각 (UTC)
