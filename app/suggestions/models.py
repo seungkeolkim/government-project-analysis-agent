@@ -57,6 +57,16 @@ def _utcnow() -> datetime:
     return datetime.now(tz=UTC)
 
 
+# 게시글 본문 저장 포맷 식별자 (task 00153 — 리치 텍스트 도입).
+# ``body_format`` 컬럼 값으로 쓰이며, 상세 화면 렌더 분기의 계약이 된다.
+#   - ``BODY_FORMAT_PLAIN`` ('plain'): 기존 평문. Jinja2 자동 escape + CSS
+#     ``white-space: pre-wrap`` 으로 렌더한다(하위 호환 기본값).
+#   - ``BODY_FORMAT_HTML`` ('html'): 서버측 sanitization 을 거친 리치 텍스트.
+#     저장 시 이미 정화되었으므로 상세 화면에서 ``|safe`` 로 출력한다.
+BODY_FORMAT_PLAIN = "plain"
+BODY_FORMAT_HTML = "html"
+
+
 class Base(DeclarativeBase):
     """건의사항 게시판 전용 declarative base.
 
@@ -147,7 +157,19 @@ class Suggestion(Base):
     body: Mapped[str] = mapped_column(
         Text,
         nullable=False,
-        doc="게시글 본문.",
+        doc="게시글 본문. body_format 에 따라 평문 또는 정화된 HTML 이 저장된다.",
+    )
+
+    # 본문 저장 포맷 판별 (task 00153 — 리치 텍스트 도입).
+    # DB 레벨은 nullable + server_default('plain') 로 두어 기존 row/하위 호환을
+    # 보장하고, ORM 레벨에서 NOT NULL 을 강제한다(기존 ensure_* 마이그레이션 관례).
+    # 'plain' = 평문(자동 escape + pre-wrap), 'html' = 서버 정화된 리치 텍스트.
+    body_format: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=BODY_FORMAT_PLAIN,
+        server_default=BODY_FORMAT_PLAIN,
+        doc="본문 저장 포맷. 'plain'=평문, 'html'=정화된 리치 텍스트. 기본값 'plain'.",
     )
 
     # 필수 입력: 게시글별 비밀번호 (향후 수정·삭제 권한용으로 해시 저장)
@@ -331,4 +353,6 @@ __all__ = [
     "AcceptanceStatus",
     "Suggestion",
     "SuggestionComment",
+    "BODY_FORMAT_PLAIN",
+    "BODY_FORMAT_HTML",
 ]

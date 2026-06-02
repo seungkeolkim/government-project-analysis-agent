@@ -27,7 +27,13 @@ from datetime import date
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from app.suggestions.models import AcceptanceStatus, Suggestion, SuggestionComment, _utcnow
+from app.suggestions.models import (
+    BODY_FORMAT_PLAIN,
+    AcceptanceStatus,
+    Suggestion,
+    SuggestionComment,
+    _utcnow,
+)
 
 
 def get_suggestion_by_id(session: Session, suggestion_id: int) -> Suggestion | None:
@@ -117,6 +123,7 @@ def create_suggestion(
     is_secret: bool,
     author_name: str | None,
     contact_email: str | None,
+    body_format: str = BODY_FORMAT_PLAIN,
 ) -> Suggestion:
     """새 건의사항 게시글을 생성한다 (작성 시각/수용 상태는 모델 default 사용).
 
@@ -128,11 +135,13 @@ def create_suggestion(
         author_user_id: 작성자(로그인 사용자)의 메인 DB users.id 값.
             본 단계에서는 작성 자체가 로그인 필수라 항상 정수가 주어진다.
         title: 게시글 제목 (필수).
-        body: 게시글 본문 (필수).
+        body: 게시글 본문 (필수). body_format 이 'html' 이면 라우트에서 서버측
+            sanitization 을 거친 안전한 HTML 이 전달된다는 계약.
         password_hash: 게시글별 비밀번호의 bcrypt 해시 (필수).
         is_secret: 비밀글 여부 (필수).
         author_name: 선택 입력 작성자명. 비어 있으면 None 을 그대로 전달한다.
         contact_email: 선택 입력 연락처 이메일. 비어 있으면 None.
+        body_format: 본문 저장 포맷('plain' 또는 'html'). 기본값 'plain'(하위 호환).
 
     Returns:
         flush 된 ``Suggestion`` ORM 인스턴스(``id`` 포함).
@@ -141,6 +150,7 @@ def create_suggestion(
         author_user_id=author_user_id,
         title=title,
         body=body,
+        body_format=body_format,
         password_hash=password_hash,
         is_secret=is_secret,
         author_name=author_name,
@@ -276,6 +286,7 @@ def update_suggestion(
     title: str,
     body: str,
     is_secret: bool,
+    body_format: str = BODY_FORMAT_PLAIN,
 ) -> Suggestion | None:
     """건의사항 게시글의 작성자 수정 가능 필드를 in-place 갱신한다 (00052-4).
 
@@ -292,8 +303,10 @@ def update_suggestion(
         session: 건의사항 DB ORM 세션.
         suggestion_id: 갱신 대상 게시글 PK.
         title: 새 제목 (필수).
-        body: 새 본문 (필수).
+        body: 새 본문 (필수). body_format 이 'html' 이면 라우트에서 sanitization 을
+            거친 안전한 HTML 이 전달된다는 계약.
         is_secret: 새 비밀글 여부.
+        body_format: 본문 저장 포맷('plain' 또는 'html'). 기본값 'plain'(하위 호환).
 
     Returns:
         갱신된 ``Suggestion`` 인스턴스. 게시글이 존재하지 않으면 ``None`` 을
@@ -310,6 +323,7 @@ def update_suggestion(
         return None
     suggestion.title = title
     suggestion.body = body
+    suggestion.body_format = body_format
     suggestion.is_secret = is_secret
     session.flush()
     return suggestion

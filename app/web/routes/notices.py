@@ -44,6 +44,7 @@ from app.notices import (
     update_notice,
 )
 from app.suggestions import SuggestionsSessionLocal
+from app.web.board_body import prepare_board_body
 from app.web.template_filters import register_kst_filters
 
 router = APIRouter(tags=["notices"])
@@ -199,6 +200,7 @@ def new_notice_page(
 def create_notice_route(
     title: str = Form(...),
     body: str = Form(...),
+    body_format: str | None = Form(default=None),
     current_user: User = Depends(admin_user_required),
     boards_session: Session = Depends(_boards_db_session),
 ) -> RedirectResponse:
@@ -209,7 +211,9 @@ def create_notice_route(
 
     Form 필드:
         - ``title``: 필수, ≤255자.
-        - ``body``: 필수, ≤20000자.
+        - ``body``: 필수. 평문(≤20000자) 또는 리치 텍스트 HTML(≤200000자).
+        - ``body_format``: 'plain'/'html'(미지정 시 'plain'). 'html' 이면 서버측
+            sanitization 후 저장한다.
 
     Returns:
         303 리다이렉트 (``Location: /notices/{id}``).
@@ -222,9 +226,8 @@ def create_notice_route(
     title_normalized = _validate_required_text(
         title, field_label="제목", max_length=_TITLE_MAX_LENGTH
     )
-    body_normalized = _validate_required_text(
-        body, field_label="본문", max_length=_BODY_MAX_LENGTH
-    )
+    # 본문은 포맷에 따라 평문 검증 또는 HTML 정화를 거친다(공용 헬퍼).
+    body_normalized, body_format_normalized = prepare_board_body(body, body_format)
 
     try:
         notice = create_notice(
@@ -233,6 +236,7 @@ def create_notice_route(
             author_name=current_user.username,
             title=title_normalized,
             body=body_normalized,
+            body_format=body_format_normalized,
         )
         boards_session.commit()
     except Exception:
@@ -349,6 +353,7 @@ def update_notice_route(
     notice_id: int,
     title: str = Form(...),
     body: str = Form(...),
+    body_format: str | None = Form(default=None),
     boards_session: Session = Depends(_boards_db_session),
 ) -> RedirectResponse:
     """공지사항 수정 처리 (POST /notices/{id}/edit).
@@ -357,7 +362,9 @@ def update_notice_route(
 
     Form 필드:
         - ``title``: 필수, ≤255자.
-        - ``body``: 필수, ≤20000자.
+        - ``body``: 필수. 평문(≤20000자) 또는 리치 텍스트 HTML(≤200000자).
+        - ``body_format``: 'plain'/'html'(미지정 시 'plain'). 'html' 이면 서버측
+            sanitization 후 저장한다.
 
     Returns:
         303 리다이렉트 (``Location: /notices/{id}``).
@@ -371,9 +378,8 @@ def update_notice_route(
     title_normalized = _validate_required_text(
         title, field_label="제목", max_length=_TITLE_MAX_LENGTH
     )
-    body_normalized = _validate_required_text(
-        body, field_label="본문", max_length=_BODY_MAX_LENGTH
-    )
+    # 본문은 포맷에 따라 평문 검증 또는 HTML 정화를 거친다(공용 헬퍼).
+    body_normalized, body_format_normalized = prepare_board_body(body, body_format)
 
     try:
         result = update_notice(
@@ -381,6 +387,7 @@ def update_notice_route(
             notice_id=notice_id,
             title=title_normalized,
             body=body_normalized,
+            body_format=body_format_normalized,
         )
         if result is None:
             raise HTTPException(

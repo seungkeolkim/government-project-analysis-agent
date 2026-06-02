@@ -27,6 +27,8 @@ from app.suggestions.author_validity import (
     get_alive_user_username_map,
 )
 from app.suggestions.models import (
+    BODY_FORMAT_HTML,
+    BODY_FORMAT_PLAIN,
     AcceptanceStatus,
     Base,
     Suggestion,
@@ -55,10 +57,15 @@ from app.suggestions.service import (
     is_orphan_author,
 )
 from app.suggestions.migration import (
+    ensure_body_format_columns,
     ensure_deleted_at_columns,
     ensure_suggestion_comment_updated_at_column,
     ensure_updated_at_initial_null_backfill,
     migrate_suggestions_to_boards,
+)
+from app.suggestions.sanitize import (
+    normalize_body_format,
+    sanitize_post_html,
 )
 from app.suggestions.session import (
     SuggestionsSessionLocal,
@@ -72,11 +79,16 @@ __all__ = [
     "migrate_suggestions_to_boards",
     "ensure_suggestion_comment_updated_at_column",
     "ensure_deleted_at_columns",
+    "ensure_body_format_columns",
     "ensure_updated_at_initial_null_backfill",
+    "sanitize_post_html",
+    "normalize_body_format",
     "Base",
     "AcceptanceStatus",
     "Suggestion",
     "SuggestionComment",
+    "BODY_FORMAT_PLAIN",
+    "BODY_FORMAT_HTML",
     "get_suggestions_engine",
     "SuggestionsSessionLocal",
     "suggestions_session_scope",

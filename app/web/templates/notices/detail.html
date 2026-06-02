@@ -6,9 +6,11 @@
     - is_admin:     bool
     - notice:       Notice ORM 인스턴스
 
-  렌더 규칙:
-    - 본문(body)은 사용자 입력이라 XSS 위험 → Jinja2 자동 escape, |safe 금지.
-      줄바꿈은 CSS white-space: pre-wrap 으로 보존한다.
+  렌더 규칙 (task 00153 — 리치 텍스트 도입):
+    - body_format == 'html': 저장 시 이미 서버측 sanitization 을 거친 안전한
+      HTML 이므로 |safe 로 출력해 표·폰트 등 서식을 그대로 렌더한다.
+    - body_format != 'html' (평문/하위 호환): 기존대로 Jinja2 자동 escape +
+      CSS white-space: pre-wrap 으로 줄바꿈만 보존(|safe 금지).
     - 비밀글·수용여부·댓글 섹션 없음 (사용자 원문 명시).
     - 관리자에게만 수정/삭제 버튼 노출.
 #}
@@ -51,10 +53,15 @@
             {% endif %}
         </dl>
 
+        {% if notice.body_format == 'html' %}
+        {# 리치 텍스트: 저장 시 서버측 sanitization 완료 → |safe 출력. 표시 CSS 는 00153-2. #}
+        <div class="suggestion-detail__body suggestion-detail__body--rich">{{ notice.body | safe }}</div>
+        {% else %}
         <div class="suggestion-detail__body">
-            {# Jinja2 자동 escape — |safe 사용 금지. 줄바꿈은 CSS pre-wrap 으로 보존. #}
+            {# 평문: Jinja2 자동 escape — |safe 사용 금지. 줄바꿈은 CSS pre-wrap 으로 보존. #}
             {{ notice.body }}
         </div>
+        {% endif %}
         {% if notice.updated_at is not none %}
         <p class="edited-marker">{{ notice.updated_at | kst_format }}에 수정됨</p>
         {% endif %}
