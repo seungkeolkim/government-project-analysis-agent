@@ -4393,9 +4393,11 @@ details[open] .user-card__org-summary::before {
     font-size: 14px;
     line-height: 1.6;
     color: #1f2937;
+    background-color: #ffffff;
     outline: none;
     overflow-y: auto;
     max-height: 560px;
+    box-sizing: border-box;
 }
 
 .rich-text-editor__content:focus {
