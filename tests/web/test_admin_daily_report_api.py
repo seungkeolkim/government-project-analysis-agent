@@ -24,6 +24,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
@@ -445,18 +446,21 @@ def test_put_daily_report_settings_enable_toggle_preserves_cron_and_recipient(
 # ──────────────────────────────────────────────────────────────
 #
 # task 00155-4 에서 APScheduler 가 제거돼 daily report 잡은 OS cron 데몬이
-# 실행한다. 라이브 스케줄러가 없으므로 응답의 next_run_at 은 항상 None 이며,
-# UI 는 cron 표현식/활성 여부로 다음 실행 시점을 표시한다. 아래 두 테스트는
-# enabled 저장이 500 없이 커밋되고 GET 으로 영속됨을 회귀로 가드한다.
+# 실행한다. 라이브 스케줄러는 없지만, task 00160-1 부터 응답의 next_run_at 은
+# scheduled_jobs 싱글턴의 cron 표현식으로 다음 실행 시각을 자체 계산해 채운다
+# (enabled+유효 cron → tz-aware ISO, 비활성/무효 → None). 아래 두 테스트는
+# enabled 저장이 500 없이 커밋되고 GET 으로 영속됨 + next_run_at 채움/None
+# 전환을 회귀로 가드한다.
 
 
-def test_put_daily_report_settings_enabled_persists_and_next_run_at_is_none(
+def test_put_daily_report_settings_enabled_persists_and_next_run_at_computed(
     admin_client: TestClient,
     db_session: Session,
 ) -> None:
-    """enabled=True 저장이 500 없이 커밋되고 GET 으로 영속된다. next_run_at 은 None.
+    """enabled=True 저장이 500 없이 커밋되고 GET 으로 영속된다. next_run_at 은 계산값.
 
     crontab 재설치는 테스트 호스트에서 graceful no-op 이므로 라우트가 깨지지 않는다.
+    task 00160-1: 활성+유효 cron 이면 next_run_at 이 offset 있는 tz-aware ISO 다.
     """
     response = admin_client.put(
         "/api/admin/email/daily-report/settings",
@@ -470,15 +474,23 @@ def test_put_daily_report_settings_enabled_persists_and_next_run_at_is_none(
     data = response.json()
     assert data["enabled"] is True
     assert data["cron_expression"] == "30 9 * * 1-5"
-    # cron 데몬이 스케줄을 실행하므로 라이브 next_run_at 은 보유하지 않는다.
-    assert data["next_run_at"] is None
+    # task 00160-1: cron 으로 다음 실행 시각을 계산해 채운다 — None 이 아니어야 한다.
+    next_run_at = data["next_run_at"]
+    assert next_run_at is not None
+    # 프론트 formatDateTimeKst 가 올바르게 KST 변환하려면 offset 있는 ISO 여야 한다.
+    parsed_next_run = datetime.fromisoformat(next_run_at)
+    assert parsed_next_run.tzinfo is not None
+    # 계산된 다음 실행은 평일 09:30(KST) 이어야 한다.
+    next_run_kst = parsed_next_run.astimezone(ZoneInfo("Asia/Seoul"))
+    assert (next_run_kst.hour, next_run_kst.minute) == (9, 30)
+    assert next_run_kst.isoweekday() in range(1, 6)  # 월~금
 
     # SSOT(scheduled_jobs)에 실제로 커밋됐는지 확인 — 롤백되지 않았다.
     db_session.expire_all()
     daily_job = get_singleton_schedule(db_session, JOB_KIND_DAILY_REPORT)
     assert daily_job is not None and daily_job.enabled is True
 
-    # 새로고침(GET) 해도 활성화 상태와 cron 이 그대로 유지된다.
+    # 새로고침(GET) 해도 활성화 상태와 cron 이 그대로 유지되고 next_run_at 도 채워진다.
     get_response = admin_client.get(
         "/api/admin/email/daily-report/settings"
     )
@@ -486,14 +498,14 @@ def test_put_daily_report_settings_enabled_persists_and_next_run_at_is_none(
     get_data = get_response.json()
     assert get_data["enabled"] is True
     assert get_data["cron_expression"] == "30 9 * * 1-5"
-    assert get_data["next_run_at"] is None
+    assert get_data["next_run_at"] is not None
 
 
 def test_put_daily_report_settings_disabled_persists_and_next_run_at_is_none(
     admin_client: TestClient,
 ) -> None:
-    """활성화 후 비활성화 저장도 500 없이 200 이고 next_run_at 은 None (회귀 가드)."""
-    # 먼저 활성화한다.
+    """활성화 후 비활성화 저장 시 next_run_at 이 계산값→None 으로 바뀐다 (회귀 가드)."""
+    # 먼저 활성화한다 — 활성+유효 cron 이므로 next_run_at 이 채워진다.
     enable_response = admin_client.put(
         "/api/admin/email/daily-report/settings",
         json={
@@ -503,9 +515,9 @@ def test_put_daily_report_settings_disabled_persists_and_next_run_at_is_none(
         },
     )
     assert enable_response.status_code == 200, enable_response.text
-    assert enable_response.json()["next_run_at"] is None
+    assert enable_response.json()["next_run_at"] is not None
 
-    # 비활성화 — 200 + next_run_at None.
+    # 비활성화 — 200 + next_run_at None (비활성이면 다음 실행 예측을 내지 않는다).
     disable_response = admin_client.put(
         "/api/admin/email/daily-report/settings",
         json={

@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from app.scheduler.crontab_generator import (
     CronExpressionError,
+    compute_next_run,
+    interval_hours_to_cron_expression,
     validate_cron_expression,
 )
 from app.scheduler.crontab_installer import (
@@ -70,6 +72,7 @@ __all__ = [
     "ScheduledJobRecord",
     "add_general_schedule",
     "add_general_schedule_record",
+    "compute_next_run",
     "delete_general_schedule_record",
     "delete_scheduled_job",
     "ensure_default_seed_jobs",
@@ -77,6 +80,7 @@ __all__ = [
     "get_scheduled_job",
     "get_singleton_schedule",
     "install_crontab",
+    "interval_hours_to_cron_expression",
     "is_crontab_reinstall_enabled",
     "list_general_schedule_records",
     "list_general_schedules",

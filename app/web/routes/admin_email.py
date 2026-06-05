@@ -81,12 +81,18 @@ from app.email.sender import send_with_retry
 from app.email.transport.factory import build_transport_from_settings
 from app.scheduler import (
     CronExpressionError,
+    compute_next_run,
     get_singleton_schedule,
+    interval_hours_to_cron_expression,
     reinstall_crontab_after_change,
     upsert_singleton_schedule,
     validate_cron_expression,
 )
-from app.scheduler.constants import JOB_KIND_DAILY_REPORT
+from app.scheduler.constants import (
+    JOB_KIND_DAILY_REPORT,
+    TRIGGER_TYPE_INTERVAL,
+)
+from app.timezone import now_utc
 
 
 # ──────────────────────────────────────────────────────────────
@@ -922,14 +928,65 @@ def _build_recipient_overview(
     return recipients, eligible_count, without_email_count, unsubscribed_count
 
 
+def _compute_daily_report_next_run_at(session) -> str | None:
+    """Daily Report 싱글턴 스케줄에서 다음 실행 예측 시각을 계산해 ISO 로 반환한다.
+
+    task 00160-1 — task 00155 에서 웹 프로세스 내부 APScheduler 를 걷어내고 OS
+    cron 으로 전환하면서 라이브 ``next_run_time`` 을 잃어, 이 화면의 '다음 실행
+    예측'이 cron 이 활성·유효해도 항상 None 으로 떠 '— (비활성 또는 미등록)' 으로
+    표시되던 버그가 있었다. scheduled_jobs 의 daily_report 싱글턴(enabled + cron)을
+    읽어, OS cron 과 동일하게 KST 벽시계 기준으로 다음 실행 시각을 자체 계산한다.
+
+    반환 규약(FE applyDailyReportSettings 와 맞물림):
+        - enabled=True 이고 cron(또는 방어적으로 interval)이 유효 → 다음 실행
+          시각을 UTC offset 을 가진 tz-aware ISO 문자열로 반환. 프론트
+          ``formatDateTimeKst`` 가 offset 있는 ISO 만 올바르게 KST 변환하므로
+          ``as_utc(...).isoformat()`` 패턴(Daily Report 직렬화와 동일)을 따른다.
+        - enabled=False, 미등록(싱글턴 부재), cron 이 비어있거나 무효 → None.
+          FE 가 '— (비활성 또는 미등록)' 안내를 그대로 표시한다.
+
+    Returns:
+        다음 실행 시각의 tz-aware ISO 문자열, 또는 위 비활성/무효 케이스에서 None.
+    """
+    daily_report_job = get_singleton_schedule(session, JOB_KIND_DAILY_REPORT)
+    # 미등록(싱글턴 부재)이거나 비활성이면 다음 실행 예측을 내지 않는다.
+    if daily_report_job is None or not daily_report_job.enabled:
+        return None
+
+    # 우선순위는 cron 트리거. interval 트리거(매 N시간)도 방어적으로 cron 표현식으로
+    # 환산해 동일 경로로 계산한다.
+    if (
+        daily_report_job.trigger_type == TRIGGER_TYPE_INTERVAL
+        and daily_report_job.interval_hours is not None
+    ):
+        cron_expression = interval_hours_to_cron_expression(
+            daily_report_job.interval_hours
+        )
+    else:
+        cron_expression = (daily_report_job.cron_expression or "").strip()
+
+    if not cron_expression:
+        return None
+
+    # 현재 시각(UTC) 직후의 다음 실행 시각을 KST 벽시계 기준으로 계산한다.
+    next_run = compute_next_run(cron_expression, now_utc())
+    if next_run is None:
+        # cron 이 무효하거나 매칭이 없는 경우 — 비활성과 동일하게 안내한다.
+        return None
+
+    # compute_next_run 은 이미 UTC tz-aware 를 반환하지만, 다른 Daily Report
+    # 직렬화 경로와 동일한 패턴을 유지해 offset 있는 ISO 를 보장한다.
+    return as_utc(next_run).isoformat()
+
+
 def _build_daily_report_settings_response(session) -> DailyReportSettingsOut:
     """SystemSetting + 수신자 명단을 묶어 GET 응답으로 직렬화한다.
 
-    task 00155-4 — daily report 잡은 더 이상 웹 프로세스 내부 APScheduler 가
-    돌리지 않고 OS cron 데몬이 ``email.daily_report.cron_expression`` 시각에
-    실행한다. 따라서 정확한 ``next_run_at`` 을 보유한 라이브 스케줄러가 없어
-    None 으로 둔다. 운영자는 응답의 ``cron_expression`` 과 ``enabled`` 로 다음
-    실행 시점을 판단한다(FE 는 next_run_at 이 None 이면 안내 문구를 표시).
+    task 00160-1 — daily report 잡은 OS cron 데몬이 실행하므로 라이브
+    스케줄러의 ``next_run_time`` 을 보유하지 않는다. 대신 scheduled_jobs 싱글턴의
+    cron 표현식으로 다음 실행 시각을 자체 계산해(``_compute_daily_report_next_run_at``)
+    ``next_run_at`` 에 채운다. 비활성/미등록/무효 cron 이면 None 이 되어 FE 가
+    '— (비활성 또는 미등록)' 안내를 표시한다.
     """
     values = _load_daily_report_setting_values(session)
     (
@@ -943,8 +1000,8 @@ def _build_daily_report_settings_response(session) -> DailyReportSettingsOut:
         cron_expression=values["cron_expression"],
         last_sent_at=values["last_sent_at"],
         test_recipient=values["test_recipient"],
-        # cron 데몬이 스케줄을 실행하므로 라이브 next_run_time 은 보유하지 않는다.
-        next_run_at=None,
+        # cron 표현식으로 다음 실행 시각을 계산해 채운다(비활성/무효면 None).
+        next_run_at=_compute_daily_report_next_run_at(session),
         recipients=recipients,
         recipient_count_eligible=eligible_count,
         recipient_count_without_email=without_email_count,
