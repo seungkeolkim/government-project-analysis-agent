@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -102,15 +103,17 @@ from app.backup.service import (
     set_setting as set_backup_setting,
 )
 from app.scheduler import (
-    ScheduleValidationError,
-    add_cron_schedule,
-    add_interval_schedule,
-    delete_schedule,
-    get_backup_schedule_summary,
-    is_scheduler_running,
-    list_general_schedules,
-    register_backup_cron_schedule,
-    toggle_schedule,
+    SCHEDULE_MODE_CRON,
+    SCHEDULE_MODE_INTERVAL,
+    CronExpressionError,
+    GeneralScheduleRecord,
+    ScheduleConfigError,
+    add_general_schedule_record,
+    delete_general_schedule_record,
+    list_general_schedule_records,
+    reinstall_crontab_after_change,
+    set_general_schedule_enabled,
+    validate_cron_expression,
 )
 from app.scrape_control import (
     ComposeEnvironmentError,
@@ -865,6 +868,68 @@ def _schedule_flash_url(message: str, *, level: str) -> str:
     return f"/admin/schedule?{query}"
 
 
+@dataclass(frozen=True)
+class _GeneralScheduleView:
+    """[스케줄] 탭 템플릿이 1건의 일반 수집 스케줄을 렌더할 때 쓰는 표시용 DTO.
+
+    APScheduler 시절의 ``ScheduleSummary`` 가 제공하던 표면(job_id/trigger_type/
+    trigger_spec/active_sources/enabled)을 그대로 유지해 템플릿 변경을 최소화한다.
+    cron 데몬이 스케줄을 실행하므로 정확한 next_run_time 은 더 이상 보유하지 않고,
+    템플릿은 cron 표현식/활성 여부로 충분히 상태를 보여 준다.
+
+    Attributes:
+        job_id:         스케줄 식별자(:class:`GeneralScheduleRecord.id`).
+        trigger_type:   'cron' 또는 'interval'.
+        trigger_spec:   사람-친화 표현(cron 표현식 또는 '매 N시간').
+        active_sources: 트리거 시 수집할 source id 목록(빈 리스트=전체).
+        enabled:        활성 여부.
+    """
+
+    job_id: str
+    trigger_type: str
+    trigger_spec: str
+    active_sources: list[str]
+    enabled: bool
+
+
+def _build_general_schedule_view(record: GeneralScheduleRecord) -> _GeneralScheduleView:
+    """저장소 레코드를 [스케줄] 탭 표시용 DTO 로 변환한다.
+
+    interval 모드는 '매 N시간' 으로, cron 모드는 cron 표현식 그대로 표시한다.
+
+    Args:
+        record: 저장소에서 읽은 :class:`GeneralScheduleRecord`.
+
+    Returns:
+        템플릿이 렌더할 :class:`_GeneralScheduleView`.
+    """
+    if record.mode == SCHEDULE_MODE_INTERVAL:
+        trigger_spec = f"매 {record.interval_hours}시간"
+    else:
+        trigger_spec = record.cron_expression or ""
+    return _GeneralScheduleView(
+        job_id=record.id,
+        trigger_type=record.mode,
+        trigger_spec=trigger_spec,
+        active_sources=list(record.active_sources),
+        enabled=record.enabled,
+    )
+
+
+def _reinstall_crontab_quietly() -> None:
+    """스케줄/백업/Daily Report 설정 변경 후 crontab 을 재설치한다(비치명적).
+
+    :func:`reinstall_crontab_after_change` 는 ``ENABLE_CRON=1`` 컨테이너에서만
+    실제 설치하고, 개발/테스트 호스트나 설치 실패 시 graceful no-op 으로 결과를
+    돌려준다(예외를 던지지 않는다). 따라서 라우트는 설치 결과를 로깅만 하고
+    절대 500 으로 떨어지지 않는다. 호출 측은 **설정 저장 트랜잭션을 커밋한 뒤**
+    이 함수를 호출해야 한다(재설치가 새 세션으로 최신 설정을 다시 읽기 때문).
+    """
+    result = reinstall_crontab_after_change()
+    if not result.installed:
+        logger.info("crontab 재설치 생략/실패(비치명적): {}", result.reason)
+
+
 @router.get("/schedule", response_class=HTMLResponse)
 def schedule_page(
     request: Request,
@@ -872,22 +937,25 @@ def schedule_page(
     flash_level: Optional[str] = Query(default=None),
     current_user: User = Depends(admin_user_required),
 ) -> Response:
-    """[스케줄] 탭 — 등록된 스케줄 목록 + 신규 등록 폼.
+    """[스케줄] 탭 — 등록된 일반 수집 스케줄 목록 + 신규 등록 폼.
+
+    스케줄은 :mod:`app.scheduler.schedule_store` 영속 저장소에서 읽으며, 변경 시
+    crontab 을 재설치한다(컨테이너에서만 실제 설치). 백업/Daily Report 잡은 각
+    [시스템 백업]/[메일 발송] 탭에서 별도 관리하므로 본 목록에는 포함하지 않는다.
 
     템플릿 컨텍스트:
-        active_tab:         'schedule'.
-        schedules:          ScheduleSummary 리스트 (next_run_time 오름차순).
-        available_sources:  시작 폼에서 고를 수 있는 source id 목록.
-        scheduler_running:  APScheduler 가 기동되어 있는지.
+        schedules:          _GeneralScheduleView 리스트 (저장 순서 보존).
+        available_sources:  등록 폼에서 고를 수 있는 source id 목록.
         flash / flash_level: 상단 안내 배지.
         current_user:       네비 + is_admin 분기용.
     """
     logger.debug("admin.schedule_page 진입: user_id={}", current_user.id)
     try:
-        # 백업 잡은 [시스템 관리 > 시스템 백업] 탭에서 별도 노출하므로 여기서는 제외한다.
-        schedules = list_general_schedules()
+        with session_scope() as session:
+            records = list_general_schedule_records(session)
+        schedules = [_build_general_schedule_view(record) for record in records]
     except Exception as exc:
-        # jobstore 접근 실패 등 예외. UI 는 빈 목록으로 폴백하되 에러를 flash 로 노출.
+        # 저장소 접근 실패 등 예외. UI 는 빈 목록으로 폴백하되 에러를 flash 로 노출.
         logger.exception(
             "스케줄 목록 조회 실패: {}: {}", type(exc).__name__, exc,
         )
@@ -904,7 +972,6 @@ def schedule_page(
             "sub_tab": "schedule",
             "schedules": schedules,
             "available_sources": get_available_source_ids(),
-            "scheduler_running": is_scheduler_running(),
             "flash": flash,
             "flash_level": flash_level or "success",
             "current_user": current_user,
@@ -927,7 +994,7 @@ def _parse_schedule_active_sources(
         if not trimmed:
             continue
         if trimmed not in available:
-            raise ScheduleValidationError(
+            raise ScheduleConfigError(
                 f"알 수 없는 source id: {trimmed!r}. 허용: {', '.join(available)}"
             )
         if trimmed not in cleaned:
@@ -945,7 +1012,7 @@ def schedule_add(
     enabled: Optional[str] = Form(default=None),
     current_user: User = Depends(admin_user_required),
 ) -> Response:
-    """새 스케줄을 등록한다.
+    """새 일반 수집 스케줄을 저장소에 등록하고 crontab 을 재설치한다.
 
     Form 필드:
         trigger_type:    'cron' 또는 'interval' — 입력 분기.
@@ -955,9 +1022,10 @@ def schedule_add(
         enabled:         체크박스 'on' 또는 누락. 기본은 등록 즉시 활성.
 
     흐름 & 예외:
-        trigger_type 값이 유효하지 않거나 필드 누락이면 ScheduleValidationError
-        로 flash error redirect. add_*_schedule 이 raise 하는 동일 예외도 같은
-        경로로 처리. 성공 시 PRG 패턴(303) 로 /admin/schedule.
+        trigger_type/필드 누락 또는 cron 표현식·interval 범위 위반이면
+        ScheduleConfigError/CronExpressionError 로 flash error redirect. 저장
+        커밋 후 crontab 을 재설치한다(컨테이너에서만 실제 설치). 성공 시 PRG
+        패턴(303) 로 /admin/schedule.
     """
     trigger_type_normalized = trigger_type.strip().lower()
     should_enable = bool(enabled) and enabled != "off"
@@ -966,32 +1034,37 @@ def schedule_add(
     try:
         normalized_sources = _parse_schedule_active_sources(active_sources, available)
 
-        if trigger_type_normalized == "cron":
-            if not cron_expression:
-                raise ScheduleValidationError(
-                    "cron 표현식이 누락되었습니다."
+        with session_scope() as session:
+            if trigger_type_normalized == "cron":
+                if not cron_expression:
+                    raise ScheduleConfigError("cron 표현식이 누락되었습니다.")
+                # cron 표현식 내용을 먼저 검증한다(필드 개수 + 값 범위). 저장소도
+                # 필드 개수를 검증하지만, 라우트에서 값 범위까지 미리 막아 잘못된
+                # 표현식이 crontab 으로 흘러가지 않게 한다.
+                validated_expression = validate_cron_expression(cron_expression)
+                record = add_general_schedule_record(
+                    session,
+                    mode=SCHEDULE_MODE_CRON,
+                    cron_expression=validated_expression,
+                    active_sources=normalized_sources,
+                    enabled=should_enable,
                 )
-            summary = add_cron_schedule(
-                cron_expression=cron_expression,
-                active_sources=normalized_sources,
-                enabled=should_enable,
-            )
-        elif trigger_type_normalized == "interval":
-            if interval_hours is None:
-                raise ScheduleValidationError(
-                    "매 N시간 값이 누락되었습니다."
+            elif trigger_type_normalized == "interval":
+                if interval_hours is None:
+                    raise ScheduleConfigError("매 N시간 값이 누락되었습니다.")
+                record = add_general_schedule_record(
+                    session,
+                    mode=SCHEDULE_MODE_INTERVAL,
+                    interval_hours=interval_hours,
+                    active_sources=normalized_sources,
+                    enabled=should_enable,
                 )
-            summary = add_interval_schedule(
-                hours=interval_hours,
-                active_sources=normalized_sources,
-                enabled=should_enable,
-            )
-        else:
-            raise ScheduleValidationError(
-                f"지원하지 않는 trigger_type: {trigger_type!r}. "
-                "'cron' 또는 'interval' 만 허용합니다."
-            )
-    except ScheduleValidationError as exc:
+            else:
+                raise ScheduleConfigError(
+                    f"지원하지 않는 trigger_type: {trigger_type!r}. "
+                    "'cron' 또는 'interval' 만 허용합니다."
+                )
+    except (ScheduleConfigError, CronExpressionError) as exc:
         logger.info(
             "스케줄 등록 거부 — 검증 실패: 관리자={} ({})",
             current_user.username, exc,
@@ -1001,7 +1074,6 @@ def schedule_add(
             status_code=status.HTTP_303_SEE_OTHER,
         )
     except Exception as exc:
-        # APScheduler 자체의 오류(jobstore 연결 실패 등)
         logger.exception(
             "스케줄 등록 실패(예기치 못한 예외): 관리자={} ({}: {})",
             current_user.username, type(exc).__name__, exc,
@@ -1014,17 +1086,21 @@ def schedule_add(
             status_code=status.HTTP_303_SEE_OTHER,
         )
 
+    # 저장이 커밋된 뒤 crontab 을 재설치한다(새 세션이 방금 저장한 값을 읽는다).
+    _reinstall_crontab_quietly()
+
+    view = _build_general_schedule_view(record)
     logger.info(
-        "스케줄 등록: 관리자={} job_id={} trigger_type={} spec={!r} enabled={}",
+        "스케줄 등록: 관리자={} id={} trigger_type={} spec={!r} enabled={}",
         current_user.username,
-        summary.job_id,
-        summary.trigger_type,
-        summary.trigger_spec,
-        summary.enabled,
+        view.job_id,
+        view.trigger_type,
+        view.trigger_spec,
+        view.enabled,
     )
     message = (
-        f"스케줄 등록 완료 (id={summary.job_id}, {summary.trigger_type}: "
-        f"{summary.trigger_spec}, enabled={summary.enabled})."
+        f"스케줄 등록 완료 (id={view.job_id}, {view.trigger_type}: "
+        f"{view.trigger_spec}, enabled={view.enabled})."
     )
     return RedirectResponse(
         url=_schedule_flash_url(message, level="success"),
@@ -1041,7 +1117,7 @@ def schedule_toggle(
     enabled: str = Form(...),
     current_user: User = Depends(admin_user_required),
 ) -> Response:
-    """스케줄을 활성/비활성 토글한다.
+    """스케줄을 활성/비활성 토글하고 crontab 을 재설치한다.
 
     Form:
         enabled: 'true' 또는 'false' 문자열. 체크박스 POST 와 맞추기 위해
@@ -1059,8 +1135,9 @@ def schedule_toggle(
     target_enabled = normalized == "true"
 
     try:
-        summary = toggle_schedule(job_id, enabled=target_enabled)
-    except ScheduleValidationError as exc:
+        with session_scope() as session:
+            set_general_schedule_enabled(session, job_id, enabled=target_enabled)
+    except ScheduleConfigError as exc:
         logger.info(
             "스케줄 토글 실패: 관리자={} job_id={} ({})",
             current_user.username, job_id, exc,
@@ -1070,12 +1147,13 @@ def schedule_toggle(
             status_code=status.HTTP_303_SEE_OTHER,
         )
 
+    _reinstall_crontab_quietly()
+
     logger.info(
-        "스케줄 토글 완료: 관리자={} job_id={} enabled={} next_run_time={}",
+        "스케줄 토글 완료: 관리자={} job_id={} enabled={}",
         current_user.username,
         job_id,
-        summary.enabled,
-        summary.next_run_time,
+        target_enabled,
     )
     verb = "활성화" if target_enabled else "비활성화"
     return RedirectResponse(
@@ -1095,21 +1173,27 @@ def schedule_delete(
     job_id: str,
     current_user: User = Depends(admin_user_required),
 ) -> Response:
-    """스케줄을 삭제한다 (jobstore 에서 제거).
+    """스케줄을 저장소에서 삭제하고 crontab 을 재설치한다.
 
     삭제 전에 확인 팝업은 UI JS 가 처리한다.
     """
-    try:
-        delete_schedule(job_id)
-    except ScheduleValidationError as exc:
+    with session_scope() as session:
+        deleted = delete_general_schedule_record(session, job_id)
+
+    if not deleted:
         logger.info(
-            "스케줄 삭제 실패: 관리자={} job_id={} ({})",
-            current_user.username, job_id, exc,
+            "스케줄 삭제 실패(없음): 관리자={} job_id={}",
+            current_user.username, job_id,
         )
         return RedirectResponse(
-            url=_schedule_flash_url(str(exc), level="error"),
+            url=_schedule_flash_url(
+                f"스케줄 id={job_id!r} 를 찾을 수 없습니다.",
+                level="error",
+            ),
             status_code=status.HTTP_303_SEE_OTHER,
         )
+
+    _reinstall_crontab_quietly()
 
     logger.info(
         "스케줄 삭제 완료: 관리자={} job_id={}",
@@ -2028,12 +2112,10 @@ def backup_page(
     템플릿 컨텍스트:
         top_tab:          'system_group'.
         sub_tab:          'backup'.
-        backup_cron:      현재 저장된 cron 표현식.
+        backup_cron:      현재 저장된 cron 표현식 (cron 데몬이 실행).
         backup_max_count: 현재 저장된 최대 보관 개수 (str).
-        backup_schedule:  APScheduler 에 등록된 백업 잡 ScheduleSummary | None.
         history:          BackupHistory 리스트 (최신 먼저).
         backup_files:     list[dict] — filename, size_bytes, modified_at.
-        scheduler_running: APScheduler 기동 여부.
         flash / flash_level: 상단 안내 배지.
         current_user:     네비 분기용.
     """
@@ -2052,10 +2134,8 @@ def backup_page(
             "sub_tab": "backup",
             "backup_cron": settings["cron_expression"],
             "backup_max_count": settings["max_count"],
-            "backup_schedule": get_backup_schedule_summary(),
             "history": history,
             "backup_files": backup_files,
-            "scheduler_running": is_scheduler_running(),
             "flash": flash,
             "flash_level": flash_level or "success",
             "current_user": current_user,
@@ -2070,7 +2150,7 @@ def backup_settings_save(
     max_count: int = Form(...),
     current_user: User = Depends(admin_user_required),
 ) -> Response:
-    """백업 설정(cron 표현식·보관 개수)을 저장하고 스케줄을 갱신한다.
+    """백업 설정(cron 표현식·보관 개수)을 저장하고 crontab 을 재설치한다.
 
     Form 필드:
         cron_expression: 5-필드 cron 표현식.
@@ -2078,10 +2158,12 @@ def backup_settings_save(
 
     흐름:
         1. max_count 최솟값 검증 (< 1 이면 flash error redirect).
-        2. register_backup_cron_schedule 로 APScheduler 잡 갱신.
-           ScheduleValidationError → flash error redirect.
+        2. cron 표현식 검증(필드 개수 + 값 범위). 위반 시 flash error redirect.
         3. SystemSetting 에 cron_expression · max_count 저장.
-        4. 성공 → PRG 패턴(303) /admin/backup.
+        4. 저장 커밋 후 crontab 재설치(컨테이너에서만 실제 설치). cron 데몬이
+           ``backup.cron_expression`` 시각에 ``python -m app.scheduler.run_job
+           backup`` 을 호출한다.
+        5. 성공 → PRG 패턴(303) /admin/backup.
     """
     if max_count < 1:
         return RedirectResponse(
@@ -2090,31 +2172,23 @@ def backup_settings_save(
         )
 
     try:
-        register_backup_cron_schedule(cron_expression=cron_expression)
-    except ScheduleValidationError as exc:
+        validate_cron_expression(cron_expression)
+    except CronExpressionError as exc:
         logger.info(
-            "백업 스케줄 등록 거부 — 검증 실패: 관리자={} ({})",
+            "백업 설정 저장 거부 — cron 표현식 검증 실패: 관리자={} ({})",
             current_user.username, exc,
         )
         return RedirectResponse(
             url=_backup_flash_url(str(exc), level="error"),
             status_code=status.HTTP_303_SEE_OTHER,
         )
-    except Exception as exc:
-        logger.exception(
-            "백업 스케줄 등록 실패(예기치 못한 예외): 관리자={} ({}: {})",
-            current_user.username, type(exc).__name__, exc,
-        )
-        return RedirectResponse(
-            url=_backup_flash_url(
-                f"스케줄 등록 실패({type(exc).__name__}): {exc}", level="error"
-            ),
-            status_code=status.HTTP_303_SEE_OTHER,
-        )
 
     with session_scope() as session:
         set_backup_setting(session, SETTING_KEY_BACKUP_CRON, cron_expression)
         set_backup_setting(session, SETTING_KEY_BACKUP_MAX_COUNT, str(max_count))
+
+    # 저장이 커밋된 뒤 crontab 을 재설치한다(새 백업 cron 이 반영되도록).
+    _reinstall_crontab_quietly()
 
     logger.info(
         "백업 설정 저장: 관리자={} cron={!r} max_count={}",

@@ -35,6 +35,7 @@ crontab 에 **설치**한다.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -57,6 +58,14 @@ CRONTAB_BINARY_NAME: str = "crontab"
 # python_executable 은 절대경로로 직접 호출하므로 PATH 비의존이지만, scrape 잡이
 # 호출하는 docker(/usr/bin/docker) 와 docker compose 플러그인 탐색을 위해 둔다.
 DEFAULT_JOB_PATH: str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# 컨테이너 기동 시 entrypoint(00155-3)가 cron 데몬을 띄우는 app 서비스에만
+# ``ENABLE_CRON=1`` 을 주입한다. admin 라우트가 설정 변경 후 crontab 을 재설치할
+# 때, 이 값이 1 인 컨테이너 환경에서만 실제 설치하고, 개발/테스트 호스트(미설정)
+# 에서는 graceful no-op 으로 처리한다 — 그래야 테스트가 실행 호스트의 실제
+# crontab 을 덮어쓰지 않는다(crontab 바이너리는 리눅스 호스트에 흔히 존재).
+ENABLE_CRON_ENV_VAR: str = "ENABLE_CRON"
+ENABLE_CRON_ENABLED_VALUE: str = "1"
 
 
 @dataclass(frozen=True)
@@ -224,6 +233,59 @@ def install_crontab(
     return CrontabInstallResult(installed=True, crontab_text=crontab_text)
 
 
+def is_crontab_reinstall_enabled() -> bool:
+    """admin 라우트의 crontab 재설치를 실제로 수행할 환경인지 판정한다.
+
+    ``ENABLE_CRON=1`` 인 컨테이너(entrypoint 가 cron 데몬을 띄운 app 서비스)에서만
+    True 다. 개발/테스트 호스트(미설정)에서는 False 라서 재설치가 graceful no-op
+    이 된다.
+
+    Returns:
+        ``ENABLE_CRON`` 환경변수가 ``"1"`` 이면 True, 그 외 False.
+    """
+    return os.environ.get(ENABLE_CRON_ENV_VAR, "").strip() == ENABLE_CRON_ENABLED_VALUE
+
+
+def reinstall_crontab_after_change(
+    *, settings: Settings | None = None
+) -> CrontabInstallResult:
+    """admin 이 스케줄/백업/Daily Report 설정을 변경한 뒤 crontab 을 재설치한다.
+
+    호출 측(admin 라우트)이 SystemSetting/스케줄 저장소 쓰기를 **커밋한 뒤** 호출
+    해야 한다. 본 함수는 새 세션으로 최신 설정을 다시 읽어 crontab 을 렌더·설치
+    하기 때문이다(트랜잭션이 열린 채 호출하면 새 세션이 미커밋 값을 못 본다).
+
+    graceful 정책(라우트가 절대 500 나지 않도록):
+        - ``ENABLE_CRON != 1`` (개발/테스트 호스트): 실제 crontab 을 건드리지 않고
+          ``installed=False`` 로 즉시 반환한다.
+        - 컨테이너인데 ``crontab`` 바이너리 부재/설치 실패: :func:`install_crontab`
+          이 graceful no-op 으로 처리한다.
+        - 그 외 예기치 못한 예외(설정 읽기 중 DB 오류 등): swallow + 경고 로그 후
+          ``installed=False`` 로 반환한다. 설정 저장 자체는 이미 끝났으므로 다음
+          컨테이너 재기동/설정 변경 시 crontab 이 다시 동기화된다.
+
+    Args:
+        settings: 경로 산출용 설정(None 이면 싱글턴).
+
+    Returns:
+        설치 결과(:class:`CrontabInstallResult`).
+    """
+    if not is_crontab_reinstall_enabled():
+        reason = (
+            f"{ENABLE_CRON_ENV_VAR}!={ENABLE_CRON_ENABLED_VALUE} — crontab 재설치를 "
+            "건너뜁니다(컨테이너 밖 개발/테스트 호스트)."
+        )
+        logger.info("crontab 재설치 skip — {}", reason)
+        return CrontabInstallResult(installed=False, crontab_text="", reason=reason)
+
+    try:
+        return install_crontab(settings=settings)
+    except Exception as exc:
+        reason = f"crontab 재설치 중 예기치 못한 예외: {type(exc).__name__}: {exc}"
+        logger.warning("crontab 재설치 실패(비치명적, 설정 저장은 완료) — {}", reason)
+        return CrontabInstallResult(installed=False, crontab_text="", reason=reason)
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI 진입점. 현재 유저 crontab 을 DB 설정 기준으로 설치한다.
 
@@ -258,9 +320,13 @@ __all__ = [
     "CRONTAB_BINARY_NAME",
     "CrontabInstallResult",
     "DEFAULT_JOB_PATH",
+    "ENABLE_CRON_ENABLED_VALUE",
+    "ENABLE_CRON_ENV_VAR",
     "build_runtime_environment",
     "install_crontab",
+    "is_crontab_reinstall_enabled",
     "main",
+    "reinstall_crontab_after_change",
     "render_runtime_crontab",
 ]
 

@@ -105,14 +105,12 @@ def test_backup_page_shows_default_cron(admin_client: TestClient) -> None:
 def test_backup_settings_save_ok(
     admin_client: TestClient,
     db_session: Session,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """유효한 설정 저장 → DB 에 반영되고 303 success redirect."""
-    monkeypatch.setattr(
-        "app.web.routes.admin.register_backup_cron_schedule",
-        lambda *, cron_expression: None,
-    )
+    """유효한 설정 저장 → DB 에 반영되고 303 success redirect.
 
+    저장 후 crontab 재설치는 ``ENABLE_CRON=1`` 컨테이너에서만 실제 수행되고,
+    테스트 호스트에서는 graceful no-op 이라 라우트가 500 나지 않는다(task 00155-4).
+    """
     resp = admin_client.post(
         "/admin/backup/settings",
         data={"cron_expression": "0 4 * * *", "max_count": "14"},
@@ -133,14 +131,8 @@ def test_backup_settings_save_ok(
 
 def test_backup_settings_invalid_max_count_zero(
     admin_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """max_count=0 이면 저장 거부 — error flash redirect."""
-    monkeypatch.setattr(
-        "app.web.routes.admin.register_backup_cron_schedule",
-        lambda *, cron_expression: None,
-    )
-
     resp = admin_client.post(
         "/admin/backup/settings",
         data={"cron_expression": "0 3 * * *", "max_count": "0"},
@@ -152,21 +144,16 @@ def test_backup_settings_invalid_max_count_zero(
 
 def test_backup_settings_invalid_cron_error_flash(
     admin_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """유효하지 않은 cron 표현식 → ScheduleValidationError → error flash redirect."""
-    from app.scheduler import ScheduleValidationError
+    """유효하지 않은 cron 표현식 → CronExpressionError → error flash redirect.
 
-    monkeypatch.setattr(
-        "app.web.routes.admin.register_backup_cron_schedule",
-        lambda *, cron_expression: (_ for _ in ()).throw(
-            ScheduleValidationError("잘못된 cron 표현식")
-        ),
-    )
-
+    task 00155-4 — 백업 cron 검증이 APScheduler 의 build_cron_trigger 대신 순수
+    검증 함수(validate_cron_expression)로 바뀌었다. 'bad cron' 은 5필드지만 분
+    필드 값('bad')이 숫자가 아니라 거부된다.
+    """
     resp = admin_client.post(
         "/admin/backup/settings",
-        data={"cron_expression": "bad cron", "max_count": "7"},
+        data={"cron_expression": "bad 3 * * *", "max_count": "7"},
         follow_redirects=False,
     )
     assert resp.status_code == 303

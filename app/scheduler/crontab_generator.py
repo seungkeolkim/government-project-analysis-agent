@@ -128,6 +128,159 @@ class CrontabJob:
     log_filename: str
 
 
+class CronExpressionError(ValueError):
+    """표준 5-필드 cron 표현식이 crontab 규약에 맞지 않을 때 발생한다.
+
+    task 00155-4 — APScheduler 의 ``build_cron_trigger`` (요일 보정 + 파싱) 를
+    제거하면서, admin 라우트(스케줄/백업/Daily Report)가 cron 표현식을 검증할
+    단일 진실 함수가 필요해졌다. system cron 은 표준 crontab 규약(0=일·1=월,
+    1-5=월~금)을 그대로 해석하므로, 요일 보정 없이 필드별 범위만 검증한다.
+
+    ``ValueError`` 를 상속해 admin 라우트가 flash 메시지/422 로 변환하기 쉽다.
+    """
+
+
+# 각 cron 필드의 (사람-친화 라벨, 최소값, 최대값, 허용 별칭 맵).
+# 요일 별칭은 sun=0..sat=6 으로 매핑하되, 숫자 범위는 0~7 을 허용해 7 도
+# 일요일로 받아들인다(표준 crontab 규약). 월 별칭은 jan=1..dec=12.
+_CRON_MONTH_ALIASES: dict[str, int] = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+_CRON_DAY_OF_WEEK_ALIASES: dict[str, int] = {
+    "sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6,
+}
+_CRON_FIELD_SPECS: tuple[tuple[str, int, int, dict[str, int] | None], ...] = (
+    ("분", 0, 59, None),
+    ("시", 0, 23, None),
+    ("일", 1, 31, None),
+    ("월", 1, 12, _CRON_MONTH_ALIASES),
+    ("요일", 0, 7, _CRON_DAY_OF_WEEK_ALIASES),
+)
+
+
+def _resolve_cron_value(
+    token: str,
+    *,
+    label: str,
+    low: int,
+    high: int,
+    aliases: dict[str, int] | None,
+) -> int:
+    """단일 cron 값 토큰(숫자 또는 별칭)을 정수로 해석하고 범위를 검증한다.
+
+    Args:
+        token:   해석할 단일 값(예: ``"5"``, ``"mon"``).
+        label:   에러 메시지용 필드 라벨(예: ``"요일"``).
+        low:     이 필드가 허용하는 최소 정수.
+        high:    이 필드가 허용하는 최대 정수.
+        aliases: 허용 별칭 맵(월/요일). 없으면 None.
+
+    Returns:
+        검증을 통과한 정수 값.
+
+    Raises:
+        CronExpressionError: 별칭이 아니고 정수도 아니거나 범위를 벗어난 경우.
+    """
+    normalized = token.strip()
+    if aliases is not None and normalized.lower() in aliases:
+        return aliases[normalized.lower()]
+    try:
+        number = int(normalized)
+    except ValueError as exc:
+        raise CronExpressionError(
+            f"{label} 필드 값이 올바르지 않습니다: {token!r}."
+        ) from exc
+    if not (low <= number <= high):
+        raise CronExpressionError(
+            f"{label} 필드 값 {number} 가 허용 범위({low}~{high})를 벗어났습니다."
+        )
+    return number
+
+
+def _validate_cron_element(
+    element: str,
+    *,
+    label: str,
+    low: int,
+    high: int,
+    aliases: dict[str, int] | None,
+) -> None:
+    """콤마 리스트의 단일 항목(``*``/범위/스텝/단일 값)을 검증한다.
+
+    허용 형태: ``*``, ``*/step``, ``a-b``, ``a-b/step``, ``a`` (단일 값/별칭).
+
+    Raises:
+        CronExpressionError: 스텝이 양의 정수가 아니거나, 범위 시작>끝, 또는
+            값이 필드 범위를 벗어난 경우.
+    """
+    base = element
+    if "/" in element:
+        base, _, step_text = element.partition("/")
+        if not step_text.isdigit() or int(step_text) == 0:
+            raise CronExpressionError(
+                f"{label} 필드의 스텝 값이 올바르지 않습니다: {element!r} "
+                "(스텝은 양의 정수여야 합니다)."
+            )
+
+    if base == "*":
+        return
+
+    if "-" in base:
+        start_text, _, end_text = base.partition("-")
+        start_value = _resolve_cron_value(
+            start_text, label=label, low=low, high=high, aliases=aliases
+        )
+        end_value = _resolve_cron_value(
+            end_text, label=label, low=low, high=high, aliases=aliases
+        )
+        if start_value > end_value:
+            raise CronExpressionError(
+                f"{label} 범위의 시작({start_value})이 끝({end_value})보다 큽니다."
+            )
+        return
+
+    _resolve_cron_value(base, label=label, low=low, high=high, aliases=aliases)
+
+
+def validate_cron_expression(cron_expression: str) -> str:
+    """표준 5-필드 system crontab 표현식을 검증하고 정규화(공백 정리)한다.
+
+    APScheduler 의 ``build_cron_trigger`` 를 대체하는 순수 검증 함수다. 요일
+    보정은 적용하지 않고(system cron 규약 그대로), 필드 개수(5)와 각 필드의
+    값 범위만 검증한다. 콤마 리스트·범위(``a-b``)·스텝(``*/n``, ``a-b/n``)·월/요일
+    별칭(JAN/MON 등)을 지원한다.
+
+    Args:
+        cron_expression: 검증할 cron 표현식.
+
+    Returns:
+        필드 사이 중복 공백이 단일 공백으로 정리된 5-필드 표현식.
+
+    Raises:
+        CronExpressionError: 필드 개수가 5가 아니거나, 어떤 필드의 값/범위/스텝이
+            crontab 규약을 위반한 경우.
+    """
+    fields = cron_expression.split()
+    if len(fields) != 5:
+        raise CronExpressionError(
+            f"cron 표현식은 5개 필드(분 시 일 월 요일)여야 합니다 "
+            f"(입력: {cron_expression!r})."
+        )
+
+    for value, (label, low, high, aliases) in zip(fields, _CRON_FIELD_SPECS):
+        for element in value.split(","):
+            if element == "":
+                raise CronExpressionError(
+                    f"{label} 필드에 빈 항목이 있습니다 (입력: {value!r})."
+                )
+            _validate_cron_element(
+                element, label=label, low=low, high=high, aliases=aliases
+            )
+
+    return " ".join(fields)
+
+
 def interval_hours_to_cron_expression(interval_hours: int) -> str:
     """'매 N시간' interval 을 동등한 표준 cron 표현식으로 변환한다.
 
@@ -443,6 +596,7 @@ def generate_crontab_text(
 
 
 __all__ = [
+    "CronExpressionError",
     "CrontabEnvironment",
     "CrontabJob",
     "DEFAULT_CRON_TIMEZONE",
@@ -457,4 +611,5 @@ __all__ = [
     "generate_crontab_text",
     "interval_hours_to_cron_expression",
     "render_crontab",
+    "validate_cron_expression",
 ]

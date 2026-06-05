@@ -149,7 +149,6 @@ def test_app_startup_aborts_when_host_project_dir_missing(
     """
     from fastapi.testclient import TestClient
 
-    from app.scheduler import stop_scheduler
     from app.web.main import create_app
 
     # conftest 의 autouse 픽스처가 넣어 둔 기본 HOST_PROJECT_DIR 를 제거해
@@ -157,16 +156,11 @@ def test_app_startup_aborts_when_host_project_dir_missing(
     monkeypatch.delenv(HOST_PROJECT_DIR_ENV_VAR, raising=False)
 
     app = create_app()
-    try:
-        with pytest.raises(ComposeEnvironmentError) as exc_info:
-            with TestClient(app):
-                pass
+    with pytest.raises(ComposeEnvironmentError) as exc_info:
+        with TestClient(app):
+            pass
 
-        assert HOST_PROJECT_DIR_ENV_VAR in str(exc_info.value)
-    finally:
-        # 검증은 start_scheduler() 이전에 실패하므로 스케줄러는 기동되지 않지만,
-        # 직전/이후 테스트와의 _scheduler 싱글턴 누수를 막기 위해 방어적으로 정지.
-        stop_scheduler(wait=False)
+    assert HOST_PROJECT_DIR_ENV_VAR in str(exc_info.value)
 
 
 def test_app_startup_succeeds_when_host_project_dir_set(
@@ -180,7 +174,6 @@ def test_app_startup_succeeds_when_host_project_dir_set(
     """
     from fastapi.testclient import TestClient
 
-    from app.scheduler import stop_scheduler
     from app.web.main import create_app
 
     # conftest autouse 픽스처가 이미 HOST_PROJECT_DIR 를 주입했지만, 의도를
@@ -188,10 +181,7 @@ def test_app_startup_succeeds_when_host_project_dir_set(
     monkeypatch.setenv(HOST_PROJECT_DIR_ENV_VAR, _TEST_HOST_PROJECT_DIR)
 
     app = create_app()
-    try:
-        # startup 훅이 예외 없이 통과하면 with-블록 진입이 성공한다.
-        with TestClient(app) as client:
-            response = client.get("/")
-            assert response.status_code == 200
-    finally:
-        stop_scheduler(wait=False)
+    # startup 훅이 예외 없이 통과하면 with-블록 진입이 성공한다.
+    with TestClient(app) as client:
+        response = client.get("/")
+        assert response.status_code == 200

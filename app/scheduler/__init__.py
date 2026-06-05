@@ -1,73 +1,62 @@
-"""웹 프로세스 내부에서 도는 APScheduler 통합 (Phase 2 / 00025-6).
+"""system crontab 기반 스케줄 관리 패키지 (task 00155).
 
-관리자 페이지 [스케줄] 탭이 사용하는 API 집합.
-외부에서는 본 패키지의 공개 심볼만 쓰고 하위 모듈(service/job_runner/constants)
-을 직접 import 하지 않는다.
+배경 (구조 전환):
+    예전에는 웹 프로세스 내부 APScheduler(SW 스케줄러)가 공고 수집·백업·Daily
+    Report·GC 를 돌렸다. 그러나 그 단일 스레드가 한 번의 ``database is locked``
+    예외로 사망하면(error.log 18b0d4249dbf) 이후 모든 스케줄이 영구 정지하는
+    single-point-of-failure 였다. task 00155 에서 APScheduler 를 완전히 걷어내고,
+    컨테이너 기동 시 스케줄 설정을 읽어 **실제 OS crontab** 에 등록한 뒤 cron
+    데몬이 직접 작업 CLI(:mod:`app.scheduler.run_job`)를 호출하는 구조로 바꿨다.
 
-설계 근거:
-    docs/scrape_control_design.md §13. APScheduler 3.x BackgroundScheduler +
-    SQLAlchemyJobStore('scheduler_jobs' 테이블) + misfire_grace_time·coalesce·
-    max_instances=1 보호.
+공개 API (관리자 라우트가 사용하는 표면):
+    - 일반 수집 스케줄 영속 저장소(:mod:`app.scheduler.schedule_store`):
+      ``list/get/add/delete/toggle`` + ``GeneralScheduleRecord`` + 모드 상수.
+    - cron 표현식 검증(:func:`validate_cron_expression`) + 예외
+      (:class:`CronExpressionError`).
+    - 설정 변경 후 crontab 재설치(:func:`reinstall_crontab_after_change`).
+
+외부(admin 라우트 등)에서는 본 패키지의 공개 심볼만 import 하고, 하위 모듈을
+직접 참조하지 않는다.
 """
 
 from __future__ import annotations
 
-from app.scheduler.constants import (
-    DEFAULT_MISFIRE_GRACE_TIME_SEC,
-    JOB_ID_DAILY_REPORT,
-    SCHEDULER_JOBS_TABLENAME,
+from app.scheduler.crontab_generator import (
+    CronExpressionError,
+    validate_cron_expression,
 )
-from app.scheduler.job_runner import (
-    scheduled_backup_job,
-    scheduled_daily_report_job,
-    scheduled_scrape,
+from app.scheduler.crontab_installer import (
+    CrontabInstallResult,
+    install_crontab,
+    is_crontab_reinstall_enabled,
+    reinstall_crontab_after_change,
 )
-from app.scheduler.service import (
-    ScheduleSummary,
-    ScheduleValidationError,
-    add_cron_schedule,
-    add_interval_schedule,
-    delete_schedule,
-    ensure_backup_cron_registered,
-    ensure_daily_report_cron_registered,
-    get_backup_schedule_summary,
-    get_daily_report_schedule_summary,
-    is_scheduler_running,
-    list_general_schedules,
-    list_schedules,
-    register_backup_cron_schedule,
-    register_daily_report_cron_schedule,
-    remove_backup_cron_schedule,
-    remove_daily_report_cron_schedule,
-    start as start_scheduler,
-    stop as stop_scheduler,
-    toggle_schedule,
+from app.scheduler.schedule_store import (
+    SCHEDULE_MODE_CRON,
+    SCHEDULE_MODE_INTERVAL,
+    GeneralScheduleRecord,
+    ScheduleConfigError,
+    add_general_schedule_record,
+    delete_general_schedule_record,
+    get_general_schedule_record,
+    list_general_schedule_records,
+    set_general_schedule_enabled,
 )
 
 __all__ = [
-    "DEFAULT_MISFIRE_GRACE_TIME_SEC",
-    "JOB_ID_DAILY_REPORT",
-    "SCHEDULER_JOBS_TABLENAME",
-    "ScheduleSummary",
-    "ScheduleValidationError",
-    "add_cron_schedule",
-    "add_interval_schedule",
-    "delete_schedule",
-    "ensure_backup_cron_registered",
-    "ensure_daily_report_cron_registered",
-    "get_backup_schedule_summary",
-    "get_daily_report_schedule_summary",
-    "is_scheduler_running",
-    "list_general_schedules",
-    "list_schedules",
-    "register_backup_cron_schedule",
-    "register_daily_report_cron_schedule",
-    "remove_backup_cron_schedule",
-    "remove_daily_report_cron_schedule",
-    "scheduled_backup_job",
-    "scheduled_daily_report_job",
-    "scheduled_scrape",
-    "start_scheduler",
-    "stop_scheduler",
-    "toggle_schedule",
+    "CronExpressionError",
+    "CrontabInstallResult",
+    "GeneralScheduleRecord",
+    "SCHEDULE_MODE_CRON",
+    "SCHEDULE_MODE_INTERVAL",
+    "ScheduleConfigError",
+    "add_general_schedule_record",
+    "delete_general_schedule_record",
+    "get_general_schedule_record",
+    "install_crontab",
+    "is_crontab_reinstall_enabled",
+    "list_general_schedule_records",
+    "reinstall_crontab_after_change",
+    "set_general_schedule_enabled",
+    "validate_cron_expression",
 ]

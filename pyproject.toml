@@ -52,14 +52,10 @@ dependencies = [
     "passlib[bcrypt]>=1.7,<2.0",
     "bcrypt>=4.0,<5.0",
 
-    # 스케줄러 (Phase 2 / 00025 — 웹 프로세스 내부 APScheduler BackgroundScheduler)
-    # docs/scrape_control_design.md §13 참조. SQLAlchemyJobStore 로 scheduler_jobs
-    # 테이블에 job 을 영속화해 웹 재시작 시 스케줄을 복원한다.
-    # **주의**: APScheduler 4.x 는 API 가 대대적으로 바뀌어(async-first, data store
-    # 추상화 개편) 3.x 코드와 호환되지 않는다. 본 task 는 3.x 라인에 고정한다.
-    # (실제 import 는 00025-6 스케줄 탭 통합 시점까지 지연 — 선언만 먼저 넣어 둬도
-    # 기동에 영향을 주지 않는다.)
-    "apscheduler>=3.10,<4.0",
+    # 스케줄러: task 00155 에서 웹 프로세스 내부 APScheduler 를 완전히 제거하고
+    # OS cron 데몬 + crontab 으로 전환했다(컨테이너 기동 시 스케줄 설정을 읽어
+    # crontab 에 등록, cron 이 app.scheduler.run_job CLI 를 직접 호출). 더 이상
+    # apscheduler 의존성이 필요 없다.
 
     # Phase A-1 (task 00104) — M365 OAuth XOAUTH2 SMTP 발송용 Microsoft Authentication Library.
     # docs/phase_a1_design_note.md §6 참조. msal.ConfidentialClientApplication 으로

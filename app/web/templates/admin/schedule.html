@@ -1,20 +1,23 @@
 {#
-  [스케줄] 탭 — APScheduler 스케줄 관리 UI (Phase 2 / 00025-6).
+  [스케줄] 탭 — system crontab 기반 일반 수집 스케줄 관리 UI (task 00155-4).
 
   구성:
     1. flash 배지 (등록/토글/삭제 결과).
-    2. scheduler 미기동 경고 (가동 실패 시 목록/등록 모두 비활성).
-    3. 현재 스케줄 목록 테이블 — id / trigger / active_sources / next_run /
+    2. 현재 스케줄 목록 테이블 — id / trigger / active_sources / 상태 /
        토글·삭제 버튼.
-    4. 신규 스케줄 등록 폼 — cron 과 interval 두 영역.
+    3. 신규 스케줄 등록 폼 — cron 과 interval 두 영역.
 
   컨텍스트 규약:
-    - active_tab:        'schedule'
-    - schedules:         ScheduleSummary 리스트 (next_run_time 오름차순).
+    - schedules:         _GeneralScheduleView 리스트 (저장 순서 보존).
+                         각 항목: job_id / trigger_type / trigger_spec /
+                         active_sources / enabled.
     - available_sources: ['IRIS', 'NTIS'] 등.
-    - scheduler_running: bool — False 면 목록·폼 disabled 표시.
     - flash / flash_level: 상단 배지 내용.
     - current_user:      네비 분기용.
+
+  스케줄은 OS cron 데몬이 실행한다(컨테이너 기동/설정 변경 시 crontab 재설치).
+  정확한 '다음 실행' 시각은 cron 데몬이 보유하므로 본 화면은 cron 표현식/활성
+  여부로 상태를 표시한다.
 #}
 {% extends "admin/base.html" %}
 
@@ -22,13 +25,6 @@
 {% if flash %}
 <div class="admin-flash admin-flash--{{ flash_level | default('success') }}" role="status">
     {{ flash }}
-</div>
-{% endif %}
-
-{% if not scheduler_running %}
-<div class="admin-flash admin-flash--error" role="alert">
-    APScheduler 가 기동되지 않았습니다. 웹 서버를 재기동해도 이 메시지가 계속
-    보이면 로그에서 <code>APScheduler 기동 실패</code> 항목을 확인하세요.
 </div>
 {% endif %}
 
@@ -45,7 +41,6 @@
                 <th>trigger_spec</th>
                 <th>active_sources</th>
                 <th>상태</th>
-                <th>다음 실행</th>
                 <th>액션</th>
             </tr>
         </thead>
@@ -69,9 +64,6 @@
                         <span class="admin-badge admin-badge--idle">비활성</span>
                     {% endif %}
                 </td>
-                {# next_run_time 은 ScheduleSummary.next_run_time (datetime|None).
-                   format_kst 가 None→\"\" 이므로 'or' 분기로 dash 폴백을 둔다. #}
-                <td>{{ (schedule.next_run_time | kst_format) or '—' }}</td>
                 <td class="admin-schedule__actions">
                     <form method="post"
                           action="/admin/schedule/{{ schedule.job_id }}/toggle"
@@ -132,8 +124,7 @@
             <span>등록 즉시 활성</span>
         </label>
 
-        <button type="submit" class="admin-button admin-button--primary"
-                {% if not scheduler_running %}disabled{% endif %}>
+        <button type="submit" class="admin-button admin-button--primary">
             cron 스케줄 등록
         </button>
     </form>
@@ -159,8 +150,7 @@
             <span>등록 즉시 활성</span>
         </label>
 
-        <button type="submit" class="admin-button admin-button--primary"
-                {% if not scheduler_running %}disabled{% endif %}>
+        <button type="submit" class="admin-button admin-button--primary">
             interval 스케줄 등록
         </button>
     </form>

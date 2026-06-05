@@ -13,10 +13,10 @@
 
 fixture 패턴:
     ``tests/web/test_admin_email_api.py`` 와 동일하게 ``test_engine`` 격리 DB +
-    ``TestClient`` + 폼 로그인. ``ensure_daily_report_cron_registered`` 는 startup
-    훅에서 호출되지만 실제 스케줄러를 띄우지 않고 monkey-patch 로 무력화한다 —
-    본 테스트의 관심사는 라우터의 HTTP 인터페이스이며, 스케줄러 동작 자체는
-    ``tests/scheduler/test_daily_report_schedule.py`` 가 별도로 가드.
+    ``TestClient`` + 폼 로그인. task 00155-4 에서 APScheduler 가 제거돼 startup
+    훅은 더 이상 스케줄러를 띄우지 않으므로 별도 stub 가 필요 없다. PUT settings
+    저장 후의 crontab 재설치는 ``ENABLE_CRON`` 미설정(테스트 호스트)이라 graceful
+    no-op 으로 동작한다.
 """
 
 from __future__ import annotations
@@ -50,31 +50,6 @@ from app.email.daily_report import DailyReportResult
 # ──────────────────────────────────────────────────────────────
 # 공통 fixture / 헬퍼
 # ──────────────────────────────────────────────────────────────
-
-
-@pytest.fixture(autouse=True)
-def _stub_scheduler_startup(monkeypatch: pytest.MonkeyPatch) -> None:
-    """create_app() 의 스케줄러 startup 훅을 본 테스트에서 무력화한다.
-
-    본 테스트의 관심사는 HTTP 라우터 동작이며, 실제 APScheduler 가동은 별도 테스트
-    파일이 가드한다. startup 훅에서 BackgroundScheduler 가 SQLAlchemyJobStore 와
-    함께 실제로 떠 버리면, 본 테스트의 빠른 격리 흐름을 방해할 가능성이 있어
-    no-op 으로 stub 한다 (test_admin_backup.py 의 register_backup_cron_schedule
-    monkey-patch 와 동일 정책).
-    """
-    monkeypatch.setattr(
-        "app.scheduler.service.ensure_backup_cron_registered", lambda: None
-    )
-    monkeypatch.setattr(
-        "app.web.main.ensure_backup_cron_registered", lambda: None
-    )
-    monkeypatch.setattr(
-        "app.scheduler.service.ensure_daily_report_cron_registered",
-        lambda: None,
-    )
-    monkeypatch.setattr(
-        "app.web.main.ensure_daily_report_cron_registered", lambda: None
-    )
 
 
 @pytest.fixture
@@ -313,29 +288,27 @@ def test_get_daily_report_settings_recipient_overview(
 # ──────────────────────────────────────────────────────────────
 
 
-def test_put_daily_report_settings_saves_and_registers_schedule(
+def test_put_daily_report_settings_saves_and_reinstalls_crontab(
     admin_client: TestClient,
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """정상 PUT → SystemSetting 3종 반영 + register_daily_report_cron_schedule 호출.
+    """정상 PUT → SystemSetting 3종 반영 + crontab 재설치 트리거 (task 00155-4).
 
-    스케줄러 호출은 monkey-patch 로 캡처해 ``(cron_expression, enabled)`` 가 그대로
-    넘어가는지 확인한다 (실제 APScheduler 가동 없이도 라우터 흐름 검증).
+    crontab 재설치 호출은 monkey-patch 로 캡처해, 설정 저장 후 정확히 1회
+    트리거되는지 확인한다 (실제 cron 설치 없이도 라우터 흐름 검증).
     """
-    captured_calls: list[tuple[str, bool]] = []
+    from app.scheduler.crontab_installer import CrontabInstallResult
 
-    def _fake_register(
-        cron_expression: str | None = None,
-        *,
-        enabled: bool | None = None,
-    ) -> None:
-        captured_calls.append((cron_expression or "", bool(enabled)))
-        return None
+    reinstall_call_count = {"n": 0}
+
+    def _fake_reinstall(*args, **kwargs) -> CrontabInstallResult:
+        reinstall_call_count["n"] += 1
+        return CrontabInstallResult(installed=False, crontab_text="", reason="test stub")
 
     monkeypatch.setattr(
-        "app.web.routes.admin_email.register_daily_report_cron_schedule",
-        _fake_register,
+        "app.web.routes.admin_email.reinstall_crontab_after_change",
+        _fake_reinstall,
     )
 
     response = admin_client.put(
@@ -366,8 +339,8 @@ def test_put_daily_report_settings_saves_and_registers_schedule(
         == "ops@example.com"
     )
 
-    # scheduler hook 호출 인자 확인.
-    assert captured_calls == [("30 9 * * 1-5", True)]
+    # 설정 저장 후 crontab 재설치가 정확히 1회 트리거됐는지 확인.
+    assert reinstall_call_count["n"] == 1
 
 
 def test_put_daily_report_settings_invalid_cron_422(
@@ -402,14 +375,11 @@ def test_put_daily_report_settings_enabled_without_cron_422(
 
 def test_put_daily_report_settings_disabled_with_empty_cron_ok(
     admin_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``enabled=False`` + cron 빈 값은 허용 (잡 제거 의도)."""
-    monkeypatch.setattr(
-        "app.web.routes.admin_email.register_daily_report_cron_schedule",
-        lambda *args, **kwargs: None,
-    )
+    """``enabled=False`` + cron 빈 값은 허용 (비활성 저장).
 
+    crontab 재설치는 테스트 호스트에서 graceful no-op 이라 라우트가 500 나지 않는다.
+    """
     response = admin_client.put(
         "/api/admin/email/daily-report/settings",
         json={
@@ -424,7 +394,6 @@ def test_put_daily_report_settings_disabled_with_empty_cron_ok(
 def test_put_daily_report_settings_enable_toggle_preserves_cron_and_recipient(
     admin_client: TestClient,
     db_session: Session,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """[task 00144] '활성화' 토글 PUT 은 enabled 만 바꾸고 cron/test_recipient 를 보존한다.
 
@@ -433,11 +402,6 @@ def test_put_daily_report_settings_enable_toggle_preserves_cron_and_recipient(
     test_recipient 를 저장해 두고, enabled 만 True 로 바꾼 PUT 을 보낸 뒤
     cron/test_recipient SystemSetting 이 그대로 유지되는지 확인한다.
     """
-    monkeypatch.setattr(
-        "app.web.routes.admin_email.register_daily_report_cron_schedule",
-        lambda *args, **kwargs: None,
-    )
-
     # 1. 비활성 상태로 cron + test_recipient 를 먼저 저장한다.
     initial_response = admin_client.put(
         "/api/admin/email/daily-report/settings",
@@ -478,30 +442,22 @@ def test_put_daily_report_settings_enable_toggle_preserves_cron_and_recipient(
 
 
 # ──────────────────────────────────────────────────────────────
-# 3-b. PUT /daily-report/settings — 실제 스케줄러 통합 (task 00128 회귀)
+# 3-b. PUT /daily-report/settings — 저장 영속성 (task 00155-4)
 # ──────────────────────────────────────────────────────────────
 #
-# 위 3번 테스트들은 register_daily_report_cron_schedule 을 mock 으로 교체해
-# 라우터→service 경계만 본다. 아래 두 테스트는 register_* 를 mock 하지 **않고**
-# 실제 APScheduler 잡 등록/제거까지 통과시켜, task 00128 버그를 회귀로 가드한다.
-#
-# 버그 원인: register_daily_report_cron_schedule 이 set_setting + flush 로 이미
-# write 트랜잭션이 열린 session_scope 안에서 호출됐다. APScheduler 의
-# SQLAlchemyJobStore 는 같은 SQLite 파일의 scheduler_jobs 테이블에 별도 커넥션
-# 으로 write 하므로, SQLite 단일 writer 제약에 걸려 "database is locked" 500 이
-# 발생 → 저장이 롤백되어 활성화가 미반영되고, 잡도 등록되지 않아 next_run_at 이
-# 항상 None 으로 떴다. 수정: 스케줄 잡 갱신을 session_scope 밖에서 먼저 수행한다.
+# task 00155-4 에서 APScheduler 가 제거돼 daily report 잡은 OS cron 데몬이
+# 실행한다. 라이브 스케줄러가 없으므로 응답의 next_run_at 은 항상 None 이며,
+# UI 는 cron 표현식/활성 여부로 다음 실행 시점을 표시한다. 아래 두 테스트는
+# enabled 저장이 500 없이 커밋되고 GET 으로 영속됨을 회귀로 가드한다.
 
 
-def test_put_daily_report_settings_enabled_registers_job_and_returns_next_run_at(
+def test_put_daily_report_settings_enabled_persists_and_next_run_at_is_none(
     admin_client: TestClient,
     db_session: Session,
 ) -> None:
-    """[task 00128 회귀] enabled=True 저장이 500 없이 성공하고 next_run_at 이 채워진다.
+    """enabled=True 저장이 500 없이 커밋되고 GET 으로 영속된다. next_run_at 은 None.
 
-    register_daily_report_cron_schedule 을 mock 하지 않고 실제 스케줄러로 PUT →
-    잡 등록 → next_run_at 직렬화 전체 흐름을 검증한다. 버그가 있으면 PUT 이
-    "database is locked" 500 으로 떨어진다.
+    crontab 재설치는 테스트 호스트에서 graceful no-op 이므로 라우트가 깨지지 않는다.
     """
     response = admin_client.put(
         "/api/admin/email/daily-report/settings",
@@ -515,8 +471,8 @@ def test_put_daily_report_settings_enabled_registers_job_and_returns_next_run_at
     data = response.json()
     assert data["enabled"] is True
     assert data["cron_expression"] == "30 9 * * 1-5"
-    # 활성화 저장 직후 next_run_at 이 실제 다음 실행 시각으로 채워져야 한다.
-    assert data["next_run_at"] is not None
+    # cron 데몬이 스케줄을 실행하므로 라이브 next_run_at 은 보유하지 않는다.
+    assert data["next_run_at"] is None
 
     # SystemSetting 이 실제로 커밋됐는지 확인 — 롤백되지 않았다.
     db_session.expire_all()
@@ -524,7 +480,7 @@ def test_put_daily_report_settings_enabled_registers_job_and_returns_next_run_at
         get_setting(db_session, SETTING_KEY_DAILY_REPORT_ENABLED) == "true"
     )
 
-    # 새로고침(GET) 해도 활성화 상태와 next_run_at 이 그대로 유지된다.
+    # 새로고침(GET) 해도 활성화 상태와 cron 이 그대로 유지된다.
     get_response = admin_client.get(
         "/api/admin/email/daily-report/settings"
     )
@@ -532,17 +488,14 @@ def test_put_daily_report_settings_enabled_registers_job_and_returns_next_run_at
     get_data = get_response.json()
     assert get_data["enabled"] is True
     assert get_data["cron_expression"] == "30 9 * * 1-5"
-    assert get_data["next_run_at"] is not None
+    assert get_data["next_run_at"] is None
 
 
-def test_put_daily_report_settings_disabled_removes_job_and_clears_next_run_at(
+def test_put_daily_report_settings_disabled_persists_and_next_run_at_is_none(
     admin_client: TestClient,
 ) -> None:
-    """[task 00128 회귀] 활성화 후 비활성화하면 잡이 제거되고 next_run_at 이 None.
-
-    비활성 저장도 database is locked 없이 200 이어야 한다 (회귀 없음 확인).
-    """
-    # 먼저 활성화 — next_run_at 이 채워진 상태를 만든다.
+    """활성화 후 비활성화 저장도 500 없이 200 이고 next_run_at 은 None (회귀 가드)."""
+    # 먼저 활성화한다.
     enable_response = admin_client.put(
         "/api/admin/email/daily-report/settings",
         json={
@@ -552,9 +505,9 @@ def test_put_daily_report_settings_disabled_removes_job_and_clears_next_run_at(
         },
     )
     assert enable_response.status_code == 200, enable_response.text
-    assert enable_response.json()["next_run_at"] is not None
+    assert enable_response.json()["next_run_at"] is None
 
-    # 비활성화 — 잡 제거 + next_run_at None.
+    # 비활성화 — 200 + next_run_at None.
     disable_response = admin_client.put(
         "/api/admin/email/daily-report/settings",
         json={
