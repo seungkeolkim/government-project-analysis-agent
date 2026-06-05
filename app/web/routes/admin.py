@@ -92,7 +92,6 @@ from app.db.repository import (
 )
 from app.backup.constants import (
     BACKUP_TRIGGER_MANUAL,
-    SETTING_KEY_BACKUP_CRON,
     SETTING_KEY_BACKUP_MAX_COUNT,
 )
 from app.backup.service import (
@@ -103,17 +102,21 @@ from app.backup.service import (
     set_setting as set_backup_setting,
 )
 from app.scheduler import (
-    SCHEDULE_MODE_CRON,
-    SCHEDULE_MODE_INTERVAL,
     CronExpressionError,
-    GeneralScheduleRecord,
-    ScheduleConfigError,
-    add_general_schedule_record,
-    delete_general_schedule_record,
-    list_general_schedule_records,
+    ScheduledJobConfigError,
+    ScheduledJobRecord,
+    add_general_schedule,
+    delete_scheduled_job,
+    list_general_schedules,
     reinstall_crontab_after_change,
-    set_general_schedule_enabled,
+    set_scheduled_job_enabled,
+    upsert_singleton_schedule,
     validate_cron_expression,
+)
+from app.scheduler.constants import (
+    JOB_KIND_BACKUP,
+    TRIGGER_TYPE_CRON,
+    TRIGGER_TYPE_INTERVAL,
 )
 from app.scrape_control import (
     ComposeEnvironmentError,
@@ -878,38 +881,38 @@ class _GeneralScheduleView:
     템플릿은 cron 표현식/활성 여부로 충분히 상태를 보여 준다.
 
     Attributes:
-        job_id:         스케줄 식별자(:class:`GeneralScheduleRecord.id`).
+        job_id:         스케줄 식별자(:class:`ScheduledJobRecord.id`, 정수 대리 키).
         trigger_type:   'cron' 또는 'interval'.
         trigger_spec:   사람-친화 표현(cron 표현식 또는 '매 N시간').
         active_sources: 트리거 시 수집할 source id 목록(빈 리스트=전체).
         enabled:        활성 여부.
     """
 
-    job_id: str
+    job_id: int
     trigger_type: str
     trigger_spec: str
     active_sources: list[str]
     enabled: bool
 
 
-def _build_general_schedule_view(record: GeneralScheduleRecord) -> _GeneralScheduleView:
-    """저장소 레코드를 [스케줄] 탭 표시용 DTO 로 변환한다.
+def _build_general_schedule_view(record: ScheduledJobRecord) -> _GeneralScheduleView:
+    """SSOT(scheduled_jobs) 레코드를 [스케줄] 탭 표시용 DTO 로 변환한다.
 
-    interval 모드는 '매 N시간' 으로, cron 모드는 cron 표현식 그대로 표시한다.
+    interval 트리거는 '매 N시간' 으로, cron 트리거는 cron 표현식 그대로 표시한다.
 
     Args:
-        record: 저장소에서 읽은 :class:`GeneralScheduleRecord`.
+        record: ``scheduled_jobs`` 에서 읽은 :class:`ScheduledJobRecord`.
 
     Returns:
         템플릿이 렌더할 :class:`_GeneralScheduleView`.
     """
-    if record.mode == SCHEDULE_MODE_INTERVAL:
+    if record.trigger_type == TRIGGER_TYPE_INTERVAL:
         trigger_spec = f"매 {record.interval_hours}시간"
     else:
         trigger_spec = record.cron_expression or ""
     return _GeneralScheduleView(
         job_id=record.id,
-        trigger_type=record.mode,
+        trigger_type=record.trigger_type,
         trigger_spec=trigger_spec,
         active_sources=list(record.active_sources),
         enabled=record.enabled,
@@ -939,8 +942,8 @@ def schedule_page(
 ) -> Response:
     """[스케줄] 탭 — 등록된 일반 수집 스케줄 목록 + 신규 등록 폼.
 
-    스케줄은 :mod:`app.scheduler.schedule_store` 영속 저장소에서 읽으며, 변경 시
-    crontab 을 재설치한다(컨테이너에서만 실제 설치). 백업/Daily Report 잡은 각
+    스케줄은 단일 SSOT 테이블 ``scheduled_jobs``(:mod:`app.scheduler.scheduled_job_store`)
+    에서 읽으며, 변경 시 crontab 을 재설치한다(컨테이너에서만 실제 설치). 백업/Daily Report 잡은 각
     [시스템 백업]/[메일 발송] 탭에서 별도 관리하므로 본 목록에는 포함하지 않는다.
 
     템플릿 컨텍스트:
@@ -952,7 +955,7 @@ def schedule_page(
     logger.debug("admin.schedule_page 진입: user_id={}", current_user.id)
     try:
         with session_scope() as session:
-            records = list_general_schedule_records(session)
+            records = list_general_schedules(session)
         schedules = [_build_general_schedule_view(record) for record in records]
     except Exception as exc:
         # 저장소 접근 실패 등 예외. UI 는 빈 목록으로 폴백하되 에러를 flash 로 노출.
@@ -994,7 +997,7 @@ def _parse_schedule_active_sources(
         if not trimmed:
             continue
         if trimmed not in available:
-            raise ScheduleConfigError(
+            raise ScheduledJobConfigError(
                 f"알 수 없는 source id: {trimmed!r}. 허용: {', '.join(available)}"
             )
         if trimmed not in cleaned:
@@ -1037,34 +1040,34 @@ def schedule_add(
         with session_scope() as session:
             if trigger_type_normalized == "cron":
                 if not cron_expression:
-                    raise ScheduleConfigError("cron 표현식이 누락되었습니다.")
+                    raise ScheduledJobConfigError("cron 표현식이 누락되었습니다.")
                 # cron 표현식 내용을 먼저 검증한다(필드 개수 + 값 범위). 저장소도
                 # 필드 개수를 검증하지만, 라우트에서 값 범위까지 미리 막아 잘못된
                 # 표현식이 crontab 으로 흘러가지 않게 한다.
                 validated_expression = validate_cron_expression(cron_expression)
-                record = add_general_schedule_record(
+                record = add_general_schedule(
                     session,
-                    mode=SCHEDULE_MODE_CRON,
+                    trigger_type=TRIGGER_TYPE_CRON,
                     cron_expression=validated_expression,
                     active_sources=normalized_sources,
                     enabled=should_enable,
                 )
             elif trigger_type_normalized == "interval":
                 if interval_hours is None:
-                    raise ScheduleConfigError("매 N시간 값이 누락되었습니다.")
-                record = add_general_schedule_record(
+                    raise ScheduledJobConfigError("매 N시간 값이 누락되었습니다.")
+                record = add_general_schedule(
                     session,
-                    mode=SCHEDULE_MODE_INTERVAL,
+                    trigger_type=TRIGGER_TYPE_INTERVAL,
                     interval_hours=interval_hours,
                     active_sources=normalized_sources,
                     enabled=should_enable,
                 )
             else:
-                raise ScheduleConfigError(
+                raise ScheduledJobConfigError(
                     f"지원하지 않는 trigger_type: {trigger_type!r}. "
                     "'cron' 또는 'interval' 만 허용합니다."
                 )
-    except (ScheduleConfigError, CronExpressionError) as exc:
+    except (ScheduledJobConfigError, CronExpressionError) as exc:
         logger.info(
             "스케줄 등록 거부 — 검증 실패: 관리자={} ({})",
             current_user.username, exc,
@@ -1113,7 +1116,7 @@ def schedule_add(
     dependencies=[Depends(ensure_same_origin)],
 )
 def schedule_toggle(
-    job_id: str,
+    job_id: int,
     enabled: str = Form(...),
     current_user: User = Depends(admin_user_required),
 ) -> Response:
@@ -1136,8 +1139,8 @@ def schedule_toggle(
 
     try:
         with session_scope() as session:
-            set_general_schedule_enabled(session, job_id, enabled=target_enabled)
-    except ScheduleConfigError as exc:
+            set_scheduled_job_enabled(session, job_id, enabled=target_enabled)
+    except ScheduledJobConfigError as exc:
         logger.info(
             "스케줄 토글 실패: 관리자={} job_id={} ({})",
             current_user.username, job_id, exc,
@@ -1170,15 +1173,15 @@ def schedule_toggle(
     dependencies=[Depends(ensure_same_origin)],
 )
 def schedule_delete(
-    job_id: str,
+    job_id: int,
     current_user: User = Depends(admin_user_required),
 ) -> Response:
-    """스케줄을 저장소에서 삭제하고 crontab 을 재설치한다.
+    """스케줄을 SSOT(scheduled_jobs)에서 삭제하고 crontab 을 재설치한다.
 
     삭제 전에 확인 팝업은 UI JS 가 처리한다.
     """
     with session_scope() as session:
-        deleted = delete_general_schedule_record(session, job_id)
+        deleted = delete_scheduled_job(session, job_id)
 
     if not deleted:
         logger.info(
@@ -2159,10 +2162,11 @@ def backup_settings_save(
     흐름:
         1. max_count 최솟값 검증 (< 1 이면 flash error redirect).
         2. cron 표현식 검증(필드 개수 + 값 범위). 위반 시 flash error redirect.
-        3. SystemSetting 에 cron_expression · max_count 저장.
+        3. 백업 cron 트리거는 SSOT(scheduled_jobs 의 backup 싱글턴)에 저장하고,
+           비-스케줄 설정인 max_count 만 system_settings 에 저장한다.
         4. 저장 커밋 후 crontab 재설치(컨테이너에서만 실제 설치). cron 데몬이
-           ``backup.cron_expression`` 시각에 ``python -m app.scheduler.run_job
-           backup`` 을 호출한다.
+           backup 싱글턴 cron 시각에 ``python -m app.scheduler.run_job backup``
+           을 호출한다.
         5. 성공 → PRG 패턴(303) /admin/backup.
     """
     if max_count < 1:
@@ -2184,7 +2188,13 @@ def backup_settings_save(
         )
 
     with session_scope() as session:
-        set_backup_setting(session, SETTING_KEY_BACKUP_CRON, cron_expression)
+        # 백업 cron 트리거는 단일 SSOT(scheduled_jobs)에 기록한다. crontab 생성기는
+        # 이 backup 싱글턴 row 만 읽으므로, 외부 파일/ system_settings 미러 없이
+        # DB 만으로 기동 시 백업 스케줄이 복원된다.
+        upsert_singleton_schedule(
+            session, job_kind=JOB_KIND_BACKUP, cron_expression=cron_expression
+        )
+        # 보관 개수는 비-스케줄 설정이라 system_settings 에 그대로 둔다.
         set_backup_setting(session, SETTING_KEY_BACKUP_MAX_COUNT, str(max_count))
 
     # 저장이 커밋된 뒤 crontab 을 재설치한다(새 백업 cron 이 반영되도록).

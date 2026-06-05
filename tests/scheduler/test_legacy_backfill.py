@@ -319,7 +319,18 @@ def test_backfill_excludes_system_jobs(db_session: Session) -> None:
 
 
 def test_backfill_renders_recovered_jobs_in_crontab(db_session: Session) -> None:
-    """복구된 0 1/0 13/15 11 세 스케줄이 crontab [공고 수집] 라인으로 렌더된다."""
+    """복구된 0 1/0 13/15 11 세 스케줄이 crontab [공고 수집] 라인으로 렌더된다.
+
+    task 00157 부터 crontab 생성기는 system_settings 가 아니라 단일 SSOT
+    ``scheduled_jobs`` 만 읽는다. 따라서 레거시 백필(→ system_settings JSON) 뒤
+    00157 이관(:func:`migrate_system_settings_to_scheduled_jobs`)을 거쳐
+    scheduled_jobs 로 옮겨진 스케줄이 crontab 으로 렌더됨을 확인한다.
+    """
+    # 00157 이관: system_settings 스케줄 트리거 → scheduled_jobs.
+    from app.scheduler.scheduled_job_migration import (
+        migrate_system_settings_to_scheduled_jobs,
+    )
+
     add_general_schedule_record(
         db_session,
         mode=SCHEDULE_MODE_CRON,
@@ -341,7 +352,11 @@ def test_backfill_renders_recovered_jobs_in_crontab(db_session: Session) -> None
         cron_expression="0 13 * * *",
     )
 
+    # 1단계: 레거시 jobstore → system_settings JSON 복구(00156 백필).
     backfill_general_schedules_from_legacy(db_session.connection())
+    db_session.commit()
+    # 2단계: system_settings → scheduled_jobs 이관(00157 단일 SSOT).
+    migrate_system_settings_to_scheduled_jobs(db_session.connection())
     db_session.commit()
 
     environment = CrontabEnvironment(

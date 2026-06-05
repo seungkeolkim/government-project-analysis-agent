@@ -31,6 +31,8 @@ from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
 from app.backup.service import get_setting, set_setting
+from app.scheduler.constants import JOB_KIND_DAILY_REPORT
+from app.scheduler.scheduled_job_store import get_singleton_schedule
 from app.db.models import (
     EmailDailyReportRun,
     EmailDailyReportStatus,
@@ -39,8 +41,6 @@ from app.db.models import (
 )
 from app.email.constants import (
     RELATED_KIND_DAILY_REPORT,
-    SETTING_KEY_DAILY_REPORT_CRON,
-    SETTING_KEY_DAILY_REPORT_ENABLED,
     SETTING_KEY_DAILY_REPORT_TEST_RECIPIENT,
     SETTING_KEY_EMAIL_SEND_ENABLED,
 )
@@ -325,15 +325,13 @@ def test_put_daily_report_settings_saves_and_reinstalls_crontab(
     assert data["cron_expression"] == "30 9 * * 1-5"
     assert data["test_recipient"] == "ops@example.com"
 
-    # SystemSetting DB 반영 확인.
+    # 스케줄 트리거(enabled + cron)는 SSOT(scheduled_jobs)에 반영된다.
     db_session.expire_all()
-    assert (
-        get_setting(db_session, SETTING_KEY_DAILY_REPORT_ENABLED) == "true"
-    )
-    assert (
-        get_setting(db_session, SETTING_KEY_DAILY_REPORT_CRON)
-        == "30 9 * * 1-5"
-    )
+    daily_job = get_singleton_schedule(db_session, JOB_KIND_DAILY_REPORT)
+    assert daily_job is not None
+    assert daily_job.enabled is True
+    assert daily_job.cron_expression == "30 9 * * 1-5"
+    # 비-스케줄 설정인 test_recipient 는 system_settings 에 그대로 저장된다.
     assert (
         get_setting(db_session, SETTING_KEY_DAILY_REPORT_TEST_RECIPIENT)
         == "ops@example.com"
@@ -429,12 +427,13 @@ def test_put_daily_report_settings_enable_toggle_preserves_cron_and_recipient(
     assert toggle_data["cron_expression"] == "15 8 * * 1-5"
     assert toggle_data["test_recipient"] == "ops@example.com"
 
-    # SystemSetting DB 에도 enabled 만 바뀌고 나머지는 보존됐는지 확인.
+    # SSOT(scheduled_jobs)에 enabled 만 바뀌고 cron 은 보존됐는지 확인.
     db_session.expire_all()
-    assert get_setting(db_session, SETTING_KEY_DAILY_REPORT_ENABLED) == "true"
-    assert (
-        get_setting(db_session, SETTING_KEY_DAILY_REPORT_CRON) == "15 8 * * 1-5"
-    )
+    daily_job = get_singleton_schedule(db_session, JOB_KIND_DAILY_REPORT)
+    assert daily_job is not None
+    assert daily_job.enabled is True
+    assert daily_job.cron_expression == "15 8 * * 1-5"
+    # 비-스케줄 설정인 test_recipient 는 system_settings 에 보존된다.
     assert (
         get_setting(db_session, SETTING_KEY_DAILY_REPORT_TEST_RECIPIENT)
         == "ops@example.com"
@@ -474,11 +473,10 @@ def test_put_daily_report_settings_enabled_persists_and_next_run_at_is_none(
     # cron 데몬이 스케줄을 실행하므로 라이브 next_run_at 은 보유하지 않는다.
     assert data["next_run_at"] is None
 
-    # SystemSetting 이 실제로 커밋됐는지 확인 — 롤백되지 않았다.
+    # SSOT(scheduled_jobs)에 실제로 커밋됐는지 확인 — 롤백되지 않았다.
     db_session.expire_all()
-    assert (
-        get_setting(db_session, SETTING_KEY_DAILY_REPORT_ENABLED) == "true"
-    )
+    daily_job = get_singleton_schedule(db_session, JOB_KIND_DAILY_REPORT)
+    assert daily_job is not None and daily_job.enabled is True
 
     # 새로고침(GET) 해도 활성화 상태와 cron 이 그대로 유지된다.
     get_response = admin_client.get(

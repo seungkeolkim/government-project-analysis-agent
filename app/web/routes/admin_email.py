@@ -57,8 +57,6 @@ from app.email.constants import (
     RELATED_KIND_DAILY_REPORT,
     RELATED_KIND_TEST_SEND,
     SETTING_KEY_APP_PUBLIC_BASE_URL,
-    SETTING_KEY_DAILY_REPORT_CRON,
-    SETTING_KEY_DAILY_REPORT_ENABLED,
     SETTING_KEY_DAILY_REPORT_LAST_SENT_AT,
     SETTING_KEY_DAILY_REPORT_TEST_RECIPIENT,
     SETTING_KEY_EMAIL_FROM_DISPLAY_NAME,
@@ -83,9 +81,12 @@ from app.email.sender import send_with_retry
 from app.email.transport.factory import build_transport_from_settings
 from app.scheduler import (
     CronExpressionError,
+    get_singleton_schedule,
     reinstall_crontab_after_change,
+    upsert_singleton_schedule,
     validate_cron_expression,
 )
+from app.scheduler.constants import JOB_KIND_DAILY_REPORT
 
 
 # ──────────────────────────────────────────────────────────────
@@ -835,23 +836,29 @@ def _load_daily_report_setting_values(session) -> dict[str, Any]:
     """SystemSetting 4종 + send_enabled 게이트 값을 한 번에 읽어 dict 으로 반환한다.
 
     GET / PUT 모두 settings 응답 직렬화에 같은 값들을 사용하므로 헬퍼로 묶었다.
-    각 값은 row 가 없으면 ``DEFAULT_*`` 로 fallback (constants 동일 패턴).
+
+    task 00157 부터 Daily Report 의 **스케줄 트리거**(enabled + cron_expression)의
+    단일 SSOT 는 ``scheduled_jobs`` 의 daily_report 싱글턴 row 다(system_settings
+    의 ``email.daily_report.enabled`` / ``.cron_expression`` 미러는 더 이상 읽지
+    않는다). 비-스케줄 설정인 last_sent_at·test_recipient 는 여전히 system_settings
+    에서 읽는다. 각 값은 없으면 ``DEFAULT_*`` 로 fallback 한다.
 
     Returns:
         ``{"enabled": bool, "cron_expression": str, "last_sent_at": str | None,
             "test_recipient": str}``. ``last_sent_at`` 은 빈 문자열을 None 으로
         변환해 응답 직렬화 단계에서 명확하게 \"미설정\" 을 표현한다.
     """
-    raw_enabled = get_setting(session, SETTING_KEY_DAILY_REPORT_ENABLED)
-    if raw_enabled is None or raw_enabled.strip() == "":
+    # 스케줄 트리거(enabled + cron)는 SSOT(scheduled_jobs)에서 읽는다.
+    daily_report_job = get_singleton_schedule(session, JOB_KIND_DAILY_REPORT)
+    if daily_report_job is None:
         enabled = DEFAULT_DAILY_REPORT_ENABLED
+        cron_expression = DEFAULT_DAILY_REPORT_CRON
     else:
-        enabled = raw_enabled.strip().lower() == "true"
+        enabled = daily_report_job.enabled
+        cron_expression = (
+            daily_report_job.cron_expression or DEFAULT_DAILY_REPORT_CRON
+        )
 
-    cron_expression = (
-        get_setting(session, SETTING_KEY_DAILY_REPORT_CRON)
-        or DEFAULT_DAILY_REPORT_CRON
-    )
     raw_last_sent_at = get_setting(session, SETTING_KEY_DAILY_REPORT_LAST_SENT_AT)
     if raw_last_sent_at is None or raw_last_sent_at.strip() == "":
         last_sent_at: str | None = None
@@ -1176,19 +1183,17 @@ def put_daily_report_settings(
         body.test_recipient,
     )
 
-    # 1. SystemSetting 3종을 저장한다 (Pydantic validator 가 cron 형식·일관성을
-    #    이미 422 로 걸렀다).
+    # 1. 스케줄 트리거(enabled + cron)는 단일 SSOT(scheduled_jobs daily_report
+    #    싱글턴)에 저장하고, 비-스케줄 설정인 test_recipient 만 system_settings 에
+    #    저장한다 (Pydantic validator 가 cron 형식·일관성을 이미 422 로 걸렀다).
     with session_scope() as session:
-        # bool → \"true\" / \"false\" (소문자 통일, send_enabled 패턴과 동일).
-        set_setting(
+        # cron 이 빈 값이면(enabled=False 로 비활성화하는 흐름) 트리거는 그대로
+        # 두고 enabled 만 끈다. None 을 넘기면 upsert 가 기존 cron 을 보존한다.
+        upsert_singleton_schedule(
             session,
-            SETTING_KEY_DAILY_REPORT_ENABLED,
-            "true" if body.enabled else "false",
-        )
-        set_setting(
-            session,
-            SETTING_KEY_DAILY_REPORT_CRON,
-            body.cron_expression,
+            job_kind=JOB_KIND_DAILY_REPORT,
+            cron_expression=body.cron_expression or None,
+            enabled=body.enabled,
         )
         set_setting(
             session,

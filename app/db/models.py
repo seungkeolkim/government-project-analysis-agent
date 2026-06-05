@@ -1983,6 +1983,111 @@ class SystemSetting(Base):
         return f"<SystemSetting key={self.key!r} value={self.value!r}>"
 
 
+class ScheduledJob(Base):
+    """스케줄 트리거(공고 수집·백업·Daily Report·GC)의 단일 SSOT 테이블 (task 00157).
+
+    task 155·156 을 거치며 스케줄 SSOT 가 ``system_settings`` JSON 키와 기동 시 설치되는
+    OS crontab(외부 파일)로 이원화돼, 관리자 직관성·백업 편의가 떨어졌다(백업 시 cron
+    파일을 따로 챙겨야 함). task 00157 은 모든 스케줄 트리거를 이 관계형 테이블 하나로
+    모아 SSOT 를 DB 한 곳으로 되돌린다. 기동 시 이 테이블만 읽어 crontab 을 재생성하므로
+    외부 cron 파일을 별도로 백업·휴대할 필요가 없다.
+
+    설계 메모:
+        - 155/156 에서 drop 된 APScheduler jobstore ``scheduler_jobs``(r) 와는
+          철자·의미가 모두 다른 순수 도메인 테이블이다. pickle/job_state/
+          next_run_time 같은 APScheduler 직렬화 잔재를 두지 않는다(이름·역할 모두 별개).
+        - ``job_kind`` 로 잡 종류를 구분한다. ``scrape_general`` 은 N건(여러 row),
+          ``backup``/``daily_report``/``gc`` 는 각각 단일 row(싱글턴)다. 싱글턴 보장은
+          시드/스토어 계층이 앱 레벨에서 담당한다(DB UNIQUE 미부여 — 향후 잡 종류
+          확장 유연성 확보).
+        - ``trigger_type`` 가 ``cron`` 이면 ``cron_expression`` 을, ``interval`` 이면
+          ``interval_hours`` 를 사용한다. 다른 쪽 컬럼은 NULL 이다.
+        - ``active_sources`` 는 ``scrape_general`` 전용(수집할 source id 리스트, 빈
+          리스트 = 전체 enabled 소스). 그 외 잡 종류는 NULL.
+        - 메일/백업의 비-스케줄 설정(SMTP 자격증명·max_count·수신자 등)은 여전히
+          ``system_settings`` 에 둔다. 이 테이블에는 '언제 실행할지'(트리거)만 담는다.
+        - 키 이름 상수는 :mod:`app.scheduler.constants` 에 정의한다.
+    """
+
+    __tablename__ = "scheduled_jobs"
+
+    __table_args__ = (
+        Index("ix_scheduled_jobs_job_kind", "job_kind"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+        doc="스케줄 식별자(대리 키). admin 라우트의 토글/삭제가 이 id 를 참조한다.",
+    )
+
+    job_kind: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        doc=(
+            "잡 종류. 'scrape_general'(N건) | 'backup' | 'daily_report' | 'gc'"
+            "(각 싱글턴). 값 상수는 app.scheduler.constants.JOB_KIND_*."
+        ),
+    )
+
+    trigger_type: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        doc="트리거 방식. 'cron'(표현식) 또는 'interval'(매 N시간).",
+    )
+
+    cron_expression: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="trigger_type=='cron' 일 때의 표준 5-필드 crontab 표현식. interval 이면 NULL.",
+    )
+
+    interval_hours: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        doc="trigger_type=='interval' 일 때의 '매 N시간' 정수. cron 이면 NULL.",
+    )
+
+    active_sources: Mapped[list[str] | None] = mapped_column(
+        JSON,
+        nullable=True,
+        doc=(
+            "scrape_general 전용 — 수집할 source id 리스트(빈 리스트 = 전체)."
+            " 그 외 잡 종류는 NULL."
+        ),
+    )
+
+    enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        doc="활성 여부. False 면 crontab 라인에서 제외된다.",
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        doc="스케줄이 생성된 시각(UTC).",
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utcnow,
+        onupdate=_utcnow,
+        doc="스케줄이 마지막으로 변경된 시각(UTC).",
+    )
+
+    def __repr__(self) -> str:
+        """디버깅 편의용 문자열 표현을 반환한다."""
+        return (
+            f"<ScheduledJob id={self.id} kind={self.job_kind!r} "
+            f"trigger={self.trigger_type!r} enabled={self.enabled}>"
+        )
+
+
 class BackupHistory(Base):
     """DB 백업 실행 이력 한 건을 나타내는 레코드.
 

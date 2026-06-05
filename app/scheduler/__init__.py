@@ -42,6 +42,22 @@ from app.scheduler.schedule_store import (
     list_general_schedule_records,
     set_general_schedule_enabled,
 )
+# task 00157: 스케줄 SSOT 를 scheduled_jobs 테이블로 단일화한 신규 접근 계층.
+# 소비자 전환(00157-2)이 위 schedule_store(레거시 system_settings JSON) 대신 이쪽을
+# 쓰도록 재배선한다. 두 store 는 전환 기간 동안 병존한다.
+from app.scheduler.scheduled_job_store import (
+    ScheduledJobConfigError,
+    ScheduledJobRecord,
+    add_general_schedule,
+    delete_scheduled_job,
+    ensure_default_seed_jobs,
+    get_scheduled_job,
+    get_singleton_schedule,
+    list_general_schedules,
+    list_scheduled_jobs,
+    set_scheduled_job_enabled,
+    upsert_singleton_schedule,
+)
 
 __all__ = [
     "CronExpressionError",
@@ -50,13 +66,24 @@ __all__ = [
     "SCHEDULE_MODE_CRON",
     "SCHEDULE_MODE_INTERVAL",
     "ScheduleConfigError",
+    "ScheduledJobConfigError",
+    "ScheduledJobRecord",
+    "add_general_schedule",
     "add_general_schedule_record",
     "delete_general_schedule_record",
+    "delete_scheduled_job",
+    "ensure_default_seed_jobs",
     "get_general_schedule_record",
+    "get_scheduled_job",
+    "get_singleton_schedule",
     "install_crontab",
     "is_crontab_reinstall_enabled",
     "list_general_schedule_records",
+    "list_general_schedules",
+    "list_scheduled_jobs",
     "reinstall_crontab_after_change",
     "set_general_schedule_enabled",
+    "set_scheduled_job_enabled",
+    "upsert_singleton_schedule",
     "validate_cron_expression",
 ]

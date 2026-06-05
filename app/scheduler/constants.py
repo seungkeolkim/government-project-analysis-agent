@@ -73,6 +73,39 @@ JOB_NAME_GC_ORPHAN_PREFIX: Final[str] = "gc-orphan-cron:"
 DEFAULT_GC_ORPHAN_CRON: Final[str] = "0 4 * * *"
 
 
+# ── 스케줄 SSOT 전용 테이블 (task 00157) ──────────────────────────────────────
+# task 155·156 을 거치며 스케줄 SSOT 가 system_settings JSON 키와 기동 시 설치되는
+# OS crontab(외부 파일)로 이원화됐다. task 00157 은 모든 스케줄 트리거(공고 수집·
+# 백업·Daily Report·GC)를 단일 관계형 테이블 ``scheduled_jobs`` 로 모아 SSOT 를
+# DB 한 곳으로 되돌린다. 기동 시 이 테이블만 읽어 crontab 을 재생성하므로 외부 cron
+# 파일을 별도로 백업·휴대할 필요가 없다.
+#
+# 주의: 155/156 에서 drop 된 APScheduler jobstore 테이블명은 ``scheduler_jobs``(r)
+# 였고, 본 SSOT 테이블은 task 제목대로 ``scheduled_jobs``(d) 다. 철자·의미가 모두
+# 달라 충돌하지 않으며, APScheduler pickle/job_state 잔재를 되살리지 않는다.
+SCHEDULED_JOBS_TABLENAME: Final[str] = "scheduled_jobs"
+
+# scheduled_jobs.job_kind 의 허용 값. 잡 종류를 한 컬럼으로 구분한다.
+# - scrape_general: 일반 공고 수집(여러 row 가능, N건).
+# - backup / daily_report / gc: 각각 단일 row(싱글턴).
+JOB_KIND_SCRAPE_GENERAL: Final[str] = "scrape_general"
+JOB_KIND_BACKUP: Final[str] = "backup"
+JOB_KIND_DAILY_REPORT: Final[str] = "daily_report"
+JOB_KIND_GC: Final[str] = "gc"
+
+# 싱글턴(항상 1건만 존재)인 잡 종류 모음. 시드·스토어 계층이 이 집합을 보고
+# '존재하지 않을 때만 기본값으로 1건 시드' 하는 멱등 보장을 수행한다.
+SINGLETON_JOB_KINDS: Final[tuple[str, ...]] = (
+    JOB_KIND_BACKUP,
+    JOB_KIND_DAILY_REPORT,
+    JOB_KIND_GC,
+)
+
+# scheduled_jobs.trigger_type 의 허용 값. cron 표현식 기반 / '매 N시간' interval 기반.
+TRIGGER_TYPE_CRON: Final[str] = "cron"
+TRIGGER_TYPE_INTERVAL: Final[str] = "interval"
+
+
 __all__ = [
     "DEFAULT_GC_ORPHAN_CRON",
     "DEFAULT_MISFIRE_GRACE_TIME_SEC",
@@ -80,12 +113,20 @@ __all__ = [
     "JOB_ID_DAILY_REPORT",
     "JOB_ID_PREFIX_CRON",
     "JOB_ID_PREFIX_INTERVAL",
+    "JOB_KIND_BACKUP",
+    "JOB_KIND_DAILY_REPORT",
+    "JOB_KIND_GC",
+    "JOB_KIND_SCRAPE_GENERAL",
     "JOB_NAME_BACKUP_PREFIX",
     "JOB_NAME_CRON_PREFIX",
     "JOB_NAME_DAILY_REPORT_PREFIX",
     "JOB_NAME_GC_ORPHAN_PREFIX",
     "JOB_NAME_INTERVAL_PREFIX",
     "MAX_INTERVAL_HOURS",
+    "SCHEDULED_JOBS_TABLENAME",
     "SCHEDULER_JOBS_TABLENAME",
     "SETTING_KEY_GENERAL_SCHEDULES",
+    "SINGLETON_JOB_KINDS",
+    "TRIGGER_TYPE_CRON",
+    "TRIGGER_TYPE_INTERVAL",
 ]

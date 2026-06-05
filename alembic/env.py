@@ -28,6 +28,7 @@ from app.db.models import (  # noqa: F401
     FavoriteFolder,
     RelevanceJudgment,
     RelevanceJudgmentHistory,
+    ScheduledJob,
     ScrapeRun,
     ScrapeSnapshot,
     User,

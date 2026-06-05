@@ -107,13 +107,11 @@ def test_schedule_delete_removes_from_list(
     admin_client: TestClient, db_session: Session
 ) -> None:
     """저장소에 직접 넣은 스케줄을 삭제 라우트로 지우면 목록에서 사라진다."""
-    from app.scheduler.schedule_store import (
-        SCHEDULE_MODE_CRON,
-        add_general_schedule_record,
-    )
+    from app.scheduler.constants import TRIGGER_TYPE_CRON
+    from app.scheduler.scheduled_job_store import add_general_schedule
 
-    record = add_general_schedule_record(
-        db_session, mode=SCHEDULE_MODE_CRON, cron_expression="0 13 * * *"
+    record = add_general_schedule(
+        db_session, trigger_type=TRIGGER_TYPE_CRON, cron_expression="0 13 * * *"
     )
     db_session.commit()
 
@@ -134,13 +132,11 @@ def test_schedule_toggle_ok(
     admin_client: TestClient, db_session: Session
 ) -> None:
     """스케줄 토글 라우트가 예외 없이 303 으로 동작한다(crontab 재설치 no-op)."""
-    from app.scheduler.schedule_store import (
-        SCHEDULE_MODE_CRON,
-        add_general_schedule_record,
-    )
+    from app.scheduler.constants import TRIGGER_TYPE_CRON
+    from app.scheduler.scheduled_job_store import add_general_schedule
 
-    record = add_general_schedule_record(
-        db_session, mode=SCHEDULE_MODE_CRON, cron_expression="0 5 * * *"
+    record = add_general_schedule(
+        db_session, trigger_type=TRIGGER_TYPE_CRON, cron_expression="0 5 * * *"
     )
     db_session.commit()
 

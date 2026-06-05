@@ -120,12 +120,17 @@ def test_backup_settings_save_ok(
     assert "/admin/backup" in resp.headers["location"]
     assert "error" not in resp.headers["location"]
 
-    # DB 에 실제로 저장됐는지 확인
-    from app.backup.constants import SETTING_KEY_BACKUP_CRON, SETTING_KEY_BACKUP_MAX_COUNT
+    # DB 에 실제로 저장됐는지 확인. 백업 cron 트리거는 단일 SSOT(scheduled_jobs)에,
+    # 비-스케줄 설정인 max_count 는 system_settings 에 저장된다.
+    from app.backup.constants import SETTING_KEY_BACKUP_MAX_COUNT
     from app.backup.service import get_setting
+    from app.scheduler.constants import JOB_KIND_BACKUP
+    from app.scheduler.scheduled_job_store import get_singleton_schedule
 
     db_session.expire_all()
-    assert get_setting(db_session, SETTING_KEY_BACKUP_CRON) == "0 4 * * *"
+    backup_job = get_singleton_schedule(db_session, JOB_KIND_BACKUP)
+    assert backup_job is not None
+    assert backup_job.cron_expression == "0 4 * * *"
     assert get_setting(db_session, SETTING_KEY_BACKUP_MAX_COUNT) == "14"
 
 
