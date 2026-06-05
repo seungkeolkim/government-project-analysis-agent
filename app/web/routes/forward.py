@@ -49,6 +49,7 @@ from app.db.models import (
     EmailSendRun,
     User,
     UserOrganization,
+    as_utc,
 )
 from app.db.repository import get_canonical_project_by_id
 from app.db.session import session_scope
@@ -278,12 +279,12 @@ def _serialize_forward_log(forward_log: EmailForwardLog) -> dict[str, Any]:
         "success_count": forward_log.success_count,
         "failure_count": forward_log.failure_count,
         "created_at": (
-            forward_log.created_at.isoformat()
+            as_utc(forward_log.created_at).isoformat()
             if forward_log.created_at is not None
             else None
         ),
         "completed_at": (
-            forward_log.completed_at.isoformat()
+            as_utc(forward_log.completed_at).isoformat()
             if forward_log.completed_at is not None
             else None
         ),
@@ -310,7 +311,7 @@ def _serialize_send_run(send_run: EmailSendRun) -> dict[str, Any]:
         "attempt_count": send_run.attempt_count,
         "error_message": send_run.error_message,
         "sent_at": (
-            send_run.sent_at.isoformat() if send_run.sent_at is not None else None
+            as_utc(send_run.sent_at).isoformat() if send_run.sent_at is not None else None
         ),
     }
 
