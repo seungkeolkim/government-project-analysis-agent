@@ -64,11 +64,21 @@ WORKDIR /app
 #   더 강하게 요구된다.
 #
 # ARG 로 버전을 외부 주입 가능하게 하되, 기본값은 reproducible build 를 위해 고정한다.
+#
+# task 00155 — system cron 전환:
+#   - cron : OS 레벨 cron 데몬. APScheduler(웹 프로세스 내부 SW 스케줄러)를 걷어내고
+#            컨테이너 기동 시 설치한 crontab 을 cron 데몬이 직접 실행하도록 한다.
+#            python:3.12-slim 베이스에는 cron 이 없으므로 여기서 설치한다.
+#   - gosu : root 로 시작한 entrypoint 가 cron 데몬(요구: root)을 띄운 뒤 HOST_UID
+#            비루트로 안전하게 권한을 강등(setuid/setgid + initgroups)하기 위한 도구.
+#            su/sudo 대비 TTY·시그널·PAM 부작용이 없어 컨테이너 entrypoint 강등에 적합.
 ARG DOCKER_COMPOSE_PLUGIN_VERSION=v2.29.7
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         docker.io \
         docker-cli \
+        cron \
+        gosu \
         curl \
         ca-certificates && \
     rm -rf /var/lib/apt/lists/* && \

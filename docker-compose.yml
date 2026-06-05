@@ -45,11 +45,14 @@ services:
         HOST_GID: "${HOST_GID:-1000}"
     image: iris-agent:dev
     container_name: iris-agent-web
-    # 컨테이너를 호스트 유저 UID:GID 로 실행해 생성 파일(SQLite DB·다운로드·로그 등) 의
-    # owner 가 호스트 유저가 되도록 한다. HOST_UID/HOST_GID 는 .env 에서 주입한다.
-    # YAML 에서 콜론을 포함한 값은 반드시 큰따옴표로 감싸야 mapping 으로 오인되지 않는다.
-    # group_add(HOST_DOCKER_GID) 는 user 지시어와 독립적으로 동작한다 — 두 설정은 충돌하지 않는다.
-    user: "${HOST_UID}:${HOST_GID}"
+    # task 00155 — system cron 전환: app 서비스는 `user:` 지시어를 두지 않고
+    # **root 로 entrypoint 를 기동**한다. system cron 데몬은 root 로만 띄울 수
+    # 있기 때문이다. entrypoint(docker/entrypoint.sh) 가 root 단계에서 cron 데몬을
+    # 기동한 뒤 gosu 로 HOST_UID:HOST_GID 비루트로 강등해 자기 자신을 재실행하므로,
+    # 마이그레이션·crontab 설치·uvicorn 은 모두 HOST_UID 로 수행된다. 따라서 생성
+    # 파일 owner 는 종전과 동일하게 호스트 유저로 유지된다(HOST_UID/HOST_GID 는
+    # 아래 env_file 의 .env 로 주입되어 entrypoint 가 강등 대상 UID/GID 로 사용한다).
+    # scraper 서비스는 cron 이 필요 없어 종전대로 `user:` 를 유지(비루트 기동)한다.
     env_file:
       - .env
     # Phase 2(00025) — 웹 subprocess 가 호스트 dockerd 에 docker compose 호출을
@@ -78,6 +81,10 @@ services:
     # 이 있으므로 `${VAR:-iris-agent}` fallback 형태를 그대로 유지한다.
     environment:
       - COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-iris-agent}
+      # task 00155 — entrypoint 가 이 플래그를 보고 cron 데몬 기동 + crontab 설치를
+      # 수행한다. app 서비스(웹)에만 1 로 둔다. scraper 서비스에는 두지 않아 cron 이
+      # 기동되지 않는다(1회성 수집 워커).
+      - ENABLE_CRON=1
       # 00029 — 컨테이너 타임존을 호스트와 동기화한다. DB 는 여전히 UTC 로
       # 저장되고(PROJECT_NOTES '시각 처리' 정책 유지), 이 설정은 loguru 로그
       # 타임스탬프·`date` 출력 등 **프레젠테이션 계층** 의 시각 체감만 바꾼다.
