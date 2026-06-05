@@ -19,9 +19,10 @@ from __future__ import annotations
 import json
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
+from app.scheduler.constants import SCHEDULER_JOBS_TABLENAME
 from app.scheduler.crontab_generator import (
     CrontabEnvironment,
     generate_crontab_text,
@@ -34,6 +35,45 @@ from app.scheduler.schedule_store import (
     list_general_schedule_records,
 )
 from app.timezone import now_utc
+
+
+def _ensure_legacy_scheduler_jobs_table(session: Session) -> None:
+    """레거시 ``scheduler_jobs`` 테이블을 (없으면) 생성한다.
+
+    task 00156-2 의 드롭 마이그레이션(``b7c8d9e0f1a2``)이 alembic head 에서 이
+    테이블을 제거하므로, ``db_session`` fixture(= ``alembic upgrade head`` 적용)
+    에는 더 이상 이 테이블이 없다. 그러나 백필 함수는 '드롭 이전(task 155 직후)
+    의 레거시 DB 상태' 를 입력으로 받아 신규 SSOT 로 변환하는 함수이므로, 그
+    입력 상태를 테스트가 직접 재현해야 한다.
+
+    스키마는 c5a8d1e7b9f4(scheduler_jobs_json_columns)의 신 스키마와 동일하다.
+    테스트 DB 는 SQLite 이므로 raw ``CREATE TABLE`` 로 충분하다. 멱등하게
+    (이미 있으면 no-op) 동작한다.
+
+    Args:
+        session: ORM 세션(connection 을 빌려 raw SQL 실행).
+    """
+    inspector = inspect(session.connection())
+    if SCHEDULER_JOBS_TABLENAME in inspector.get_table_names():
+        return
+    session.connection().execute(
+        text(
+            "CREATE TABLE scheduler_jobs ("
+            " id VARCHAR(191) PRIMARY KEY,"
+            " next_run_time TIMESTAMP NULL,"
+            " trigger_type VARCHAR(16) NOT NULL,"
+            " cron_expression TEXT NULL,"
+            " interval_seconds INTEGER NULL,"
+            " job_state TEXT NOT NULL,"
+            " created_at TIMESTAMP NOT NULL,"
+            " updated_at TIMESTAMP NOT NULL,"
+            " last_run_at TIMESTAMP NULL,"
+            " last_success_at TIMESTAMP NULL,"
+            " last_fail_at TIMESTAMP NULL,"
+            " last_error_message TEXT NULL"
+            ")"
+        )
+    )
 
 
 def _insert_legacy_job(
@@ -62,6 +102,8 @@ def _insert_legacy_job(
         active_sources: 잡 args 에 저장할 source id 목록.
         paused: True 면 next_run_time 을 NULL 로 둬 paused 상태를 재현한다.
     """
+    # head 에서 드롭된 레거시 테이블을 '155 직후 상태' 로 먼저 재현한다.
+    _ensure_legacy_scheduler_jobs_table(session)
     job_state = {
         "version": 1,
         "func_ref": "app.scheduler.job_runner:scheduled_scrape",
