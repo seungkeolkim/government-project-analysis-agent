@@ -18,9 +18,9 @@
 
 본 모듈은 두 호출 경로를 공유한다:
     - CLI: ``scripts/python/gc_orphan_attachments.py`` — 운영자가 수동 실행.
-    - 스케줄러: ``app/scheduler/job_runner.py::gc_orphan_attachments_job`` — APScheduler
-      cron 으로 일 1회 자동 실행 (권장: KST 04:00 — 새벽 시간대로 수집과의
-      충돌을 피한다).
+    - 스케줄러: ``app/scheduler/run_job.py`` 의 ``gc`` 서브커맨드 — OS cron 데몬이
+      일 1회 자동 실행 (권장: KST 04:00 — 새벽 시간대로 수집과의 충돌을 피한다,
+      task 00155).
 
 동시성 가드 (설계 §11.3):
     GC 실행 시점에 ``ScrapeRun.status='running'`` 인 row 가 있으면 **즉시 거부**

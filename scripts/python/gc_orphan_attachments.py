@@ -32,9 +32,9 @@
     2  진행 중 ScrapeRun 이 있어 GC 가 거부됨 (--force 없이).
 
 본 스크립트의 핵심 로직은 ``app.scrape_control.orphan_gc`` 모듈이다 — 본
-파일은 argparse + sys.exit 어댑터다. APScheduler 일 1회 자동 실행 경로는
-``app/scheduler/job_runner.py`` 의 ``gc_orphan_attachments_job`` 가 동일 모듈을
-공유한다.
+파일은 argparse + sys.exit 어댑터다. OS cron 일 1회 자동 실행 경로는
+``app/scheduler/run_job.py`` 의 ``gc`` 서브커맨드가 동일 모듈을 공유한다
+(task 00155).
 """
 
 from __future__ import annotations

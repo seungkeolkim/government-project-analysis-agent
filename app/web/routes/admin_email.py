@@ -82,11 +82,10 @@ from app.email.message_builder import build_plain_text_message
 from app.email.sender import send_with_retry
 from app.email.transport.factory import build_transport_from_settings
 from app.scheduler import (
-    ScheduleValidationError,
-    get_daily_report_schedule_summary,
-    register_daily_report_cron_schedule,
+    CronExpressionError,
+    reinstall_crontab_after_change,
+    validate_cron_expression,
 )
-from app.timezone import KST
 
 
 # ──────────────────────────────────────────────────────────────
@@ -696,11 +695,16 @@ DAILY_REPORT_TEST_SEND_MULTI_RECIPIENT_MAX_LENGTH: int = 2000
 
 
 def _validate_cron_expression(cron_expression: str) -> str:
-    """5필드 cron 표현식을 ``CronTrigger.from_crontab`` 으로 파싱해 유효성을 확인한다.
+    """5필드 cron 표현식을 표준 crontab 규약으로 검증한다.
 
     빈 문자열은 그대로 반환한다 (PUT settings 에서 ``enabled=False`` 인 경우
     cron 을 비워 저장하는 흐름을 허용). 형식이 잘못된 경우 ``ValueError`` 를
     raise — Pydantic validator 가 이를 422 로 변환한다.
+
+    task 00155-4 — APScheduler 의 ``build_cron_trigger`` (요일 보정 + 파싱) 가
+    제거되어, system cron 규약을 그대로 따르는 순수 검증 함수
+    (:func:`app.scheduler.validate_cron_expression`)로 대체했다. 요일 보정 없이
+    필드 개수·값 범위만 본다.
 
     Args:
         cron_expression: 사용자가 입력한 cron 문자열.
@@ -709,23 +713,17 @@ def _validate_cron_expression(cron_expression: str) -> str:
         앞뒤 공백 제거된 cron 표현식. 빈 입력은 빈 문자열 그대로.
 
     Raises:
-        ValueError: cron 표현식 파싱 실패 (잘못된 필드 수 / 범위 등).
+        ValueError: cron 표현식 검증 실패 (잘못된 필드 수 / 범위 등).
     """
     stripped = cron_expression.strip()
     if not stripped:
         return ""
-    # task 00147 — service.py 의 등록 경로와 동일하게 요일 규약 보정 헬퍼를
-    # 거쳐 검증한다. 헬퍼가 표준 crontab 요일 표기를 APScheduler 규약으로 보정한
-    # 뒤 CronTrigger 를 만들므로, 검증 시점과 등록 시점의 파싱 동작이 일치한다.
-    from app.scheduler.cron import build_cron_trigger
-
     try:
-        build_cron_trigger(stripped, timezone=KST)
-    except Exception as exc:
+        return validate_cron_expression(stripped)
+    except CronExpressionError as exc:
         raise ValueError(
             f"cron 표현식이 올바르지 않습니다: {exc}"
         ) from exc
-    return stripped
 
 
 class RecipientInfo(BaseModel):
@@ -917,21 +915,15 @@ def _build_recipient_overview(
     return recipients, eligible_count, without_email_count, unsubscribed_count
 
 
-def _next_run_at_iso() -> str | None:
-    """APScheduler 의 daily report 잡 next_run_time 을 ISO-8601 문자열로 반환한다.
-
-    잡이 없거나 스케줄러가 미기동이면 None. ``ScheduleSummary.next_run_time``
-    은 KST tz-aware datetime (BackgroundScheduler.timezone=KST) 이므로 그대로
-    ``isoformat()`` 한다.
-    """
-    summary = get_daily_report_schedule_summary()
-    if summary is None or summary.next_run_time is None:
-        return None
-    return summary.next_run_time.isoformat()
-
-
 def _build_daily_report_settings_response(session) -> DailyReportSettingsOut:
-    """SystemSetting + 수신자 명단 + next_run_at 을 한 번에 묶어 GET 응답으로 직렬화."""
+    """SystemSetting + 수신자 명단을 묶어 GET 응답으로 직렬화한다.
+
+    task 00155-4 — daily report 잡은 더 이상 웹 프로세스 내부 APScheduler 가
+    돌리지 않고 OS cron 데몬이 ``email.daily_report.cron_expression`` 시각에
+    실행한다. 따라서 정확한 ``next_run_at`` 을 보유한 라이브 스케줄러가 없어
+    None 으로 둔다. 운영자는 응답의 ``cron_expression`` 과 ``enabled`` 로 다음
+    실행 시점을 판단한다(FE 는 next_run_at 이 None 이면 안내 문구를 표시).
+    """
     values = _load_daily_report_setting_values(session)
     (
         recipients,
@@ -944,7 +936,8 @@ def _build_daily_report_settings_response(session) -> DailyReportSettingsOut:
         cron_expression=values["cron_expression"],
         last_sent_at=values["last_sent_at"],
         test_recipient=values["test_recipient"],
-        next_run_at=_next_run_at_iso(),
+        # cron 데몬이 스케줄을 실행하므로 라이브 next_run_time 은 보유하지 않는다.
+        next_run_at=None,
         recipients=recipients,
         recipient_count_eligible=eligible_count,
         recipient_count_without_email=without_email_count,
@@ -1152,28 +1145,23 @@ def put_daily_report_settings(
     body: DailyReportSettingsIn,
     current_user: User = Depends(admin_user_required),
 ) -> DailyReportSettingsOut:
-    """Daily Report SystemSetting 3종 저장 + APScheduler 잡 자동 등록/제거.
+    """Daily Report SystemSetting 3종 저장 + crontab 재설치 (task 00155-4).
 
     저장 흐름:
         1. Pydantic validator 가 cron 표현식 형식 / enabled-vs-cron 일관성을 422
            로 미리 거른다.
-        2. ``register_daily_report_cron_schedule(cron, enabled)`` 호출 —
-           enabled=False / cron 빈 값 → 잡 제거, 그 외 → add or reschedule.
-           ``ScheduleValidationError`` 는 422 로 변환 (Pydantic 검증과 별개로
-           스케줄러 내부에서 거부된 경우).
-        3. SystemSetting 3종 (enabled / cron_expression / test_recipient) 저장.
-        4. 저장 후 GET 과 동일 형식의 응답을 빌드해 반환 — next_run_at 까지 갱신된
-           최신 상태가 즉시 노출된다.
+        2. SystemSetting 3종 (enabled / cron_expression / test_recipient) 저장.
+        3. 저장 트랜잭션 커밋 후 crontab 을 재설치한다 — cron 데몬이 새 설정대로
+           ``python -m app.scheduler.run_job daily-report`` 를 실행하게 된다.
+           재설치는 ``ENABLE_CRON=1`` 컨테이너에서만 실제 수행되고, 개발/테스트
+           호스트에서는 graceful no-op 이라 라우트가 500 나지 않는다.
+        4. 저장 후 GET 과 동일 형식의 응답을 빌드해 반환한다.
 
-    순서 주의 (task 00128 버그 수정):
-        스케줄러 잡 갱신(2)을 SystemSetting 저장(3)보다 **먼저**, 그리고
-        ``session_scope`` 트랜잭션 **밖에서** 수행한다. ``register_daily_report_cron_schedule``
-        은 APScheduler 의 ``SQLAlchemyJobStore`` 를 통해 같은 SQLite 파일의
-        ``scheduler_jobs`` 테이블에 별도 커넥션으로 write 한다. 만약 ``set_setting``
-        + ``flush`` 로 이미 write 트랜잭션이 열린 세션 안에서 호출하면 SQLite 의
-        단일 writer 제약에 걸려 ``database is locked`` 가 발생한다. 백업 설정 저장
-        (``admin.backup_settings_save``)도 동일하게 스케줄 등록을 ``session_scope``
-        밖에서 먼저 처리한다 — 같은 순서를 따른다.
+    순서 주의:
+        crontab 재설치(:func:`reinstall_crontab_after_change`)는 새 세션으로 최신
+        설정을 다시 읽어 렌더하므로, SystemSetting 저장 트랜잭션이 **커밋된 뒤**
+        (``session_scope`` 블록을 빠져나온 뒤) 호출해야 한다. 그래야 방금 저장한
+        값이 crontab 에 반영된다.
 
     ``last_sent_at`` 은 본 endpoint 에서 직접 수정하지 않는다 — 발송 흐름
     (``prepare_and_send_daily_report``) 의 정책 표가 single source of truth.
@@ -1188,32 +1176,8 @@ def put_daily_report_settings(
         body.test_recipient,
     )
 
-    # 1. APScheduler 잡 갱신 — SystemSetting 저장 트랜잭션을 열기 **전에**, 그리고
-    #    session_scope 밖에서 먼저 수행한다. 이렇게 해야 jobstore(scheduler_jobs
-    #    테이블) write 가 웹 세션의 write 트랜잭션과 SQLite 단일 writer 제약에서
-    #    충돌(\"database is locked\")하지 않는다 (위 docstring '순서 주의' 참조).
-    #    register_daily_report_cron_schedule 은 비활성 분기에서
-    #    _require_running_scheduler 를 호출하므로 스케줄러 미기동 시
-    #    ScheduleValidationError 가 발생한다 — 그 경우는 422.
-    try:
-        register_daily_report_cron_schedule(
-            body.cron_expression,
-            enabled=body.enabled,
-        )
-    except ScheduleValidationError as exc:
-        logger.warning(
-            "Daily Report cron 등록 실패: user_id={} cron={!r} error={}",
-            current_user.id,
-            body.cron_expression,
-            exc,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=str(exc),
-        ) from exc
-
-    # 2. 스케줄 잡 갱신이 끝난 뒤 SystemSetting 3종을 저장한다. 이 시점에는
-    #    scheduler_jobs 쪽 write 가 이미 커밋돼 잠금 충돌이 없다.
+    # 1. SystemSetting 3종을 저장한다 (Pydantic validator 가 cron 형식·일관성을
+    #    이미 422 로 걸렀다).
     with session_scope() as session:
         # bool → \"true\" / \"false\" (소문자 통일, send_enabled 패턴과 동일).
         set_setting(
@@ -1233,10 +1197,17 @@ def put_daily_report_settings(
         )
         session.flush()
 
-        # 저장된 값 + 갱신된 스케줄 잡(next_run_at)을 한 번에 직렬화해 응답한다.
-        # _build_daily_report_settings_response 는 읽기 전용(SELECT)이므로 열린
-        # write 트랜잭션 안에서 호출해도 잠금 충돌이 없다.
+        # 저장된 값을 그대로 직렬화해 응답한다 (읽기 전용 SELECT).
         response = _build_daily_report_settings_response(session)
+
+    # 2. 설정 커밋 후 crontab 을 재설치한다 (새 세션으로 최신 설정을 읽는다).
+    #    컨테이너 밖/실패 시 graceful no-op — 라우트는 500 나지 않는다.
+    crontab_result = reinstall_crontab_after_change()
+    if not crontab_result.installed:
+        logger.info(
+            "Daily Report 저장 후 crontab 재설치 생략/실패(비치명적): {}",
+            crontab_result.reason,
+        )
 
     logger.info("Daily Report 설정 저장 완료: user_id={}", current_user.id)
     return response
