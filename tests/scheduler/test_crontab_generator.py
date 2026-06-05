@@ -17,13 +17,14 @@ from __future__ import annotations
 import pytest
 from sqlalchemy.orm import Session
 
-from app.backup.constants import DEFAULT_BACKUP_CRON, SETTING_KEY_BACKUP_CRON
-from app.backup.service import set_setting
-from app.email.constants import (
-    SETTING_KEY_DAILY_REPORT_CRON,
-    SETTING_KEY_DAILY_REPORT_ENABLED,
+from app.backup.constants import DEFAULT_BACKUP_CRON
+from app.scheduler.constants import (
+    DEFAULT_GC_ORPHAN_CRON,
+    JOB_KIND_BACKUP,
+    JOB_KIND_DAILY_REPORT,
+    TRIGGER_TYPE_CRON,
+    TRIGGER_TYPE_INTERVAL,
 )
-from app.scheduler.constants import DEFAULT_GC_ORPHAN_CRON
 from app.scheduler.crontab_generator import (
     CrontabEnvironment,
     CrontabJob,
@@ -37,10 +38,9 @@ from app.scheduler.crontab_generator import (
     interval_hours_to_cron_expression,
     render_crontab,
 )
-from app.scheduler.schedule_store import (
-    SCHEDULE_MODE_CRON,
-    SCHEDULE_MODE_INTERVAL,
-    add_general_schedule_record,
+from app.scheduler.scheduled_job_store import (
+    add_general_schedule,
+    upsert_singleton_schedule,
 )
 
 
@@ -150,9 +150,9 @@ def test_render_day_of_week_is_not_corrected() -> None:
 
 def test_collect_general_skips_disabled(db_session: Session) -> None:
     """비활성 일반 수집 스케줄은 잡에서 제외된다."""
-    add_general_schedule_record(
+    add_general_schedule(
         db_session,
-        mode=SCHEDULE_MODE_CRON,
+        trigger_type=TRIGGER_TYPE_CRON,
         cron_expression="0 3 * * *",
         enabled=False,
     )
@@ -162,9 +162,9 @@ def test_collect_general_skips_disabled(db_session: Session) -> None:
 
 def test_collect_general_converts_interval(db_session: Session) -> None:
     """interval 스케줄이 cron 표현식 잡으로 변환된다."""
-    add_general_schedule_record(
+    add_general_schedule(
         db_session,
-        mode=SCHEDULE_MODE_INTERVAL,
+        trigger_type=TRIGGER_TYPE_INTERVAL,
         interval_hours=6,
         active_sources=["iris"],
     )
@@ -180,9 +180,9 @@ def test_collect_general_empty_sources_omits_sources_flag(
     db_session: Session,
 ) -> None:
     """active_sources 가 비면 --sources 인자를 붙이지 않는다(전체 수집)."""
-    add_general_schedule_record(
+    add_general_schedule(
         db_session,
-        mode=SCHEDULE_MODE_CRON,
+        trigger_type=TRIGGER_TYPE_CRON,
         cron_expression="0 3 * * *",
         active_sources=[],
     )
@@ -198,7 +198,12 @@ def test_collect_general_empty_sources_omits_sources_flag(
 
 
 def test_collect_system_jobs_defaults(db_session: Session) -> None:
-    """설정이 없으면 백업(기본 cron)과 GC 가 포함되고 Daily Report 는 제외된다."""
+    """기본 시드만 있으면 백업(기본 cron)·GC 가 포함되고 Daily Report 는 제외된다.
+
+    alembic 마이그레이션이 backup(기본 cron, enabled)·daily_report(기본 cron,
+    enabled=False)·gc 싱글턴을 시드하므로, 별도 설정 없이 SSOT(scheduled_jobs)만
+    으로 이 기본 상태가 보장된다.
+    """
     jobs = collect_system_jobs(db_session)
     comments = [job.comment for job in jobs]
 
@@ -215,9 +220,13 @@ def test_collect_system_jobs_defaults(db_session: Session) -> None:
 
 
 def test_collect_system_jobs_daily_report_enabled(db_session: Session) -> None:
-    """Daily Report 가 enabled=true 면 저장된 cron 으로 포함된다."""
-    set_setting(db_session, SETTING_KEY_DAILY_REPORT_ENABLED, "true")
-    set_setting(db_session, SETTING_KEY_DAILY_REPORT_CRON, "0 9 * * 1-5")
+    """Daily Report 싱글턴을 enabled 로 켜면 저장된 cron 으로 포함된다."""
+    upsert_singleton_schedule(
+        db_session,
+        job_kind=JOB_KIND_DAILY_REPORT,
+        cron_expression="0 9 * * 1-5",
+        enabled=True,
+    )
     db_session.commit()
 
     jobs = collect_system_jobs(db_session)
@@ -230,8 +239,12 @@ def test_collect_system_jobs_daily_report_enabled(db_session: Session) -> None:
 def test_collect_system_jobs_respects_custom_backup_cron(
     db_session: Session,
 ) -> None:
-    """저장된 backup cron 이 있으면 그 값을 쓴다."""
-    set_setting(db_session, SETTING_KEY_BACKUP_CRON, "30 2 * * *")
+    """backup 싱글턴 cron 을 바꾸면 그 값을 쓴다(SSOT=scheduled_jobs)."""
+    upsert_singleton_schedule(
+        db_session,
+        job_kind=JOB_KIND_BACKUP,
+        cron_expression="30 2 * * *",
+    )
     db_session.commit()
 
     jobs = collect_system_jobs(db_session)
@@ -247,26 +260,30 @@ def test_collect_system_jobs_respects_custom_backup_cron(
 def test_generate_crontab_text_end_to_end(db_session: Session) -> None:
     """일반 수집 N건 + 백업 + Daily Report + GC 조합이 기대 crontab 으로 렌더된다."""
     # 일반 수집 2건(cron 1 + interval 1) + 비활성 1건.
-    add_general_schedule_record(
+    add_general_schedule(
         db_session,
-        mode=SCHEDULE_MODE_CRON,
+        trigger_type=TRIGGER_TYPE_CRON,
         cron_expression="0 7 * * 1-5",
         active_sources=["iris", "ntis"],
     )
-    add_general_schedule_record(
+    add_general_schedule(
         db_session,
-        mode=SCHEDULE_MODE_INTERVAL,
+        trigger_type=TRIGGER_TYPE_INTERVAL,
         interval_hours=12,
     )
-    add_general_schedule_record(
+    add_general_schedule(
         db_session,
-        mode=SCHEDULE_MODE_CRON,
+        trigger_type=TRIGGER_TYPE_CRON,
         cron_expression="0 1 * * *",
         enabled=False,  # 제외 대상
     )
-    # Daily Report 활성화.
-    set_setting(db_session, SETTING_KEY_DAILY_REPORT_ENABLED, "true")
-    set_setting(db_session, SETTING_KEY_DAILY_REPORT_CRON, "0 9 * * 1-5")
+    # Daily Report 활성화(SSOT 싱글턴).
+    upsert_singleton_schedule(
+        db_session,
+        job_kind=JOB_KIND_DAILY_REPORT,
+        cron_expression="0 9 * * 1-5",
+        enabled=True,
+    )
     db_session.commit()
 
     text = generate_crontab_text(db_session, _make_environment())

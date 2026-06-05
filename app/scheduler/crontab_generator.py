@@ -13,14 +13,23 @@ cron 데몬은 각 잡을 매 주기 **독립 프로세스**로 새로 띄우므
 'database is locked → APScheduler 스레드 사망 → 전 스케줄 정지' 라는
 single-point-of-failure 가 구조적으로 사라진다.
 
-대상 스케줄
------------
-1. 일반 공고 수집(N건): :mod:`app.scheduler.schedule_store` 영속 저장소.
-   cron 모드 / interval('매 N시간') 모드 모두 지원.
-2. DB 파일 백업(1건): SystemSetting ``backup.cron_expression``.
-3. Daily Report 발송(1건): SystemSetting ``email.daily_report.enabled`` +
-   ``email.daily_report.cron_expression`` (enabled 일 때만).
-4. 고아 첨부 파일 GC(1건): 기본 ``0 4 * * *`` (:data:`DEFAULT_GC_ORPHAN_CRON`).
+대상 스케줄 (task 00157 — 단일 SSOT 전환)
+------------------------------------------
+task 00157 부터 모든 스케줄 트리거는 단일 관계형 테이블 ``scheduled_jobs``
+(:mod:`app.scheduler.scheduled_job_store`)에서만 읽는다. 더 이상 system_settings
+의 여러 키(``scheduler.general_schedules`` / ``backup.cron_expression`` /
+``email.daily_report.*``)를 참조하지 않는다 — 기동 시 이 단일 테이블만 보고
+crontab 을 완전 복원하므로 외부 cron 파일을 별도로 들고 다닐 필요가 없다.
+
+1. 일반 공고 수집(N건): ``scheduled_jobs`` 의 ``scrape_general`` row 들.
+   cron / interval('매 N시간') 트리거 모두 지원.
+2. DB 파일 백업(1건): ``scheduled_jobs`` 의 ``backup`` 싱글턴 row.
+3. Daily Report 발송(1건): ``scheduled_jobs`` 의 ``daily_report`` 싱글턴 row
+   (해당 row 의 ``enabled`` 가 True 일 때만 포함).
+4. 고아 첨부 파일 GC(1건): ``scheduled_jobs`` 의 ``gc`` 싱글턴 row.
+
+메일/백업의 **비-스케줄 설정**(SMTP 자격증명·``backup.max_count``·Daily Report
+수신자 등)은 여전히 system_settings 에 남아 있고, 본 생성기는 그것을 읽지 않는다.
 
 각 잡 라인은 :mod:`app.scheduler.run_job` CLI(00155-1)를 호출한다.
 
@@ -43,18 +52,20 @@ single-point-of-failure 가 구조적으로 사라진다.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import Session
 
 from app.scheduler.constants import (
-    DEFAULT_GC_ORPHAN_CRON,
     MAX_INTERVAL_HOURS,
+    TRIGGER_TYPE_INTERVAL,
 )
-from app.scheduler.schedule_store import (
-    SCHEDULE_MODE_INTERVAL,
-    GeneralScheduleRecord,
-    list_general_schedule_records,
-)
+
+if TYPE_CHECKING:
+    # 타입 힌트 전용 import. 런타임에는 :mod:`app.scheduler.scheduled_job_store` 가
+    # 본 모듈(validate_cron_expression)에 의존하므로, 모듈 최상위에서 store 를
+    # import 하면 순환 import 가 된다. 소비 함수 안에서 lazy import 한다.
+    from app.scheduler.scheduled_job_store import ScheduledJobRecord
 
 # cron 데몬이 호출하는 작업 CLI 모듈 경로(00155-1). 잡 라인은 이 모듈을
 # ``python -m`` 으로 실행한다.
@@ -323,14 +334,14 @@ def _format_active_sources(active_sources: list[str]) -> str:
     return ",".join(active_sources)
 
 
-def _general_schedule_to_job(record: GeneralScheduleRecord) -> CrontabJob:
+def _general_schedule_to_job(record: "ScheduledJobRecord") -> CrontabJob:
     """일반 수집 스케줄 레코드 1건을 :class:`CrontabJob` 으로 변환한다.
 
-    interval 모드는 cron 표현식으로 변환하고, active_sources 가 있으면
+    interval 트리거는 cron 표현식으로 변환하고, active_sources 가 있으면
     ``--sources`` 인자를 붙인다.
 
     Args:
-        record: 활성 상태로 가정된 일반 수집 스케줄 레코드.
+        record: 활성 상태로 가정된 ``scrape_general`` 스케줄 레코드.
 
     Returns:
         렌더 가능한 :class:`CrontabJob`.
@@ -338,7 +349,7 @@ def _general_schedule_to_job(record: GeneralScheduleRecord) -> CrontabJob:
     Raises:
         ValueError: interval 변환 실패 등 표현식이 비정상인 경우.
     """
-    if record.mode == SCHEDULE_MODE_INTERVAL:
+    if record.trigger_type == TRIGGER_TYPE_INTERVAL:
         cron_expression = interval_hours_to_cron_expression(
             record.interval_hours if record.interval_hours is not None else 0
         )
@@ -463,11 +474,29 @@ def _is_valid_cron_expression(cron_expression: str | None) -> bool:
     return len(cron_expression.split()) == 5
 
 
-def collect_general_schedule_jobs(session: Session) -> list[CrontabJob]:
-    """일반 수집 스케줄 저장소에서 활성 잡들을 모아 반환한다.
+def _singleton_cron_expression(record: "ScheduledJobRecord") -> str:
+    """싱글턴 잡 레코드(backup/daily_report/gc)의 트리거를 cron 표현식으로 환산한다.
 
-    비활성(enabled=False) 항목과, cron 모드인데 표현식이 비정상인 항목은
-    제외한다. interval 모드는 cron 표현식으로 변환한다.
+    싱글턴은 운영상 cron 트리거로만 쓰이지만, store 는 interval 도 허용하므로
+    방어적으로 interval 도 cron 으로 변환한다.
+
+    Args:
+        record: backup/daily_report/gc 싱글턴 레코드.
+
+    Returns:
+        crontab 라인에 쓸 5-필드 cron 표현식(공백 정리). 트리거가 비정상이면 빈 문자열.
+    """
+    if record.trigger_type == TRIGGER_TYPE_INTERVAL and record.interval_hours is not None:
+        return interval_hours_to_cron_expression(record.interval_hours)
+    return (record.cron_expression or "").strip()
+
+
+def collect_general_schedule_jobs(session: Session) -> list[CrontabJob]:
+    """일반 수집(``scrape_general``) 스케줄에서 활성 잡들을 모아 반환한다.
+
+    비활성(enabled=False) 항목과, cron 트리거인데 표현식이 비정상인 항목은
+    제외한다. interval 트리거는 cron 표현식으로 변환한다. 소스는 오직
+    ``scheduled_jobs`` 테이블이다(SSOT).
 
     Args:
         session: ORM 세션.
@@ -475,15 +504,18 @@ def collect_general_schedule_jobs(session: Session) -> list[CrontabJob]:
     Returns:
         활성·유효한 일반 수집 :class:`CrontabJob` 리스트.
     """
+    # 순환 import 회피를 위한 함수 내부 lazy import(store 가 본 모듈에 의존).
+    from app.scheduler.scheduled_job_store import list_general_schedules
+
     jobs: list[CrontabJob] = []
-    for record in list_general_schedule_records(session):
+    for record in list_general_schedules(session):
         if not record.enabled:
             continue
-        if record.mode == SCHEDULE_MODE_INTERVAL:
+        if record.trigger_type == TRIGGER_TYPE_INTERVAL:
             if record.interval_hours is None:
                 continue
         else:
-            # cron 모드 — 빈/비정상 표현식은 제외(비활성과 동일 취급).
+            # cron 트리거 — 빈/비정상 표현식은 제외(비활성과 동일 취급).
             if not _is_valid_cron_expression(record.cron_expression):
                 continue
         jobs.append(_general_schedule_to_job(record))
@@ -491,15 +523,18 @@ def collect_general_schedule_jobs(session: Session) -> list[CrontabJob]:
 
 
 def collect_system_jobs(session: Session) -> list[CrontabJob]:
-    """백업·Daily Report·GC 시스템 잡을 SystemSetting 기준으로 모아 반환한다.
+    """백업·Daily Report·GC 싱글턴 잡을 ``scheduled_jobs`` 기준으로 모아 반환한다.
 
-    - 백업: ``backup.cron_expression`` (없으면 기본값). 표현식이 정상이면 포함.
-    - Daily Report: ``email.daily_report.enabled`` 가 True 이고 cron 이 정상일
-      때만 포함.
-    - GC: 기본 ``0 4 * * *`` 로 항상 포함.
+    task 00157 부터 system_settings 의 여러 키 대신 단일 SSOT 테이블
+    ``scheduled_jobs`` 의 싱글턴 row 만 읽는다.
 
-    SystemSetting 접근은 ``app.backup.service.get_setting`` 헬퍼를 lazy import 해
-    재사용한다(순환 import 회피).
+    - 백업: ``backup`` 싱글턴이 enabled 이고 cron 이 정상이면 포함.
+    - Daily Report: ``daily_report`` 싱글턴이 enabled 이고 cron 이 정상일 때만 포함.
+    - GC: ``gc`` 싱글턴이 enabled 이고 cron 이 정상이면 포함.
+
+    싱글턴 row 는 alembic upgrade(기동 직전)와 store 시드가 멱등 보장하므로,
+    DB 만 있으면 기동 시 이 잡들이 완전 복원된다. row 가 비정상적으로 부재하면
+    해당 잡만 조용히 생략한다(생성기는 read-only 순수 함수를 유지).
 
     Args:
         session: ORM 세션.
@@ -508,58 +543,41 @@ def collect_system_jobs(session: Session) -> list[CrontabJob]:
         시스템 잡 :class:`CrontabJob` 리스트.
     """
     # 순환 import 회피를 위한 함수 내부 lazy import.
-    from app.backup.constants import DEFAULT_BACKUP_CRON, SETTING_KEY_BACKUP_CRON
-    from app.backup.service import get_setting
-    from app.email.constants import (
-        DEFAULT_DAILY_REPORT_CRON,
-        SETTING_KEY_DAILY_REPORT_CRON,
-        SETTING_KEY_DAILY_REPORT_ENABLED,
+    from app.scheduler.constants import (
+        JOB_KIND_BACKUP,
+        JOB_KIND_DAILY_REPORT,
+        JOB_KIND_GC,
+    )
+    from app.scheduler.scheduled_job_store import get_singleton_schedule
+
+    # (job_kind, 주석, CLI 인자, 로그 파일명) — 동일 규약으로 일괄 환원한다.
+    singleton_specs: tuple[tuple[str, str, list[str], str], ...] = (
+        (JOB_KIND_BACKUP, "[DB 백업] backup", ["backup"], LOG_FILENAME_BACKUP),
+        (
+            JOB_KIND_DAILY_REPORT,
+            "[Daily Report] daily-report",
+            ["daily-report"],
+            LOG_FILENAME_DAILY_REPORT,
+        ),
+        (JOB_KIND_GC, "[고아 첨부 GC] gc", ["gc"], LOG_FILENAME_GC),
     )
 
     jobs: list[CrontabJob] = []
-
-    # ── 백업 ──────────────────────────────────────────────────
-    backup_cron = (get_setting(session, SETTING_KEY_BACKUP_CRON) or "").strip()
-    if not backup_cron:
-        backup_cron = DEFAULT_BACKUP_CRON
-    if _is_valid_cron_expression(backup_cron):
+    for job_kind, comment, cli_arguments, log_filename in singleton_specs:
+        record = get_singleton_schedule(session, job_kind)
+        if record is None or not record.enabled:
+            continue
+        cron_expression = _singleton_cron_expression(record)
+        if not _is_valid_cron_expression(cron_expression):
+            continue
         jobs.append(
             CrontabJob(
-                comment="[DB 백업] backup",
-                cron_expression=backup_cron,
-                cli_arguments=["backup"],
-                log_filename=LOG_FILENAME_BACKUP,
+                comment=comment,
+                cron_expression=cron_expression,
+                cli_arguments=cli_arguments,
+                log_filename=log_filename,
             )
         )
-
-    # ── Daily Report (enabled 일 때만) ────────────────────────
-    raw_enabled = get_setting(session, SETTING_KEY_DAILY_REPORT_ENABLED)
-    daily_report_enabled = (raw_enabled or "").strip().lower() == "true"
-    if daily_report_enabled:
-        daily_report_cron = (
-            get_setting(session, SETTING_KEY_DAILY_REPORT_CRON) or ""
-        ).strip()
-        if not daily_report_cron:
-            daily_report_cron = DEFAULT_DAILY_REPORT_CRON
-        if _is_valid_cron_expression(daily_report_cron):
-            jobs.append(
-                CrontabJob(
-                    comment="[Daily Report] daily-report",
-                    cron_expression=daily_report_cron,
-                    cli_arguments=["daily-report"],
-                    log_filename=LOG_FILENAME_DAILY_REPORT,
-                )
-            )
-
-    # ── GC (기본값으로 항상 포함) ─────────────────────────────
-    jobs.append(
-        CrontabJob(
-            comment="[고아 첨부 GC] gc",
-            cron_expression=DEFAULT_GC_ORPHAN_CRON,
-            cli_arguments=["gc"],
-            log_filename=LOG_FILENAME_GC,
-        )
-    )
 
     return jobs
 

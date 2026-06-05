@@ -32,7 +32,6 @@ from app.backup.constants import (
     BACKUP_TRIGGER_MANUAL,
     DEFAULT_BACKUP_CRON,
     DEFAULT_BACKUP_MAX_COUNT,
-    SETTING_KEY_BACKUP_CRON,
     SETTING_KEY_BACKUP_MAX_COUNT,
 )
 from app.config import PROJECT_ROOT, get_settings
@@ -348,7 +347,10 @@ def list_backup_files() -> list[dict[str, Any]]:
 def get_backup_settings(session: Session) -> dict[str, str]:
     """현재 백업 설정(cron 표현식·최대 보관 수)을 반환한다.
 
-    SystemSetting 에 값이 없으면 기본값으로 채운다.
+    task 00157 부터 백업 cron 트리거의 단일 SSOT 는 ``scheduled_jobs`` 의 backup
+    싱글턴 row 다(system_settings 의 ``backup.cron_expression`` 미러는 더 이상 읽지
+    않는다). 보관 개수(max_count)는 비-스케줄 설정이라 여전히 system_settings 에서
+    읽는다. 어느 쪽이든 값이 없으면 도메인 기본값으로 채운다.
 
     Args:
         session: ORM 세션.
@@ -356,7 +358,16 @@ def get_backup_settings(session: Session) -> dict[str, str]:
     Returns:
         키: ``'cron_expression'``, ``'max_count'``.
     """
-    cron = get_setting(session, SETTING_KEY_BACKUP_CRON) or DEFAULT_BACKUP_CRON
+    # 순환 import 회피: scheduled_job_store 는 crontab_generator 에 의존하므로
+    # backup 패키지 최상위가 아니라 함수 안에서 lazy import 한다.
+    from app.scheduler.constants import JOB_KIND_BACKUP
+    from app.scheduler.scheduled_job_store import get_singleton_schedule
+
+    backup_job = get_singleton_schedule(session, JOB_KIND_BACKUP)
+    if backup_job is not None and backup_job.cron_expression:
+        cron = backup_job.cron_expression
+    else:
+        cron = DEFAULT_BACKUP_CRON
     max_count = get_setting(session, SETTING_KEY_BACKUP_MAX_COUNT) or str(DEFAULT_BACKUP_MAX_COUNT)
     return {
         "cron_expression": cron,

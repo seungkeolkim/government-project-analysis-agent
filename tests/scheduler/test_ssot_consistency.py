@@ -1,14 +1,14 @@
-"""DB = SystemSetting 단일 SSOT 정합성 검증 (task 00156-2).
+"""DB = scheduled_jobs 단일 SSOT 정합성 검증 (task 00157-2).
 
-task 00156-1 백필이 레거시 ``scheduler_jobs`` 의 일반 수집 스케줄을 신규 SSOT
-(SystemSetting ``scheduler.general_schedules``)로 복구한 뒤, 00156-2 의 드롭
-마이그레이션이 고아가 된 ``scheduler_jobs`` 테이블을 제거한다. 이 테스트는:
+task 00157 은 스케줄 SSOT 를 단일 관계형 테이블 ``scheduled_jobs`` 로 일원화한다.
+crontab 생성기는 오직 이 테이블만 읽어 잡을 렌더하며, system_settings 의 스케줄
+미러 키나 외부 cron 파일에 더 이상 의존하지 않는다. 이 테스트는:
 
-- ``alembic upgrade head`` 후 ``scheduler_jobs`` 테이블이 더 이상 존재하지
-  않음(드롭 마이그레이션이 실행됨),
+- ``alembic upgrade head`` 후 레거시 APScheduler jobstore ``scheduler_jobs`` 가 더
+  이상 존재하지 않음(00156-2 드롭 마이그레이션),
 - ``upgrade head`` 재실행이 멱등하게 성공하고 테이블이 계속 부재함,
-- 테이블 부재 상태에서 일반 수집 잡 수집·crontab 렌더가 예외 없이 동작함,
-- crontab 이 SystemSetting(DB) 에 저장된 항목만 일관 출력하고, DB 에 없는
+- 일반 수집 잡 수집·crontab 렌더가 ``scheduled_jobs`` 만으로 예외 없이 동작함,
+- crontab 이 ``scheduled_jobs`` 에 저장된 항목만 일관 출력하고, DB 에 없는
   스케줄은 절대 나타나지 않으며, DB 에서 지우면 crontab 에서도 사라짐
   (DB = SSOT)
 
@@ -21,22 +21,21 @@ from __future__ import annotations
 from sqlalchemy import Engine, inspect
 from sqlalchemy.orm import Session
 
-from app.backup.constants import SETTING_KEY_BACKUP_CRON
-from app.backup.service import set_setting
-from app.email.constants import (
-    SETTING_KEY_DAILY_REPORT_CRON,
-    SETTING_KEY_DAILY_REPORT_ENABLED,
+from app.scheduler.constants import (
+    JOB_KIND_BACKUP,
+    JOB_KIND_DAILY_REPORT,
+    SCHEDULER_JOBS_TABLENAME,
+    TRIGGER_TYPE_CRON,
 )
-from app.scheduler.constants import SCHEDULER_JOBS_TABLENAME
 from app.scheduler.crontab_generator import (
     CrontabEnvironment,
     collect_general_schedule_jobs,
     generate_crontab_text,
 )
-from app.scheduler.schedule_store import (
-    SCHEDULE_MODE_CRON,
-    add_general_schedule_record,
-    delete_general_schedule_record,
+from app.scheduler.scheduled_job_store import (
+    add_general_schedule,
+    delete_scheduled_job,
+    upsert_singleton_schedule,
 )
 
 
@@ -87,12 +86,12 @@ def test_upgrade_head_is_idempotent(test_engine: Engine) -> None:
 def test_general_collect_works_without_legacy_table(db_session: Session) -> None:
     """레거시 테이블이 없어도 일반 수집 잡 수집이 예외 없이 동작한다.
 
-    일반 수집 잡은 SystemSetting(SSOT)만 읽으므로 scheduler_jobs 부재와 무관히
+    일반 수집 잡은 ``scheduled_jobs``(SSOT)만 읽으므로 scheduler_jobs 부재와 무관히
     정상 동작해야 한다.
     """
-    add_general_schedule_record(
+    add_general_schedule(
         db_session,
-        mode=SCHEDULE_MODE_CRON,
+        trigger_type=TRIGGER_TYPE_CRON,
         cron_expression="0 1 * * *",
     )
     db_session.commit()
@@ -102,24 +101,30 @@ def test_general_collect_works_without_legacy_table(db_session: Session) -> None
 
 
 def test_crontab_reflects_exactly_db_ssot(db_session: Session) -> None:
-    """crontab 이 DB(SystemSetting)에 저장된 스케줄 전부를 일관 출력한다.
+    """crontab 이 DB(scheduled_jobs)에 저장된 스케줄 전부를 일관 출력한다.
 
-    일반 수집 2건(0 1·0 13) + 백업 + Daily Report(enabled)를 SystemSetting 에
+    일반 수집 2건(0 1·0 13) + 백업 + Daily Report(enabled)를 scheduled_jobs 에
     넣고 crontab 을 렌더하면, 그 전부가 한 번에 나타나야 한다.
     """
-    add_general_schedule_record(
+    add_general_schedule(
         db_session,
-        mode=SCHEDULE_MODE_CRON,
+        trigger_type=TRIGGER_TYPE_CRON,
         cron_expression="0 1 * * *",
     )
-    add_general_schedule_record(
+    add_general_schedule(
         db_session,
-        mode=SCHEDULE_MODE_CRON,
+        trigger_type=TRIGGER_TYPE_CRON,
         cron_expression="0 13 * * *",
     )
-    set_setting(db_session, SETTING_KEY_BACKUP_CRON, "30 2 * * *")
-    set_setting(db_session, SETTING_KEY_DAILY_REPORT_ENABLED, "true")
-    set_setting(db_session, SETTING_KEY_DAILY_REPORT_CRON, "45 8 * * 1-5")
+    upsert_singleton_schedule(
+        db_session, job_kind=JOB_KIND_BACKUP, cron_expression="30 2 * * *"
+    )
+    upsert_singleton_schedule(
+        db_session,
+        job_kind=JOB_KIND_DAILY_REPORT,
+        cron_expression="45 8 * * 1-5",
+        enabled=True,
+    )
     db_session.commit()
 
     crontab_text = generate_crontab_text(db_session, _make_environment())
@@ -140,11 +145,11 @@ def test_crontab_omits_schedule_not_in_db(db_session: Session) -> None:
     """DB 에 없는 스케줄은 crontab 에 절대 나타나지 않는다(DB = SSOT).
 
     사용자 보고의 핵심 증상('DB 엔 없는데 어딘가에 남아 있다')의 역방향 가드:
-    SystemSetting 에 저장하지 않은 표현식(15 11)은 crontab 에서 보이지 않는다.
+    scheduled_jobs 에 저장하지 않은 표현식(15 11)은 crontab 에서 보이지 않는다.
     """
-    add_general_schedule_record(
+    add_general_schedule(
         db_session,
-        mode=SCHEDULE_MODE_CRON,
+        trigger_type=TRIGGER_TYPE_CRON,
         cron_expression="0 1 * * *",
     )
     db_session.commit()
@@ -162,14 +167,14 @@ def test_crontab_drops_schedule_after_db_delete(db_session: Session) -> None:
     재기동 정합성 시나리오: 화면/저장소에서 삭제한 스케줄은 다음 crontab
     재생성 시점부터 출력되지 않아야 한다.
     """
-    keep = add_general_schedule_record(
+    keep = add_general_schedule(
         db_session,
-        mode=SCHEDULE_MODE_CRON,
+        trigger_type=TRIGGER_TYPE_CRON,
         cron_expression="0 1 * * *",
     )
-    drop = add_general_schedule_record(
+    drop = add_general_schedule(
         db_session,
-        mode=SCHEDULE_MODE_CRON,
+        trigger_type=TRIGGER_TYPE_CRON,
         cron_expression="0 13 * * *",
     )
     db_session.commit()
@@ -177,7 +182,7 @@ def test_crontab_drops_schedule_after_db_delete(db_session: Session) -> None:
     before = generate_crontab_text(db_session, _make_environment())
     assert "0 1 * * *" in before and "0 13 * * *" in before
 
-    assert delete_general_schedule_record(db_session, drop.id) is True
+    assert delete_scheduled_job(db_session, drop.id) is True
     db_session.commit()
 
     after = generate_crontab_text(db_session, _make_environment())
