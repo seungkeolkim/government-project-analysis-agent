@@ -112,7 +112,20 @@ DEFAULT_PAGE_SIZE: int = 20
 MAX_PAGE_SIZE: int = 100
 
 # 허용되는 정렬 기준 값 (repository._ALLOWED_SORT_VALUES 와 일치해야 한다).
-_ALLOWED_SORT_VALUES: tuple[str, ...] = ("received_desc", "deadline_asc", "title_asc")
+# 정렬키 명명 규약 (00158-2 프론트 헤더 링크가 이 이름을 그대로 사용한다):
+#   공고 수집일 = collected_desc / collected_asc   (COALESCE(updated_at, scraped_at))
+#   모집 시작일 = received_desc  / received_asc    (received_at)
+#   모집 마감일 = deadline_desc  / deadline_asc    (deadline_at)
+#   기본값      = collected_desc
+_ALLOWED_SORT_VALUES: tuple[str, ...] = (
+    "collected_desc",
+    "collected_asc",
+    "received_desc",
+    "received_asc",
+    "deadline_desc",
+    "deadline_asc",
+    "title_asc",
+)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -268,13 +281,13 @@ def _coerce_sort_query(raw_sort: Optional[str]) -> str:
     """쿼리스트링 sort 값을 검증하고 정규화한다.
 
     허용 입력:
-        - None / 빈 문자열 → 'received_desc' (기본값).
-        - 'received_desc' / 'deadline_asc' / 'title_asc'.
+        - None / 빈 문자열 → 'collected_desc' (기본값: 공고 수집일 최신순).
+        - _ALLOWED_SORT_VALUES 에 속하는 값.
 
     그 외 값은 400 으로 거절한다.
     """
     if raw_sort is None or not raw_sort.strip():
-        return "received_desc"
+        return "collected_desc"
     stripped = raw_sort.strip()
     if stripped not in _ALLOWED_SORT_VALUES:
         raise HTTPException(
@@ -548,7 +561,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             - status:    접수중 / 접수예정 / 마감 중 하나. 생략 시 전체.
             - search:    제목 부분일치(LIKE) 검색어.
             - source:    소스 유형(IRIS / NTIS 등). 생략 시 전체.
-            - sort:      정렬 기준. received_desc(기본) / deadline_asc / title_asc.
+            - sort:      정렬 기준. collected_desc(기본, 공고 수집일 최신순) / 기타 _ALLOWED_SORT_VALUES 참조.
             - group:     'on' 이면 canonical 묶어 보기 모드. 기본 'off'.
             - page:      1-based 페이지 번호.
             - page_size: 페이지 크기(최대 MAX_PAGE_SIZE).
@@ -1134,7 +1147,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             - status:    접수중 / 접수예정 / 마감. 생략 시 전체.
             - search:    제목 부분일치(LIKE) 검색어.
             - source:    소스 유형(IRIS / NTIS 등). 생략 시 전체.
-            - sort:      received_desc(기본) / deadline_asc / title_asc.
+            - sort:      collected_desc(기본, 공고 수집일 최신순) / 기타 _ALLOWED_SORT_VALUES 참조.
             - group:     'on' 이면 canonical 묶어 보기 모드. 기본 'off'.
             - page / page_size: 페이지네이션.
 

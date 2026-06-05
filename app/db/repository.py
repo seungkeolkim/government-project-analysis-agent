@@ -123,7 +123,23 @@ _ALLOWED_ARCHIVE_REASONS: frozenset[str] = frozenset(
 _ANNOUNCEMENT_PROTECTED_FIELDS: frozenset[str] = frozenset({"id", "scraped_at", "updated_at"})
 
 # 허용되는 정렬 기준 값.
-_ALLOWED_SORT_VALUES: frozenset[str] = frozenset({"received_desc", "deadline_asc", "title_asc"})
+# 정렬키 명명 규약 (00158-2 프론트 헤더 링크가 이 이름을 그대로 사용한다):
+#   공고 수집일 = collected_desc / collected_asc   (COALESCE(updated_at, scraped_at))
+#   모집 시작일 = received_desc  / received_asc    (received_at)
+#   모집 마감일 = deadline_desc  / deadline_asc    (deadline_at)
+#   기본값      = collected_desc
+#   title_asc 는 하위 호환을 위해 유지 (UI select 제거 후에도 북마크 URL 지원)
+_ALLOWED_SORT_VALUES: frozenset[str] = frozenset(
+    {
+        "collected_desc",
+        "collected_asc",
+        "received_desc",
+        "received_asc",
+        "deadline_desc",
+        "deadline_asc",
+        "title_asc",
+    }
+)
 
 # 관련성 판정 verdict 허용값.
 RELEVANCE_VERDICT_RELATED: str = "관련"
@@ -488,29 +504,63 @@ def _apply_common_filters(
 def _apply_sort_order(statement: Any, sort: str) -> Any:
     """정렬 조건을 statement 에 적용한다.
 
+    NULL 은 항상 결과 맨 뒤로 보낸다. tie-breaker 는 Announcement.id DESC.
+
     Args:
         statement: SQLAlchemy select statement.
-        sort:      정렬 기준. received_desc | deadline_asc | title_asc.
+        sort:      정렬 기준 문자열. 허용값은 _ALLOWED_SORT_VALUES 참조.
 
     Returns:
         ORDER BY 절이 추가된 statement.
     """
-    if sort == "deadline_asc":
-        # deadline_at NULL 은 뒤로
+    # 공고 수집일 정렬 기준: COALESCE(updated_at, scraped_at)
+    collected_expr = func.coalesce(Announcement.updated_at, Announcement.scraped_at)
+
+    if sort == "collected_desc":
+        # 공고 수집일 최신순, NULL(둘 다 없음) 은 뒤로
+        return statement.order_by(
+            (collected_expr.is_(None)).asc(),
+            collected_expr.desc(),
+            Announcement.id.desc(),
+        )
+    elif sort == "collected_asc":
+        # 공고 수집일 오름차순, NULL 은 뒤로
+        return statement.order_by(
+            (collected_expr.is_(None)).asc(),
+            collected_expr.asc(),
+            Announcement.id.desc(),
+        )
+    elif sort == "received_asc":
+        # 모집 시작일 오름차순, NULL 은 뒤로
+        return statement.order_by(
+            (Announcement.received_at.is_(None)).asc(),
+            Announcement.received_at.asc(),
+            Announcement.id.desc(),
+        )
+    elif sort == "deadline_asc":
+        # 모집 마감일 임박순(오름차순), NULL 은 뒤로
         return statement.order_by(
             (Announcement.deadline_at.is_(None)).asc(),
             Announcement.deadline_at.asc(),
             Announcement.id.desc(),
         )
+    elif sort == "deadline_desc":
+        # 모집 마감일 내림차순, NULL 은 뒤로
+        return statement.order_by(
+            (Announcement.deadline_at.is_(None)).asc(),
+            Announcement.deadline_at.desc(),
+            Announcement.id.desc(),
+        )
     elif sort == "title_asc":
+        # 공고명 가나다순 (하위 호환)
         return statement.order_by(
             Announcement.title.asc(),
             Announcement.id.desc(),
         )
     else:
-        # received_desc (기본): 수집일 최신순, received_at NULL 은 뒤로
+        # received_desc (모집 시작일 최신순), NULL 은 뒤로
         return statement.order_by(
-            (Announcement.received_at.is_(None)).asc(),  # NULL → 뒤로
+            (Announcement.received_at.is_(None)).asc(),
             Announcement.received_at.desc(),
             Announcement.id.desc(),
         )
@@ -520,23 +570,49 @@ def _group_row_sort_key(ann: Announcement, sort: str) -> tuple:
     """Python 정렬용 비교 키를 반환한다.
 
     list_canonical_groups 에서 그룹 대표 Announcement 를 기준으로 정렬할 때 사용한다.
+    NULL 은 항상 맨 뒤로 보낸다. 3-tuple (null_flag, sort_value, id_tiebreak) 형태.
+
+    null_flag: 0 = 값 있음(앞), 1 = None(뒤)
+    sort_value: desc 는 음수로 부호 반전(Python sorted 기본 오름차순 활용)
+    id_tiebreak: 동률이면 id 최신순(-ann.id)
 
     Args:
         ann:  정렬 기준 Announcement (canonical 그룹 대표 또는 고아 공고).
-        sort: 정렬 기준 문자열. received_desc | deadline_asc | title_asc.
+        sort: 정렬 기준 문자열. 허용값은 _ALLOWED_SORT_VALUES 참조.
 
     Returns:
         Python sorted() 에 전달할 수 있는 비교 가능한 tuple.
     """
-    if sort == "deadline_asc":
+    if sort in ("collected_desc", "collected_asc"):
+        # COALESCE(updated_at, scraped_at) — None 이면 scraped_at fallback
+        c = ann.updated_at or ann.scraped_at
+        if c is None:
+            return (1, float("inf"), -ann.id)
+        ts = c.timestamp()
+        if sort == "collected_desc":
+            return (0, -ts, -ann.id)
+        return (0, ts, -ann.id)
+    elif sort in ("received_desc", "received_asc"):
+        r = ann.received_at
+        if r is None:
+            return (1, float("inf"), -ann.id)
+        ts = r.timestamp()
+        if sort == "received_asc":
+            return (0, ts, -ann.id)
+        return (0, -ts, -ann.id)
+    elif sort in ("deadline_asc", "deadline_desc"):
         d = ann.deadline_at
-        # None → 맨 뒤 (float("inf"))
-        ts = d.timestamp() if d is not None else float("inf")
-        return (ts, -ann.id)
+        if d is None:
+            return (1, float("inf"), -ann.id)
+        ts = d.timestamp()
+        if sort == "deadline_asc":
+            return (0, ts, -ann.id)
+        return (0, -ts, -ann.id)
     elif sort == "title_asc":
+        # 하위 호환 — 2-tuple (동일 sort 내에서만 비교되므로 형 충돌 없음)
         return (ann.title or "", -ann.id)
     else:
-        # received_desc: 최신(큰 timestamp) 우선, None → 맨 뒤
+        # received_desc fallback
         r = ann.received_at
         if r is None:
             return (1, float("inf"), -ann.id)
@@ -1382,16 +1458,20 @@ def list_announcements(
     offset: int = 0,
     search: str | None = None,
     source: str | None = None,
-    sort: str = "received_desc",
+    sort: str = "collected_desc",
     progress_filter_options: Iterable[str] | None = None,
     progress_filter_my_organization_ids: Iterable[int] | None = None,
 ) -> list[Announcement]:
     """공고 목록을 조회한다 (현재 버전 is_current=True 한정).
 
     정렬 (sort 파라미터):
-        - 'received_desc' (기본): 수집일(received_at) 최신순. NULL 은 뒤로.
-        - 'deadline_asc':         마감일 임박순. NULL 은 뒤로.
-        - 'title_asc':            공고명 가나다순.
+        - 'collected_desc' (기본): 공고 수집(업데이트)일 최신순. NULL 은 뒤로.
+        - 'collected_asc':         공고 수집(업데이트)일 오름차순. NULL 은 뒤로.
+        - 'received_desc':         모집 시작일 최신순. NULL 은 뒤로.
+        - 'received_asc':          모집 시작일 오름차순. NULL 은 뒤로.
+        - 'deadline_asc':          모집 마감일 임박순. NULL 은 뒤로.
+        - 'deadline_desc':         모집 마감일 내림차순. NULL 은 뒤로.
+        - 'title_asc':             공고명 가나다순 (하위 호환).
 
     기존 호출부 호환성:
         새 파라미터(source, sort, progress_filter_*)는 기본값을 가지므로 기존
@@ -1404,7 +1484,7 @@ def list_announcements(
         offset:  건너뛸 레코드 수(페이지네이션).
         search:  제목 부분일치(LIKE) 검색어. 공백은 무시(strip).
         source:  source_type 필터. None 이면 전체.
-        sort:    정렬 기준. 허용값: received_desc | deadline_asc | title_asc.
+        sort:    정렬 기준. 허용값: _ALLOWED_SORT_VALUES 참조.
         progress_filter_options: task 00097-6 진행 상태 필터 옵션 키 집합. 비어
             있거나 None 이면 필터 미적용.
         progress_filter_my_organization_ids: 본인 소속 조직 PK 집합 (mine_*
@@ -1504,7 +1584,7 @@ def list_canonical_groups(
     status: AnnouncementStatus | str | None = None,
     source: str | None = None,
     search: str | None = None,
-    sort: str = "received_desc",
+    sort: str = "collected_desc",
     limit: int = 50,
     offset: int = 0,
     progress_filter_options: Iterable[str] | None = None,
@@ -1526,7 +1606,7 @@ def list_canonical_groups(
         status:  상태 필터(대표 공고 기준). None 이면 전체.
         source:  소스 유형 필터(대표 공고 기준). None 이면 전체.
         search:  제목 부분일치 검색어(대표 공고 기준). None 이면 검색 없음.
-        sort:    정렬 기준. received_desc | deadline_asc | title_asc.
+        sort:    정렬 기준. collected_desc(기본) | 기타 _ALLOWED_SORT_VALUES 참조.
         limit:   결과 최대 건수(페이지네이션).
         offset:  건너뛸 건수(페이지네이션).
 
