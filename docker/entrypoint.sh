@@ -5,7 +5,9 @@
 #
 #   Phase A) root 권한 초기화 (컨테이너가 root 로 기동된 app 서비스만 해당)
 #     - system cron 데몬은 root 로만 띄울 수 있다. cron 데몬을 먼저 기동한 뒤,
-#       gosu 로 HOST_UID:HOST_GID 비루트로 권한을 강등해 **자기 자신을 재실행**한다.
+#       gosu 로 HOST_UID 비루트로 권한을 강등해 **자기 자신을 재실행**한다.
+#       (uid 만 넘겨 primary GID 는 passwd 의 HOST_GID 를 쓰되 /etc/group 보조 그룹도
+#        함께 적용 — 'uid:gid' 형식은 보조 그룹을 누락시키므로 사용하지 않는다. 아래 강등부 참조.)
 #     - 그래야 이후 마이그레이션·crontab 설치·웹 서버가 모두 HOST_UID 로 수행되어
 #       생성 파일 owner 가 호스트 유저로 유지된다(00134 등 파일 owner 컨벤션).
 #     - cron 잡(공고 수집)이 docker.sock 으로 scraper 를 띄우려면 실행 유저가 docker
@@ -67,11 +69,27 @@ if [ "$(id -u)" = "0" ]; then
         cron || printf '[entrypoint] WARNING: cron 데몬 기동 실패 — 스케줄 작업이 동작하지 않을 수 있습니다.\n' >&2
     fi
 
-    # HOST_UID:HOST_GID 로 권한을 강등해 자기 자신을 재실행한다(이후는 Phase B).
+    # HOST_UID 로 권한을 강등해 자기 자신을 재실행한다(이후는 Phase B).
     # gosu 는 현재 환경변수를 그대로 보존하므로 ENABLE_CRON/HOST_PROJECT_DIR 등이
     # Phase B 로 전달된다.
-    printf '[entrypoint] 권한 강등: uid=%s gid=%s 로 재실행\n' "$_run_uid" "$_run_gid" >&2
-    exec gosu "${_run_uid}:${_run_gid}" "$0" "$@"
+    #
+    # 강등 형식에 주의: gosu 에 'uid:gid'(명시적 그룹) 형태를 넘기면 gosu 는 지정한
+    # primary GID 만 설정하고 /etc/group 기반 보조(supplementary) 그룹은 적용하지
+    # 않는다. 그러면 위 usermod -aG 로 추가한 hostdocker 보조 그룹이 강등 후 유실되어,
+    # 강등된 uvicorn 및 그 자식인 매뉴얼 '지금시작'의 `docker compose run scraper`
+    # subprocess 가 docker.sock 접근 권한을 잃는다('permission denied ... docker.sock').
+    # (반면 cron 잡은 cron 데몬의 initgroups 로 /etc/group 전체를 반영하므로 정상 동작.)
+    #
+    # 따라서 'uid' 만 넘긴다 — gosu 가 해당 유저의 passwd 항목에서 primary GID(=HOST_GID,
+    # useradd -g HOST_GID 로 생성됨)를 그대로 가져오고, /etc/group 의 보조 그룹(hostdocker)
+    # 까지 함께 적용한다. primary GID 가 HOST_GID 로 유지되므로 파일 owner 컨벤션도 불변.
+    #
+    # 전제(정상 배포): appuser 의 UID == HOST_UID. HOST_UID 와 /etc/passwd 가 불일치하는
+    # 'I have no name!' 환경에서는 gosu 가 passwd 항목을 못 찾아 보조 그룹도 적용하지
+    # 못하지만, 이는 crontab 설치 등 다른 기능도 이미 깨지는 별도 배포 오류이므로 여기서
+    # 새로 다루지 않는다(Phase B:85-88 경고 참조).
+    printf '[entrypoint] 권한 강등: uid=%s (primary gid 는 passwd 의 HOST_GID, 보조 그룹 포함) 로 재실행\n' "$_run_uid" >&2
+    exec gosu "${_run_uid}" "$0" "$@"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
