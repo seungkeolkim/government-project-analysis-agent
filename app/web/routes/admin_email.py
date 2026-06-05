@@ -347,8 +347,8 @@ def _serialize_send_run(run: EmailSendRun) -> dict[str, Any]:
         "status": run.status.value if run.status is not None else None,
         "attempt_count": run.attempt_count,
         "error_message": run.error_message,
-        "created_at": run.created_at.isoformat() if run.created_at else None,
-        "sent_at": run.sent_at.isoformat() if run.sent_at else None,
+        "created_at": as_utc(run.created_at).isoformat() if run.created_at else None,
+        "sent_at": as_utc(run.sent_at).isoformat() if run.sent_at else None,
         "requested_by_user_id": run.requested_by_user_id,
         "requested_by_username": (
             requested_by_user.username if requested_by_user is not None else None
