@@ -49,6 +49,14 @@ JOB_ID_DAILY_REPORT: Final[str] = "daily-report"
 # job.name 에 저장할 prefix. 예) "daily-report-cron:0 9 * * 1-5"
 JOB_NAME_DAILY_REPORT_PREFIX: Final[str] = "daily-report-cron:"
 
+# ── 일반 수집 스케줄 영속 저장 키 (task 00155-2) ──────────────────────────────
+# 기존엔 일반 공고 수집 스케줄(cron/interval + active_sources)이 APScheduler
+# jobstore(scheduler_jobs)에만 존재해, cron 데몬·crontab 생성기가 읽을 수 있는
+# 외부 source of truth 가 없었다. system crontab 으로 전환하려면 컨테이너 기동
+# 시 스케줄을 읽어 crontab 으로 렌더해야 하므로, Alembic 신규 테이블을 만들지
+# 않고 SystemSetting 단일 키에 JSON 리스트로 영속화한다.
+SETTING_KEY_GENERAL_SCHEDULES: Final[str] = "scheduler.general_schedules"
+
 # ── GC 고아 첨부 파일 잡 식별자 (task 00041-5) ───────────────────────────────
 # Phase 5a 의 고아 첨부 파일 GC 잡. service.py 의 ``add_gc_orphan_cron_schedule``
 # 가 등록하고, ``_recompute_all_jobs_next_run_time`` / ``JsonSchedulerJobStore``
@@ -57,8 +65,16 @@ JOB_NAME_DAILY_REPORT_PREFIX: Final[str] = "daily-report-cron:"
 # 참조해야 하는데 service.py 와 순환 import 가 생기기 때문이다.
 JOB_NAME_GC_ORPHAN_PREFIX: Final[str] = "gc-orphan-cron:"
 
+# GC 고아 첨부 파일 잡의 기본 cron 표현식(KST 04:00 매일). 기존엔
+# service.py 의 ``GC_ORPHAN_DEFAULT_CRON`` 에 있었으나, system crontab 생성기
+# (task 00155-2)가 apscheduler 의존 모듈인 service.py 를 import 하지 않도록
+# 중립 모듈(constants.py)에도 동일 값을 둔다. (00155-4 에서 service.py 의
+# 사본이 제거되면 본 상수가 단일 진실이 된다.)
+DEFAULT_GC_ORPHAN_CRON: Final[str] = "0 4 * * *"
+
 
 __all__ = [
+    "DEFAULT_GC_ORPHAN_CRON",
     "DEFAULT_MISFIRE_GRACE_TIME_SEC",
     "JOB_ID_BACKUP",
     "JOB_ID_DAILY_REPORT",
@@ -71,4 +87,5 @@ __all__ = [
     "JOB_NAME_INTERVAL_PREFIX",
     "MAX_INTERVAL_HOURS",
     "SCHEDULER_JOBS_TABLENAME",
+    "SETTING_KEY_GENERAL_SCHEDULES",
 ]
