@@ -300,6 +300,13 @@ services:
 - app 컨테이너 안에서는 `docker ps` 로 호스트의 컨테이너 목록이 보여야
   정상 동작 확인. 실패 시 "Permission denied on docker.sock" 에러는
   `HOST_DOCKER_GID` 값이 호스트와 불일치한다는 신호.
+- **gosu 강등 시 보조 그룹 주의 (00159)**: `group_add` 로 부여한 docker 그룹
+  멤버십은 `docker/entrypoint.sh` 가 비루트로 권한을 강등할 때 보존돼야 한다.
+  `gosu uid:gid`(명시적 그룹) 형식은 지정한 primary GID 만 설정하고 `/etc/group`
+  기반 보조 그룹을 적용하지 않아 hostdocker 멤버십이 유실된다. 그 결과 cron
+  경로(데몬 initgroups 로 보조 그룹 반영)는 정상인데 매뉴얼 '지금시작'(uvicorn
+  자식 subprocess)만 docker.sock 접근이 거부된다. 해결: `gosu uid` 만 넘겨 passwd
+  의 primary GID(=HOST_GID)는 유지하고 보조 그룹까지 함께 적용한다.
 
 ### §5.3 docker-in-docker 와의 차이 (회피 근거)
 
