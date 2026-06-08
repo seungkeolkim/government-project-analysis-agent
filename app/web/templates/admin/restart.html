@@ -1,0 +1,73 @@
+{#
+  [시스템 재시작] 탭 — iris-agent-web 컨테이너 셀프 재시작 (task 00161).
+
+  구성:
+    1. 설명 문구
+    2. 진행중 scrape 경고 배너 (scrape_running 일 때만 노출)
+    3. '지금 재시작' 버튼 (scrape_running 이면 서버 렌더 시점부터 disabled)
+    4. 재시작 진행 상태 표시 영역 (admin_restart.js 가 동적으로 채운다)
+
+  컨텍스트 규약:
+    - top_tab:               'system_group'
+    - sub_tab:               'restart'
+    - scrape_running:         진행중(status='running') 수집 존재 여부 (bool)
+    - running_scrape_run_id:  진행중 수집의 ScrapeRun id (없으면 None)
+    - current_user:           네비 분기용.
+
+  동작 흐름 (admin_restart.js):
+    버튼 클릭 → window.confirm 1회 → POST /admin/system/restart (00161-1)
+    → 200 수신 시 버튼 잠금 + '재시작 중…' 표시 → /healthz 폴링
+    → 자기 자신이 재시작되는 동안 fetch 실패(다운) 구간을 정상 처리하고,
+       다운을 본 뒤 다시 200 응답이 오면 새 인스턴스 기동으로 판단해
+       location.reload() 한다. 폴링은 최대 시도 횟수 한계를 두고, 실패가
+       지속되면 수동 새로고침을 안내한다.
+#}
+{% extends "admin/base.html" %}
+
+{% block page_title %}시스템 재시작 · {{ super() }}{% endblock %}
+
+{% block admin_content %}
+
+{# ── 설명 ────────────────────────────────────────────────── #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">시스템 재시작</h3>
+    <p class="admin-state__muted">
+        iris-agent-web 컨테이너를 재시작합니다. 버튼을 누르면 즉시 재시작 명령이
+        전달되고, 새 인스턴스가 기동되면 이 페이지가 자동으로 새로고침됩니다.
+        설정 변경 반영, 일시적 오류 복구 등이 필요할 때 사용하세요.
+    </p>
+
+    {# ── 진행중 scrape 경고 배너 ──────────────────────────────
+       진행 중인 수집이 있으면 재시작 시 그 수집이 끊기고, 다음 부팅의
+       cleanup_stale_running_runs 가 해당 run 을 failed 로 정리한다는 점을
+       안내한다. 버튼도 함께 비활성화한다. #}
+    {% if scrape_running %}
+    <div class="admin-flash admin-flash--warning" role="alert">
+        현재 진행 중인 수집(scrape_run_id={{ running_scrape_run_id }})이 있습니다.
+        지금 재시작하면 진행 중인 수집이 중단되며, 다음 부팅 시 해당 수집이
+        실패(failed)로 정리됩니다. 수집이 끝난 뒤 재시작하는 것을 권장합니다.
+    </div>
+    {% endif %}
+
+    {# ── 재시작 버튼 ──────────────────────────────────────────
+       scrape_running 이면 서버 렌더 시점부터 disabled. confirm/POST/폴링은
+       admin_restart.js 가 처리한다. #}
+    <div class="daily-report-actions">
+        <button id="restart-button"
+                type="button"
+                class="admin-button admin-button--danger"
+                {% if scrape_running %}disabled{% endif %}>
+            지금 재시작
+        </button>
+    </div>
+
+    {# ── 재시작 진행 상태 영역 ────────────────────────────────
+       admin_restart.js 가 '재시작 요청 중…' / '재시작 중…' / 완료 / 실패
+       메시지를 admin-flash 박스로 동적으로 그린다. 진입 시에는 비어 있다. #}
+    <div id="restart-status-area"></div>
+</section>
+
+{# 페이지 전용 JS — admin_restart.js. 버튼 클릭 → confirm → POST → health 폴링
+   → 자동 새로고침 흐름을 담당한다. #}
+<script src="/static/js/admin_restart.js"></script>
+{% endblock %}

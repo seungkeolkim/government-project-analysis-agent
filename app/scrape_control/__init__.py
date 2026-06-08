@@ -12,6 +12,12 @@ from app.scrape_control.constants import (
     scrape_run_log_path,
     scrape_run_log_root,
 )
+from app.scrape_control.restart import (
+    RestartResult,
+    resolve_container_name,
+    system_restart_log_path,
+    trigger_self_restart,
+)
 from app.scrape_control.runner import (
     ComposeEnvironmentError,
     ScrapeAlreadyRunningError,
@@ -25,14 +31,18 @@ from app.scrape_control.stale import cleanup_stale_running_runs
 __all__ = [
     "ComposeEnvironmentError",
     "ExternalTrigger",
+    "RestartResult",
     "SCRAPE_ACTIVE_SOURCES_ENV_VAR",
     "ScrapeAlreadyRunningError",
     "StartResult",
     "build_compose_command",
     "cleanup_stale_running_runs",
     "request_cancel",
+    "resolve_container_name",
     "scrape_run_log_path",
     "scrape_run_log_root",
     "start_scrape_run",
+    "system_restart_log_path",
+    "trigger_self_restart",
     "validate_host_project_dir",
 ]
