@@ -2266,6 +2266,51 @@ def backup_run_manual(
 # ──────────────────────────────────────────────────────────────
 
 
+@router.get("/system/restart", response_class=HTMLResponse)
+def system_restart_page(
+    request: Request,
+    current_user: User = Depends(admin_user_required),
+) -> Response:
+    """[시스템 재시작] 탭 — iris-agent-web 컨테이너 셀프 재시작 페이지.
+
+    backup_page 와 같은 패턴으로 ``top_tab='system_group'`` + ``sub_tab='restart'``
+    컨텍스트를 주입해 admin/base.html 의 sub-nav 가 [시스템 재시작] 탭을 active 로
+    표시하도록 한다. 페이지 진입 시점에 ``get_running_scrape_run`` 으로 진행중
+    수집 여부를 조회해 ``scrape_running`` boolean 으로 전달한다 — 템플릿이 서버
+    렌더 시점부터 재시작 버튼 비활성화/경고 배너를 반영할 수 있게 한다(재시작 시
+    진행중 scrape 가 끊기고, 다음 부팅의 ``cleanup_stale_running_runs`` 가 failed
+    로 정리하기 때문).
+
+    실제 재시작 트리거는 페이지의 ``admin_restart.js`` 가 POST /admin/system/restart
+    (00161-1 endpoint)를 호출해 처리하며, 본 라우트는 SSR 골격만 그린다.
+
+    Args:
+        request: FastAPI 요청 객체 (Jinja2 TemplateResponse 용).
+        current_user: 라우터 dependency 에서 이미 검증된 admin user. 상단 네비
+            분기에 사용된다.
+
+    Returns:
+        ``admin/restart.html`` 을 렌더한 HTMLResponse.
+    """
+    logger.debug("admin.system_restart_page 진입: user_id={}", current_user.id)
+    with session_scope() as session:
+        running_row = get_running_scrape_run(session)
+        running_scrape_run_id = running_row.id if running_row is not None else None
+    scrape_running = running_scrape_run_id is not None
+
+    return _templates.TemplateResponse(
+        request,
+        "admin/restart.html",
+        {
+            "top_tab": "system_group",
+            "sub_tab": "restart",
+            "scrape_running": scrape_running,
+            "running_scrape_run_id": running_scrape_run_id,
+            "current_user": current_user,
+        },
+    )
+
+
 @router.post("/system/restart", dependencies=[Depends(ensure_same_origin)])
 def system_restart(
     request: Request,

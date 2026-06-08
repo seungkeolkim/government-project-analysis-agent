@@ -8,11 +8,12 @@
       상위 탭 [조직 관리]
           하위: [조직 구성] [사용자 관리]
       상위 탭 [시스템 관리]
-          하위: [시스템 백업]
+          하위: [시스템 백업] [메일 발송] [시스템 재시작]
 
   컨텍스트 규약:
     - top_tab:  'scrape_group' | 'org_group' | 'system_group'. 상위 탭 active 판별에 사용.
-    - sub_tab:  'scrape' | 'sources' | 'schedule' | 'organizations' | 'users' | 'backup'.
+    - sub_tab:  'scrape' | 'sources' | 'schedule' | 'organizations' | 'users'
+                | 'backup' | 'email' | 'restart'.
                 현재 하위 탭 active 판별에 사용.
     - current_user: 상단 네비용. admin 페이는 current_user.is_admin=True 보장.
 #}
@@ -62,6 +63,8 @@
            href="/admin/backup">시스템 백업</a>
         <a class="admin-tab {% if sub_tab == 'email' %}admin-tab--active{% endif %}"
            href="/admin/email">메일 발송</a>
+        <a class="admin-tab {% if sub_tab == 'restart' %}admin-tab--active{% endif %}"
+           href="/admin/system/restart">시스템 재시작</a>
     </nav>
     {% endif %}
     {# usage_group 은 하위 탭이 1개이므로 sub-nav 를 표시하지 않는다. #}
