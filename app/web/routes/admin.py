@@ -124,6 +124,7 @@ from app.scrape_control import (
     request_cancel,
     scrape_run_log_path,
     start_scrape_run,
+    trigger_self_restart,
 )
 from app.sources.yaml_editor import (
     SourcesYamlValidationError,
@@ -2257,6 +2258,87 @@ def backup_run_manual(
     return RedirectResponse(
         url=_backup_flash_url(message, level=level),
         status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+# ──────────────────────────────────────────────────────────────
+# [시스템 재시작] 탭 (task 00161)
+# ──────────────────────────────────────────────────────────────
+
+
+@router.post("/system/restart", dependencies=[Depends(ensure_same_origin)])
+def system_restart(
+    request: Request,
+    current_user: User = Depends(admin_user_required),
+) -> JSONResponse:
+    """iris-agent-web 컨테이너를 셀프 재시작한다(A 방식 — docker.sock).
+
+    detached subprocess 로 ``sleep 1 && docker restart <container>`` 를 띄운
+    뒤 **즉시** HTTP 200 을 반환한다. ``subprocess.Popen`` 은 non-blocking 이라
+    명령 완료를 기다리지 않으며, 1초 sleep 동안 이 200 응답이 브라우저로 flush
+    된다. 실제 재시작은 docker daemon 이 수행하므로 호출 client(자기 자신)가
+    죽어도 완료된다.
+
+    진행중 수집 가드:
+        프론트(confirm)와 별개로 서버에서도 ``get_running_scrape_run`` 으로
+        running 여부를 한 번 더 조회해 응답(``scrape_running`` / ``running_scrape_run_id``)
+        에 실어 준다. 여기서 강제 차단하지는 않는다 — 최종 판단(경고 후 강행)은
+        프론트와 일관되게 둔다. 재시작 시 진행중 scrape 는 끊기고, 다음 부팅의
+        ``cleanup_stale_running_runs`` 가 failed 로 정리한다.
+
+    Returns:
+        ``{\"status\": \"restarting\", \"container\": ..., \"pid\": ...,
+        \"scrape_running\": bool, \"running_scrape_run_id\": int | null,
+        \"log_path\": ...}`` 200 응답.
+    """
+    # 서버 측 진행중 수집 확인 — 프론트가 경고/표시에 활용하도록 응답에 싣는다.
+    with session_scope() as session:
+        running_row = get_running_scrape_run(session)
+        running_scrape_run_id = running_row.id if running_row is not None else None
+    scrape_running = running_scrape_run_id is not None
+
+    logger.info(
+        "관리자 '{}' 가 셀프 재시작을 트리거했습니다 (scrape_running={} running_scrape_run_id={}).",
+        current_user.username,
+        scrape_running,
+        running_scrape_run_id,
+    )
+
+    try:
+        result = trigger_self_restart()
+    except ComposeEnvironmentError as exc:
+        # docker CLI 바이너리를 못 찾는 경우 — 운영자가 환경을 고쳐야 한다.
+        # 셀프 재시작은 시작도 못 했으므로 500 으로 명확히 실패를 알린다.
+        logger.error(
+            "셀프 재시작 실패(관리자 '{}'): docker CLI 해석 실패 — {}",
+            current_user.username,
+            exc,
+        )
+        return JSONResponse(
+            {"status": "error", "detail": str(exc)},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+    except OSError as exc:
+        logger.exception(
+            "셀프 재시작 subprocess 기동 실패(관리자 '{}'): {}: {}",
+            current_user.username,
+            type(exc).__name__,
+            exc,
+        )
+        return JSONResponse(
+            {"status": "error", "detail": f"{type(exc).__name__}: {exc}"},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    return JSONResponse(
+        {
+            "status": "restarting",
+            "container": result.container,
+            "pid": result.pid,
+            "scrape_running": scrape_running,
+            "running_scrape_run_id": running_scrape_run_id,
+            "log_path": result.log_path,
+        }
     )
 
 

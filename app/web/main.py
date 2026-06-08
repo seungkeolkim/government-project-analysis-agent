@@ -93,6 +93,7 @@ from app.web.routes import (
     dashboard_router,
     favorites_router,
     forward_router,
+    health_router,
     notices_router,
     progress_router,
     relevance_router,
@@ -424,6 +425,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # install_request_logging_middleware 보다 나중에 등록해 Starlette 미들웨어 스택에서
     # 바깥쪽(먼저 실행)으로 배치된다. call_next 반환 후 status_code 를 읽어 기록.
     install_access_history_middleware(fastapi_app)
+
+    # task 00161 — 셀프 재시작 폴링용 경량 health 라우터(/healthz) mount.
+    # 인증·DB 의존 없이 즉시 200 을 반환한다. [시스템 재시작] 서브탭이 '재시작
+    # 중…' 동안 폴링해 새 인스턴스 기동을 감지하는 데 쓴다. access_log 의 skip
+    # 목록에 /healthz 가 이미 있어 폴링 트래픽이 접근 이력을 오염시키지 않는다.
+    fastapi_app.include_router(health_router)
 
     # Phase 1b: 인증 라우터(register/login/logout/me) 를 mount 한다.
     # 기존 라우트와 충돌하지 않으며, /auth/* 와 /login, /register 를 노출한다.
