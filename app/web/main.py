@@ -70,6 +70,8 @@ from app.db.session import SessionLocal
 from app.logging_setup import configure_logging
 from app.scrape_control import (
     ComposeEnvironmentError,
+    STARTUP_EVENT_TYPE_STARTUP,
+    append_startup_event,
     cleanup_stale_running_runs,
     validate_host_project_dir,
 )
@@ -543,6 +545,31 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             # startup 훅 밖으로 전파 → ASGI 기동 실패 → 컨테이너 재시작 루프.
             raise
         logger.info("HOST_PROJECT_DIR 검증 통과: {}", host_project_dir)
+
+        # task 00162 — 웹 컨테이너 '일반 기동' 이력을 system_restart.log 에 한 줄
+        # 남긴다. 이로써 운영자가 로그/관리자 화면에서 "shell 수동 기동(=startup)"
+        # 과 "관리자 화면의 재시작 버튼(=restart_via_ui)" 을 구분할 수 있다.
+        #
+        # 위치 선정: HOST_PROJECT_DIR 검증을 통과한 뒤에만 기록한다. 검증 실패 시
+        # 컨테이너가 restart 루프에 빠지는데, 그 매 루프마다 startup 라인을 남기면
+        # 이력이 오염되기 때문이다(정상 부팅 1회 = 1라인).
+        #
+        # 적용 범위: 본 startup 훅은 uvicorn ASGI worker(=웹 컨테이너)에서만
+        # 실행된다. scraper 컨테이너(``python -m app.cli``)는 FastAPI 를 띄우지
+        # 않아 이 훅을 거치지 않으므로, 기동 이력은 '웹 컨테이너 기준' 이다.
+        #
+        # 기록 실패가 기동을 막지 않도록 방어한다(append_startup_event 가 내부에서
+        # OSError 를 swallow 하지만, 예기치 못한 예외까지 한 번 더 감싼다).
+        try:
+            append_startup_event(
+                STARTUP_EVENT_TYPE_STARTUP, extra={"pid": os.getpid()}
+            )
+        except Exception as exc:  # noqa: BLE001 - 기동 이력은 부가 정보
+            logger.warning(
+                "일반 기동 이력 기록 실패(스킵, 웹 기동 계속): ({}: {})",
+                type(exc).__name__,
+                exc,
+            )
 
     # ──────────────────────────────────────────────────────────
     # HTML: 목록 페이지

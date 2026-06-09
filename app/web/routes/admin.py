@@ -121,6 +121,7 @@ from app.scheduler.constants import (
 from app.scrape_control import (
     ComposeEnvironmentError,
     ScrapeAlreadyRunningError,
+    read_recent_startup_events,
     request_cancel,
     scrape_run_log_path,
     start_scrape_run,
@@ -2262,8 +2263,12 @@ def backup_run_manual(
 
 
 # ──────────────────────────────────────────────────────────────
-# [시스템 재시작] 탭 (task 00161)
+# [시스템 재시작] 탭 (task 00161, task 00162)
 # ──────────────────────────────────────────────────────────────
+
+# task 00162 — 재시작 버튼 하단에 표시할 시스템 기동 이력 건수. 사용자 원문의
+# '최근 30건' 요구를 그대로 반영한다(메일 발송 이력과 유사한 최근 N건 표시).
+SYSTEM_RESTART_HISTORY_LIMIT: int = 30
 
 
 @router.get("/system/restart", response_class=HTMLResponse)
@@ -2284,6 +2289,12 @@ def system_restart_page(
     실제 재시작 트리거는 페이지의 ``admin_restart.js`` 가 POST /admin/system/restart
     (00161-1 endpoint)를 호출해 처리하며, 본 라우트는 SSR 골격만 그린다.
 
+    task 00162 — 재시작 버튼 하단에 표시할 '시스템 기동 이력' 을
+    ``read_recent_startup_events(limit=30)`` 으로 조회해 ``startup_events`` 컨텍스트
+    로 전달한다. 이력은 system_restart.log(파일 기반 SSOT)에서 읽으며, 일반 기동
+    (startup)과 UI 재시작(restart_via_ui)을 구분해 보여 준다. 재시작 직후 페이지가
+    자동 새로고침되므로 별도 폴링 endpoint 없이 SSR 컨텍스트만으로 최신화된다.
+
     Args:
         request: FastAPI 요청 객체 (Jinja2 TemplateResponse 용).
         current_user: 라우터 dependency 에서 이미 검증된 admin user. 상단 네비
@@ -2298,6 +2309,11 @@ def system_restart_page(
         running_scrape_run_id = running_row.id if running_row is not None else None
     scrape_running = running_scrape_run_id is not None
 
+    # task 00162 — 최근 30건 기동 이력. read_recent_startup_events 는 파일 부재/
+    # 깨진 라인에서도 예외 없이 빈 리스트/부분 결과를 돌려주므로 페이지가 500 으로
+    # 깨지지 않는다.
+    startup_events = read_recent_startup_events(limit=SYSTEM_RESTART_HISTORY_LIMIT)
+
     return _templates.TemplateResponse(
         request,
         "admin/restart.html",
@@ -2306,6 +2322,7 @@ def system_restart_page(
             "sub_tab": "restart",
             "scrape_running": scrape_running,
             "running_scrape_run_id": running_scrape_run_id,
+            "startup_events": startup_events,
             "current_user": current_user,
         },
     )

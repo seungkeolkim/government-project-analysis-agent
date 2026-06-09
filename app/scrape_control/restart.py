@@ -31,6 +31,7 @@ import os
 import shlex
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import IO, Callable
 
@@ -38,7 +39,7 @@ from loguru import logger
 
 from app.config import PROJECT_ROOT
 from app.scrape_control import runner
-from app.timezone import now_utc, to_kst
+from app.timezone import format_kst, now_utc, to_kst
 
 
 # ──────────────────────────────────────────────────────────────
@@ -94,6 +95,244 @@ def system_restart_log_path(*, data_dir: Path | None = None) -> Path:
     """
     base = data_dir if data_dir is not None else PROJECT_ROOT / "data"
     return base / SYSTEM_RESTART_LOG_DIRNAME / SYSTEM_RESTART_LOG_FILENAME
+
+
+# ──────────────────────────────────────────────────────────────
+# 구조화 기동/재시작 이벤트 로그 (task 00162)
+# ──────────────────────────────────────────────────────────────
+#
+# system_restart.log 한 줄을 파싱 가능한 고정 포맷으로 정의한다. 이전 task 161
+# 까지는 'UI 재시작' 트리거 시에만 한 줄을 남겼지만, task 162 부터는 웹 컨테이너가
+# **일반 기동**(컨테이너/프로세스 시작)될 때도 같은 파일에 한 줄을 남겨, 운영자가
+# 로그만 보고 "shell 에서 수동으로 기동했는지(=startup)" vs. "관리자 화면의 재시작
+# 버튼을 눌렀는지(=restart_via_ui)" 를 구분할 수 있게 한다.
+#
+# 라인 포맷:
+#     [<KST ISO8601>] event=<event_type> key=value key=value ...
+# 예시:
+#     [2026-06-09T12:34:56.789+09:00] event=startup pid=1234
+#     [2026-06-09T12:34:56.789+09:00] event=restart_via_ui container=iris-agent-web pid=4242 argv=sh -c sleep 1 && ...
+#
+# 파서(read_recent_startup_events)는 맨 앞 [..] 의 시각과 첫 토큰 event=<...> 만
+# 구조적으로 해석하고, 나머지(argv 처럼 공백이 섞일 수 있는 값 포함)는 표시용
+# message 로 통째로 보존한다. 따라서 argv 의 공백/`&&` 가 파싱을 깨지 않는다.
+
+# 기동 이벤트 유형 식별자. 파일에 그대로 기록되는 토큰 값이다.
+STARTUP_EVENT_TYPE_STARTUP: str = "startup"
+STARTUP_EVENT_TYPE_RESTART_VIA_UI: str = "restart_via_ui"
+
+# event_type → 사용자 표시용 한국어 라벨. 템플릿(162-2)이 event_type 분기 없이
+# 그대로 출력할 수 있도록 파서가 이 매핑으로 type_label 을 채워 준다. 미등록
+# 유형은 _STARTUP_EVENT_FALLBACK_LABEL 로 대체한다.
+STARTUP_EVENT_TYPE_LABELS: dict[str, str] = {
+    STARTUP_EVENT_TYPE_STARTUP: "일반 기동",
+    STARTUP_EVENT_TYPE_RESTART_VIA_UI: "UI 재시작",
+}
+
+# 알 수 없는 event_type 의 표시 라벨(후방호환·미래 확장 대비).
+_STARTUP_EVENT_FALLBACK_LABEL: str = "기타 기동"
+
+
+@dataclass(frozen=True)
+class StartupEvent:
+    """system_restart.log 한 줄을 파싱한 결과(표시용).
+
+    Attributes:
+        timestamp_kst:     라인의 KST tz-aware 시각. 파싱 실패/없으면 None.
+        timestamp_display: 화면 표시용 KST 문자열("YYYY-MM-DD HH:MM:SS").
+                           timestamp_kst 가 None 이면 빈 문자열.
+        event_type:        'startup' / 'restart_via_ui' / 그 외(legacy·미래값).
+        type_label:        event_type 의 한국어 표시 라벨(템플릿이 그대로 출력).
+        message:           event= 토큰 이후의 나머지 텍스트(부가 필드/argv 등).
+                           legacy 라인은 라인 본문 전체가 들어온다.
+        raw:               원본 라인(디버깅/후방호환 표시용).
+    """
+
+    timestamp_kst: datetime | None
+    timestamp_display: str
+    event_type: str
+    type_label: str
+    message: str
+    raw: str
+
+
+def _resolve_startup_event_label(event_type: str) -> str:
+    """event_type 에 대응하는 사용자 표시용 한국어 라벨을 돌려준다.
+
+    Args:
+        event_type: 이벤트 유형 식별자('startup' 등).
+
+    Returns:
+        :data:`STARTUP_EVENT_TYPE_LABELS` 의 라벨. 미등록이면 fallback 라벨.
+    """
+    return STARTUP_EVENT_TYPE_LABELS.get(event_type, _STARTUP_EVENT_FALLBACK_LABEL)
+
+
+def _format_startup_event_line(
+    event_type: str, *, extra: dict[str, object] | None = None
+) -> str:
+    """구조화 이벤트 한 줄(개행 포함)을 만든다.
+
+    포맷: ``[<KST ISO8601>] event=<event_type> key=value ...\n``. 모든 기록 함수
+    (append_startup_event / trigger_self_restart)가 이 단일 출처를 거쳐 같은 포맷을
+    쓰도록 한다.
+
+    Args:
+        event_type: 이벤트 유형('startup' / 'restart_via_ui' 등).
+        extra:      라인에 덧붙일 부가 필드(``key=value`` 로 직렬화). 순서는
+                    dict 삽입 순서를 따른다. 값에 공백이 있어도(예: argv) 파서는
+                    message 로 통째 보존하므로 인용 처리는 하지 않는다.
+
+    Returns:
+        개행으로 끝나는 한 줄 문자열.
+    """
+    kst_now = to_kst(now_utc())
+    timestamp_text = kst_now.isoformat() if kst_now is not None else "(unknown)"
+    parts: list[str] = [f"event={event_type}"]
+    for key, value in (extra or {}).items():
+        parts.append(f"{key}={value}")
+    return f"[{timestamp_text}] {' '.join(parts)}\n"
+
+
+def append_startup_event(
+    event_type: str,
+    *,
+    data_dir: Path | None = None,
+    extra: dict[str, object] | None = None,
+) -> None:
+    """system_restart.log 에 구조화 이벤트 한 줄을 append 한다.
+
+    부모 디렉터리를 멱등하게 생성하고 append 모드로 한 줄을 추가한다. 기록 실패는
+    예외를 전파하지 않고 경고만 남긴다 — 이 함수는 부가 이력 기록일 뿐이며,
+    호출자(웹 startup 훅·재시작 트리거)의 본 동작을 막아서는 안 되기 때문이다.
+
+    Args:
+        event_type: 'startup'(일반 기동) / 'restart_via_ui'(UI 재시작) 등.
+        data_dir:   로그 파일 위치 override(테스트 주입용). None 이면 기본 경로.
+        extra:      라인에 덧붙일 부가 필드(pid/container/argv 등).
+    """
+    log_path = system_restart_log_path(data_dir=data_dir)
+    line = _format_startup_event_line(event_type, extra=extra)
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        # append 모드 — 동시에 다른 핸들(예: 재시작 child 의 stdout)이 같은 파일을
+        # 열고 있어도 POSIX O_APPEND 가 각 write 를 파일 끝에 원자적으로 붙인다.
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+    except OSError as exc:
+        logger.warning(
+            "기동 이벤트 로그 기록 실패(무시하고 진행): event={} ({}: {})",
+            event_type,
+            type(exc).__name__,
+            exc,
+        )
+
+
+def _parse_startup_event_line(line: str) -> StartupEvent | None:
+    """system_restart.log 한 줄을 :class:`StartupEvent` 로 파싱한다.
+
+    파싱 규칙:
+        - 맨 앞이 ``[`` 로 시작하고 ``]`` 가 있으면 그 사이를 KST ISO8601 시각으로
+          해석한다(실패하면 시각 None). 나머지를 본문으로 본다.
+        - 본문의 첫 토큰이 ``event=<type>`` 이면 그 값을 event_type 으로, 이후
+          텍스트를 message 로 본다.
+        - ``event=`` 토큰이 없는 **legacy 라인**(task 161 의 '셀프 재시작 트리거:
+          ...' 형태)은 후방호환을 위해 ``restart_via_ui`` 로 인식하고 본문 전체를
+          message 로 둔다.
+
+    Args:
+        line: 원본 라인(앞뒤 공백 제거된 비어있지 않은 문자열 가정).
+
+    Returns:
+        파싱된 :class:`StartupEvent`. 의미 있는 정보가 전혀 없으면 None.
+    """
+    timestamp_kst: datetime | None = None
+    body = line
+
+    # 1) 선두 [<시각>] 블록 분리.
+    if line.startswith("["):
+        close_index = line.find("]")
+        if close_index != -1:
+            timestamp_text = line[1:close_index].strip()
+            try:
+                parsed = datetime.fromisoformat(timestamp_text)
+            except ValueError:
+                parsed = None
+            # to_kst 로 KST tz-aware 로 정규화(naive 면 UTC 가정). 표시 일관성 확보.
+            timestamp_kst = to_kst(parsed) if parsed is not None else None
+            body = line[close_index + 1 :].strip()
+
+    # 2) 본문에서 event= 토큰 해석.
+    first_token, _, remainder = body.partition(" ")
+    if first_token.startswith("event="):
+        event_type = first_token[len("event=") :]
+        message = remainder.strip()
+    else:
+        # legacy 라인(event= 토큰 없음) — UI 재시작 트리거로 간주하고 본문 보존.
+        event_type = STARTUP_EVENT_TYPE_RESTART_VIA_UI
+        message = body
+
+    # event_type 이 비어 있고 본문도 비면 의미 없는 라인 — skip.
+    if not event_type and not message:
+        return None
+
+    return StartupEvent(
+        timestamp_kst=timestamp_kst,
+        timestamp_display=format_kst(timestamp_kst) if timestamp_kst is not None else "",
+        event_type=event_type,
+        type_label=_resolve_startup_event_label(event_type),
+        message=message,
+        raw=line,
+    )
+
+
+def read_recent_startup_events(
+    *, limit: int = 30, data_dir: Path | None = None
+) -> list[StartupEvent]:
+    """system_restart.log 를 읽어 최신순으로 최근 기동 이벤트를 반환한다.
+
+    파일은 append 순(=오래된 것이 위)이므로 읽은 뒤 역순으로 뒤집어 최신 이벤트가
+    리스트 앞에 오게 한다. 파일 부재/빈 파일/깨진 라인은 graceful 하게 처리해
+    **절대 예외를 전파하지 않는다** — 관리자 페이지가 이 결과로 500 이 나면 안 된다.
+
+    Args:
+        limit:    반환할 최대 건수. 음수면 빈 리스트로 본다(방어).
+        data_dir: 로그 파일 위치 override(테스트 주입용).
+
+    Returns:
+        최신순 :class:`StartupEvent` 리스트(최대 ``limit`` 건). 파일이 없거나 읽기
+        실패면 빈 리스트.
+    """
+    if limit < 0:
+        return []
+
+    log_path = system_restart_log_path(data_dir=data_dir)
+    try:
+        raw_text = log_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # 아직 한 번도 기록되지 않은 정상 상태 — 빈 이력.
+        return []
+    except OSError as exc:
+        logger.warning(
+            "기동 이력 로그 읽기 실패(빈 이력으로 처리): {} ({}: {})",
+            log_path,
+            type(exc).__name__,
+            exc,
+        )
+        return []
+
+    events: list[StartupEvent] = []
+    for line in raw_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parsed = _parse_startup_event_line(stripped)
+        if parsed is not None:
+            events.append(parsed)
+
+    # 파일은 오래된→최신 순으로 append 되므로 뒤집어 최신순으로 만든다.
+    events.reverse()
+    return events[:limit]
 
 
 # ──────────────────────────────────────────────────────────────
@@ -162,25 +401,12 @@ def trigger_self_restart(
     )
     argv: list[str] = ["sh", "-c", shell_command]
 
-    # 로그 파일 준비 — 부모 디렉터리를 멱등하게 생성한다.
+    # 로그 파일 준비 — 부모 디렉터리를 멱등하게 생성한다. child(docker restart)의
+    # stdout/stderr 도 이 파일로 direct 된다(아래 Popen).
     log_path = system_restart_log_path(data_dir=data_dir)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     # append 바이너리 + buffering=0 으로 즉시 flush(runner 와 동일 컨벤션).
     log_handle: IO[bytes] = log_path.open("ab", buffering=0)
-
-    # 트리거 시각/명령을 헤더로 한 줄 남겨, 나중에 로그만 보고도 '언제 무엇을
-    # 실행했는지' 추적할 수 있게 한다. KST 표기로 운영자 친화적으로 남긴다.
-    kst_now = to_kst(now_utc())
-    timestamp_text = kst_now.isoformat() if kst_now is not None else "(unknown)"
-    header_line = (
-        f"[{timestamp_text}] 셀프 재시작 트리거: container={container} "
-        f"argv={shlex.join(argv)}\n"
-    )
-    try:
-        log_handle.write(header_line.encode("utf-8"))
-    except OSError:
-        # 헤더 기록 실패가 재시작 자체를 막지는 않도록 한다(로그는 부가 정보).
-        logger.warning("셀프 재시작 로그 헤더 기록 실패(무시하고 진행)")
 
     try:
         popen = _popen_factory(
@@ -207,6 +433,21 @@ def trigger_self_restart(
     except OSError:
         pass
 
+    # 'UI 재시작' 이력을 구조화 라인으로 한 줄 남긴다(append_startup_event 단일
+    # 출처 재사용 — 일반 기동/재시작이 같은 포맷을 공유). child 는 sleep 중이라
+    # 아직 출력이 없어 이 헤더가 파일에서 child 출력보다 앞에 오며, 기록 실패는
+    # append_startup_event 내부에서 swallow 되므로 재시작 자체를 막지 않는다.
+    # pid 는 위 Popen 으로 확보한 뒤라 container/argv 와 함께 보존된다.
+    append_startup_event(
+        STARTUP_EVENT_TYPE_RESTART_VIA_UI,
+        data_dir=data_dir,
+        extra={
+            "container": container,
+            "pid": popen.pid,
+            "argv": shlex.join(argv),
+        },
+    )
+
     logger.info(
         "셀프 재시작 child 기동: pid={} container={} argv={!r}",
         popen.pid,
@@ -226,8 +467,14 @@ __all__ = [
     "DEFAULT_SELF_RESTART_CONTAINER",
     "RestartResult",
     "SELF_RESTART_CONTAINER_ENV_VAR",
+    "STARTUP_EVENT_TYPE_LABELS",
+    "STARTUP_EVENT_TYPE_RESTART_VIA_UI",
+    "STARTUP_EVENT_TYPE_STARTUP",
     "SYSTEM_RESTART_LOG_DIRNAME",
     "SYSTEM_RESTART_LOG_FILENAME",
+    "StartupEvent",
+    "append_startup_event",
+    "read_recent_startup_events",
     "resolve_container_name",
     "system_restart_log_path",
     "trigger_self_restart",
