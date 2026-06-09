@@ -103,6 +103,24 @@ code {
     margin-bottom: 16px;
 }
 
+/* task 00165 — 상단 필터를 묶는 박스(카드). 우측 list-summary 는 박스 밖에 그대로
+   두고, 박스만 가용 폭을 채우도록 flex-grow 를 준다. */
+.filter-box {
+    flex: 1 1 auto;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    padding: 12px 14px;
+    background: #ffffff;
+}
+
+/* 박스 제목 '공고 목록 필터' — Bold 로 박스 제목임을 드러낸다. */
+.filter-box__title {
+    margin: 0 0 10px;
+    font-size: 14px;
+    font-weight: 700;
+    color: #374151;
+}
+
 .filter-form {
     display: flex;
     flex-wrap: wrap;
@@ -114,6 +132,13 @@ code {
     font-size: 13px;
     color: #374151;
     margin-right: 2px;
+}
+
+/* task 00165 — '접수 상태' 라벨 강조: 중요 필터이므로 Bold + 파란색(.filter-submit
+   와 동일 계열 #1d4ed8)으로 표시한다. 다른 필터 라벨은 기존 스타일을 유지. */
+.filter-label--status {
+    font-weight: 700;
+    color: #1d4ed8;
 }
 
 .filter-input {
