@@ -151,6 +151,148 @@ def test_restart_page_button_disabled_when_running_scrape(
     assert f"scrape_run_id={running_id}" in html
 
 
+def test_restart_page_shows_new_wording(admin_client: TestClient) -> None:
+    """설명 문구가 'iris-agent-web 컨테이너' 대신 새 문구를 보인다(task 00162)."""
+    resp = admin_client.get("/admin/system/restart", follow_redirects=False)
+    assert resp.status_code == 200, resp.text
+    html = resp.text
+
+    # 새 문구가 보이고, 옛 컨테이너 표현은 사용자 노출 본문에서 사라진다.
+    assert "정부과제 공고 수집/분석 시스템을 재기동" in html
+    assert "iris-agent-web 컨테이너를 재시작합니다" not in html
+
+
+def test_restart_page_shows_empty_history_state(
+    admin_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """기동 이력이 0건이면 빈 상태 문구를 보인다(task 00162).
+
+    이력 소스를 빈 리스트로 고정해 빈 상태 분기를 결정적으로 검증한다.
+    """
+    from app.web.routes import admin as admin_module
+
+    monkeypatch.setattr(
+        admin_module, "read_recent_startup_events", lambda *, limit=30: []
+    )
+
+    resp = admin_client.get("/admin/system/restart", follow_redirects=False)
+    assert resp.status_code == 200, resp.text
+    html = resp.text
+
+    # 기동 이력 섹션 제목은 항상 렌더되고, 0건이면 빈 상태 문구가 보인다.
+    assert "시스템 기동 이력" in html
+    assert "기동 이력이 없습니다." in html
+
+
+def test_restart_page_renders_history_table(
+    admin_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """기동 이력이 있으면 시각/유형/메시지 컬럼 테이블이 렌더된다(task 00162)."""
+    from app.scrape_control import restart as restart_module
+    from app.web.routes import admin as admin_module
+
+    # 임시 로그에 일반 기동 1건 + UI 재시작 1건을 남기고, 라우트가 임시 data_dir
+    # 를 읽도록 우회한다.
+    restart_module.append_startup_event(
+        restart_module.STARTUP_EVENT_TYPE_STARTUP,
+        data_dir=tmp_path,
+        extra={"pid": 4242},
+    )
+    restart_module.append_startup_event(
+        restart_module.STARTUP_EVENT_TYPE_RESTART_VIA_UI,
+        data_dir=tmp_path,
+        extra={"container": "iris-agent-web", "pid": 4243},
+    )
+
+    original_reader = restart_module.read_recent_startup_events
+
+    def _reader_with_tmp_dir(*, limit: int = 30, data_dir=None):
+        return original_reader(limit=limit, data_dir=tmp_path)
+
+    monkeypatch.setattr(
+        admin_module, "read_recent_startup_events", _reader_with_tmp_dir
+    )
+
+    resp = admin_client.get("/admin/system/restart", follow_redirects=False)
+    assert resp.status_code == 200, resp.text
+    html = resp.text
+
+    # 기동 이력 섹션과 테이블이 렌더되고, 두 유형 라벨이 모두 보인다.
+    assert "시스템 기동 이력" in html
+    assert "admin-table" in html
+    assert "기동 시각(KST)" in html
+    assert "일반 기동" in html
+    assert "UI 재시작" in html
+    # 빈 상태 문구는 이력이 있을 때 보이지 않는다.
+    assert "기동 이력이 없습니다." not in html
+
+
+# ──────────────────────────────────────────────────────────────
+# GET /admin/system/restart — 기동 이력 컨텍스트 (task 00162)
+# ──────────────────────────────────────────────────────────────
+
+
+def test_restart_page_injects_startup_events_context(
+    admin_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """system_restart_page 가 startup_events 컨텍스트를 채워 전달한다.
+
+    admin 라우트가 read_recent_startup_events 결과를 템플릿 컨텍스트
+    'startup_events' 로 넘기는지를, 템플릿 렌더 컨텍스트를 가로채 검증한다.
+    (템플릿 마크업 자체는 162-2 가 담당하므로 여기서는 컨텍스트 키/형태만 본다.)
+    """
+    from app.scrape_control import restart as restart_module
+    from app.web.routes import admin as admin_module
+
+    # 임시 로그 파일에 기동 이벤트 한 줄을 남기고, 라우트의 read_recent_startup_events
+    # 가 임시 data_dir 를 보도록 우회한다(라우트는 limit 만 넘긴다).
+    restart_module.append_startup_event(
+        restart_module.STARTUP_EVENT_TYPE_STARTUP,
+        data_dir=tmp_path,
+        extra={"pid": 4242},
+    )
+    original_reader = restart_module.read_recent_startup_events
+
+    def _reader_with_tmp_dir(*, limit: int = 30, data_dir=None):
+        return original_reader(limit=limit, data_dir=tmp_path)
+
+    monkeypatch.setattr(
+        admin_module, "read_recent_startup_events", _reader_with_tmp_dir
+    )
+
+    # 템플릿 렌더 직전의 컨텍스트를 가로챈다.
+    captured: dict = {}
+    original_template_response = admin_module._templates.TemplateResponse
+
+    def _capturing_template_response(request, name, context, *args, **kwargs):
+        captured["name"] = name
+        captured["context"] = context
+        return original_template_response(request, name, context, *args, **kwargs)
+
+    monkeypatch.setattr(
+        admin_module._templates, "TemplateResponse", _capturing_template_response
+    )
+
+    resp = admin_client.get("/admin/system/restart", follow_redirects=False)
+    assert resp.status_code == 200, resp.text
+
+    # startup_events 키가 존재하고 StartupEvent 리스트 형태여야 한다.
+    assert "startup_events" in captured["context"]
+    startup_events = captured["context"]["startup_events"]
+    assert isinstance(startup_events, list)
+    assert len(startup_events) == 1
+    event = startup_events[0]
+    assert event.event_type == restart_module.STARTUP_EVENT_TYPE_STARTUP
+    assert event.type_label == "일반 기동"
+    assert hasattr(event, "timestamp_display")
+    assert hasattr(event, "message")
+
+
 # ──────────────────────────────────────────────────────────────
 # 헬퍼
 # ──────────────────────────────────────────────────────────────

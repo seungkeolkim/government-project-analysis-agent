@@ -6,12 +6,15 @@
     2. 진행중 scrape 경고 배너 (scrape_running 일 때만 노출)
     3. '지금 재시작' 버튼 (scrape_running 이면 서버 렌더 시점부터 disabled)
     4. 재시작 진행 상태 표시 영역 (admin_restart.js 가 동적으로 채운다)
+    5. 시스템 기동 이력 테이블 (task 00162 — 최근 30건, SSR 렌더)
 
   컨텍스트 규약:
     - top_tab:               'system_group'
     - sub_tab:               'restart'
     - scrape_running:         진행중(status='running') 수집 존재 여부 (bool)
     - running_scrape_run_id:  진행중 수집의 ScrapeRun id (없으면 None)
+    - startup_events:         최근 기동 이력 StartupEvent 리스트 (최신순, task 00162).
+                              일반 기동(startup) vs. UI 재시작(restart_via_ui) 구분.
     - current_user:           네비 분기용.
 
   동작 흐름 (admin_restart.js):
@@ -32,8 +35,8 @@
 <section class="admin-section">
     <h3 class="admin-section__heading">시스템 재시작</h3>
     <p class="admin-state__muted">
-        iris-agent-web 컨테이너를 재시작합니다. 버튼을 누르면 즉시 재시작 명령이
-        전달되고, 새 인스턴스가 기동되면 이 페이지가 자동으로 새로고침됩니다.
+        정부과제 공고 수집/분석 시스템을 재기동 합니다. 버튼을 누르면 즉시 재시작
+        명령이 전달되고, 새 인스턴스가 기동되면 이 페이지가 자동으로 새로고침됩니다.
         설정 변경 반영, 일시적 오류 복구 등이 필요할 때 사용하세요.
     </p>
 
@@ -65,6 +68,49 @@
        admin_restart.js 가 '재시작 요청 중…' / '재시작 중…' / 완료 / 실패
        메시지를 admin-flash 박스로 동적으로 그린다. 진입 시에는 비어 있다. #}
     <div id="restart-status-area"></div>
+</section>
+
+{# ── 시스템 기동 이력 (task 00162) ─────────────────────────────
+   메일 발송 이력과 유사한 룩앤필로, 최근 30건 기동 이력을 SSR 테이블로
+   보여 준다. startup_events 는 system_restart.log(파일 기반 SSOT)에서 읽은
+   StartupEvent 리스트로, 일반 기동(startup)과 UI 재시작(restart_via_ui)을
+   구분한다. 이를 통해 shell 에서 수동으로 기동했는지, 관리자 화면의 재시작
+   버튼을 눌렀는지 이력으로 확인할 수 있다. 별도 JS 폴링 없이 페이지 진입/
+   재시작 직후 자동 새로고침 시점에 최신화된다(SSR). #}
+<section class="admin-section">
+    <h3 class="admin-section__heading">시스템 기동 이력</h3>
+    <p class="admin-state__muted">
+        최근 {{ startup_events | length }}건의 시스템 기동 이력입니다.
+        '일반 기동'은 shell/컨테이너에서 직접 기동된 경우, 'UI 재시작'은 위
+        재시작 버튼으로 기동된 경우입니다.
+    </p>
+
+    {% if startup_events and startup_events | length > 0 %}
+    <table class="admin-table">
+        <thead>
+            <tr>
+                <th>기동 시각(KST)</th>
+                <th>기동 유형</th>
+                <th>메시지</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for event in startup_events %}
+            <tr>
+                {# timestamp_display 가 비어 있으면(시각 파싱 실패) 원본 일부라도
+                   보이도록 fallback 한다. #}
+                <td>{{ event.timestamp_display or '(시각 미상)' }}</td>
+                {# type_label 은 162-1 파서가 event_type 에서 한국어로 매핑해
+                   채워 준다(일반 기동 / UI 재시작 / 기타 기동). #}
+                <td>{{ event.type_label }}</td>
+                <td>{{ event.message }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="admin-state__muted">기동 이력이 없습니다.</p>
+    {% endif %}
 </section>
 
 {# 페이지 전용 JS — admin_restart.js. 버튼 클릭 → confirm → POST → health 폴링

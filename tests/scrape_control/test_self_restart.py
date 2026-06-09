@@ -105,8 +105,27 @@ def test_trigger_writes_log_under_data_dir(
     # 헤더 라인이 파일에 기록됐는지 확인 (mkdir + open 동작 검증).
     assert expected.is_file()
     content = expected.read_text(encoding="utf-8")
-    assert "셀프 재시작 트리거" in content
+    # task 00162 — 구조화 라인(event=restart_via_ui)으로 기록되며 container/pid/argv
+    # 정보가 보존된다.
+    assert f"event={restart.STARTUP_EVENT_TYPE_RESTART_VIA_UI}" in content
     assert restart.DEFAULT_SELF_RESTART_CONTAINER in content
+    assert "pid=4242" in content
+
+
+def test_trigger_appends_restart_via_ui_event(
+    fake_popen: dict[str, Any], tmp_path: Path
+) -> None:
+    """trigger_self_restart 가 read_recent_startup_events 로 읽히는 restart_via_ui
+    이벤트를 남겨야 한다(파서 round-trip)."""
+    restart.trigger_self_restart(data_dir=tmp_path)
+
+    events = restart.read_recent_startup_events(data_dir=tmp_path)
+    assert len(events) == 1
+    assert events[0].event_type == restart.STARTUP_EVENT_TYPE_RESTART_VIA_UI
+    assert events[0].type_label == "UI 재시작"
+    assert restart.DEFAULT_SELF_RESTART_CONTAINER in events[0].message
+    assert events[0].timestamp_kst is not None
+    assert events[0].timestamp_display != ""
 
 
 def test_container_name_env_override(
@@ -140,3 +159,142 @@ def test_system_restart_log_path_default() -> None:
 
     path = restart.system_restart_log_path()
     assert path == PROJECT_ROOT / "data" / "logs" / "system_restart.log"
+
+
+# ──────────────────────────────────────────────────────────────
+# task 00162 — 구조화 기동 이벤트 로그 (append/read)
+# ──────────────────────────────────────────────────────────────
+
+
+def test_append_startup_event_writes_structured_line(tmp_path: Path) -> None:
+    """append_startup_event 가 [시각] event=<type> ... 형태의 라인을 남긴다."""
+    restart.append_startup_event(
+        restart.STARTUP_EVENT_TYPE_STARTUP, data_dir=tmp_path, extra={"pid": 1234}
+    )
+
+    log_file = tmp_path / "logs" / "system_restart.log"
+    assert log_file.is_file()
+    content = log_file.read_text(encoding="utf-8")
+    assert content.startswith("[")
+    assert f"event={restart.STARTUP_EVENT_TYPE_STARTUP}" in content
+    assert "pid=1234" in content
+    # 한 번 호출 = 한 줄.
+    assert content.count("\n") == 1
+
+
+def test_append_startup_event_appends_in_order(tmp_path: Path) -> None:
+    """여러 번 호출하면 파일에 append 되어 누적된다."""
+    restart.append_startup_event(
+        restart.STARTUP_EVENT_TYPE_STARTUP, data_dir=tmp_path, extra={"pid": 1}
+    )
+    restart.append_startup_event(
+        restart.STARTUP_EVENT_TYPE_STARTUP, data_dir=tmp_path, extra={"pid": 2}
+    )
+
+    log_file = tmp_path / "logs" / "system_restart.log"
+    lines = log_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert "pid=1" in lines[0]
+    assert "pid=2" in lines[1]
+
+
+def test_read_recent_startup_events_missing_file_returns_empty(
+    tmp_path: Path,
+) -> None:
+    """파일이 아직 없으면 빈 리스트를 반환한다(예외 없음)."""
+    events = restart.read_recent_startup_events(data_dir=tmp_path)
+    assert events == []
+
+
+def test_read_recent_startup_events_empty_file_returns_empty(
+    tmp_path: Path,
+) -> None:
+    """빈 파일/공백 라인만 있는 파일은 빈 리스트를 반환한다."""
+    log_file = tmp_path / "logs" / "system_restart.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_file.write_text("\n   \n\n", encoding="utf-8")
+
+    events = restart.read_recent_startup_events(data_dir=tmp_path)
+    assert events == []
+
+
+def test_read_recent_startup_events_newest_first(tmp_path: Path) -> None:
+    """append 순(오래된 것이 위)인 파일을 최신순으로 뒤집어 반환한다."""
+    for pid in (10, 20, 30):
+        restart.append_startup_event(
+            restart.STARTUP_EVENT_TYPE_STARTUP, data_dir=tmp_path, extra={"pid": pid}
+        )
+
+    events = restart.read_recent_startup_events(data_dir=tmp_path)
+    assert [e.message for e in events] == ["pid=30", "pid=20", "pid=10"]
+    assert all(e.event_type == restart.STARTUP_EVENT_TYPE_STARTUP for e in events)
+    assert all(e.type_label == "일반 기동" for e in events)
+
+
+def test_read_recent_startup_events_respects_limit(tmp_path: Path) -> None:
+    """limit 보다 많이 쌓여도 최신 limit 건만 반환한다."""
+    for pid in range(5):
+        restart.append_startup_event(
+            restart.STARTUP_EVENT_TYPE_STARTUP, data_dir=tmp_path, extra={"pid": pid}
+        )
+
+    events = restart.read_recent_startup_events(limit=2, data_dir=tmp_path)
+    assert len(events) == 2
+    assert events[0].message == "pid=4"
+    assert events[1].message == "pid=3"
+
+
+def test_read_recent_startup_events_skips_broken_lines(tmp_path: Path) -> None:
+    """깨진/형식 불명 라인이 섞여 있어도 예외 없이 처리한다."""
+    log_file = tmp_path / "logs" / "system_restart.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_file.write_text(
+        "[not-a-valid-timestamp] event=startup pid=7\n"
+        "garbage line without brackets\n"
+        "[2026-06-09T12:00:00+09:00] event=startup pid=8\n",
+        encoding="utf-8",
+    )
+
+    events = restart.read_recent_startup_events(data_dir=tmp_path)
+    # 세 줄 모두 어떤 형태로든 파싱되어 살아남는다(깨진 시각은 None 으로 graceful).
+    assert len(events) == 3
+    # 최신순(파일 역순): [2]event=startup pid=8 → [1]garbage → [0]event=startup pid=7.
+    # events[0] = 정상 시각 + startup.
+    assert events[0].event_type == restart.STARTUP_EVENT_TYPE_STARTUP
+    assert events[0].timestamp_kst is not None
+    assert events[0].message == "pid=8"
+    # events[1] = 대괄호 없는 garbage 라인 → legacy 로 간주(restart_via_ui), 시각 None.
+    assert events[1].event_type == restart.STARTUP_EVENT_TYPE_RESTART_VIA_UI
+    assert events[1].timestamp_kst is None
+    # events[2] = 시각 파싱 실패 라인 — event_type 은 살아 있고 timestamp 는 None.
+    broken_timestamp = events[2]
+    assert broken_timestamp.event_type == restart.STARTUP_EVENT_TYPE_STARTUP
+    assert broken_timestamp.timestamp_kst is None
+    assert broken_timestamp.timestamp_display == ""
+
+
+def test_read_recent_startup_events_legacy_line_compat(tmp_path: Path) -> None:
+    """event= 토큰 없는 legacy 라인(task 161 형태)은 restart_via_ui 로 인식한다."""
+    log_file = tmp_path / "logs" / "system_restart.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_file.write_text(
+        "[2026-06-01T09:00:00+09:00] 셀프 재시작 트리거: container=iris-agent-web "
+        "argv=sh -c sleep 1 && /usr/bin/docker restart iris-agent-web\n",
+        encoding="utf-8",
+    )
+
+    events = restart.read_recent_startup_events(data_dir=tmp_path)
+    assert len(events) == 1
+    assert events[0].event_type == restart.STARTUP_EVENT_TYPE_RESTART_VIA_UI
+    assert events[0].type_label == "UI 재시작"
+    # 본문 전체가 message 로 보존된다.
+    assert "셀프 재시작 트리거" in events[0].message
+    assert "iris-agent-web" in events[0].message
+
+
+def test_read_recent_startup_events_negative_limit(tmp_path: Path) -> None:
+    """음수 limit 은 방어적으로 빈 리스트를 반환한다."""
+    restart.append_startup_event(
+        restart.STARTUP_EVENT_TYPE_STARTUP, data_dir=tmp_path, extra={"pid": 1}
+    )
+    assert restart.read_recent_startup_events(limit=-1, data_dir=tmp_path) == []

@@ -197,7 +197,7 @@
 
         button.addEventListener('click', function () {
             var confirmed = window.confirm(
-                '지금 iris-agent-web 컨테이너를 재시작할까요?\n' +
+                '지금 정부과제 공고 수집/분석 시스템을 재기동 할까요?\n' +
                 '재시작 동안 잠시 접속이 끊기며, 완료되면 자동으로 새로고침됩니다.'
             );
             if (!confirmed) {
