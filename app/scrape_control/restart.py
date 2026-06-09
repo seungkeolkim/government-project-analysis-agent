@@ -125,8 +125,8 @@ STARTUP_EVENT_TYPE_RESTART_VIA_UI: str = "restart_via_ui"
 # 그대로 출력할 수 있도록 파서가 이 매핑으로 type_label 을 채워 준다. 미등록
 # 유형은 _STARTUP_EVENT_FALLBACK_LABEL 로 대체한다.
 STARTUP_EVENT_TYPE_LABELS: dict[str, str] = {
-    STARTUP_EVENT_TYPE_STARTUP: "일반 기동",
-    STARTUP_EVENT_TYPE_RESTART_VIA_UI: "UI 재시작",
+    STARTUP_EVENT_TYPE_STARTUP: "재기동 완료",
+    STARTUP_EVENT_TYPE_RESTART_VIA_UI: "지금 재시작 버튼 트리거",
 }
 
 # 알 수 없는 event_type 의 표시 라벨(후방호환·미래 확장 대비).

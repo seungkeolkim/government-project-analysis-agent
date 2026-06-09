@@ -224,8 +224,8 @@ def test_restart_page_renders_history_table(
     assert "시스템 기동 이력" in html
     assert "admin-table" in html
     assert "기동 시각(KST)" in html
-    assert "일반 기동" in html
-    assert "UI 재시작" in html
+    assert "재기동 완료" in html
+    assert "지금 재시작 버튼 트리거" in html
     # 빈 상태 문구는 이력이 있을 때 보이지 않는다.
     assert "기동 이력이 없습니다." not in html
 
@@ -288,7 +288,7 @@ def test_restart_page_injects_startup_events_context(
     assert len(startup_events) == 1
     event = startup_events[0]
     assert event.event_type == restart_module.STARTUP_EVENT_TYPE_STARTUP
-    assert event.type_label == "일반 기동"
+    assert event.type_label == "재기동 완료"
     assert hasattr(event, "timestamp_display")
     assert hasattr(event, "message")
 

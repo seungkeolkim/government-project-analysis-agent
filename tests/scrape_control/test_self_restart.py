@@ -122,7 +122,7 @@ def test_trigger_appends_restart_via_ui_event(
     events = restart.read_recent_startup_events(data_dir=tmp_path)
     assert len(events) == 1
     assert events[0].event_type == restart.STARTUP_EVENT_TYPE_RESTART_VIA_UI
-    assert events[0].type_label == "UI 재시작"
+    assert events[0].type_label == "지금 재시작 버튼 트리거"
     assert restart.DEFAULT_SELF_RESTART_CONTAINER in events[0].message
     assert events[0].timestamp_kst is not None
     assert events[0].timestamp_display != ""
@@ -228,7 +228,7 @@ def test_read_recent_startup_events_newest_first(tmp_path: Path) -> None:
     events = restart.read_recent_startup_events(data_dir=tmp_path)
     assert [e.message for e in events] == ["pid=30", "pid=20", "pid=10"]
     assert all(e.event_type == restart.STARTUP_EVENT_TYPE_STARTUP for e in events)
-    assert all(e.type_label == "일반 기동" for e in events)
+    assert all(e.type_label == "재기동 완료" for e in events)
 
 
 def test_read_recent_startup_events_respects_limit(tmp_path: Path) -> None:
@@ -286,7 +286,7 @@ def test_read_recent_startup_events_legacy_line_compat(tmp_path: Path) -> None:
     events = restart.read_recent_startup_events(data_dir=tmp_path)
     assert len(events) == 1
     assert events[0].event_type == restart.STARTUP_EVENT_TYPE_RESTART_VIA_UI
-    assert events[0].type_label == "UI 재시작"
+    assert events[0].type_label == "지금 재시작 버튼 트리거"
     # 본문 전체가 message 로 보존된다.
     assert "셀프 재시작 트리거" in events[0].message
     assert "iris-agent-web" in events[0].message
