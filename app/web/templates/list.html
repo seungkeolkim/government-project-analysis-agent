@@ -189,7 +189,15 @@
                         {% if sort == "collected_desc" %}<span class="sort-icon">▼</span>{% elif sort == "collected_asc" %}<span class="sort-icon">▲</span>{% endif %}
                     </a>
                 </th>
-                <th class="col-status">접수 상태</th>
+                {# 접수 상태 정렬 헤더: status_asc/desc 토글. 기본 방향 asc(접수예정→접수중→마감). #}
+                {% if sort == "status_asc" %}{% set status_next = "status_desc" %}
+                {% else %}{% set status_next = "status_asc" %}{% endif %}
+                <th class="col-status col-sortable{% if sort in ('status_asc', 'status_desc') %} col-sortable--active{% endif %}">
+                    <a class="sort-link" href="/?{{ sort_base_query }}sort={{ status_next }}">
+                        접수 상태
+                        {% if sort == "status_asc" %}<span class="sort-icon">▲</span>{% elif sort == "status_desc" %}<span class="sort-icon">▼</span>{% endif %}
+                    </a>
+                </th>
                 {# 모집 시작일 정렬 헤더: received_desc/asc 토글. 기본 방향 desc(최신순). #}
                 {% if sort == "received_desc" %}{% set received_next = "received_asc" %}
                 {% else %}{% set received_next = "received_desc" %}{% endif %}

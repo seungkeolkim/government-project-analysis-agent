@@ -119,6 +119,7 @@ MAX_PAGE_SIZE: int = 100
 #   공고 수집일 = collected_desc / collected_asc   (COALESCE(updated_at, scraped_at))
 #   모집 시작일 = received_desc  / received_asc    (received_at)
 #   모집 마감일 = deadline_desc  / deadline_asc    (deadline_at)
+#   접수 상태   = status_asc     / status_desc     (접수예정→접수중→마감 우선순위)
 #   기본값      = collected_desc
 _ALLOWED_SORT_VALUES: tuple[str, ...] = (
     "collected_desc",
@@ -127,6 +128,8 @@ _ALLOWED_SORT_VALUES: tuple[str, ...] = (
     "received_asc",
     "deadline_desc",
     "deadline_asc",
+    "status_asc",
+    "status_desc",
     "title_asc",
 )
 
