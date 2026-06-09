@@ -14,7 +14,7 @@
     - scrape_running:         진행중(status='running') 수집 존재 여부 (bool)
     - running_scrape_run_id:  진행중 수집의 ScrapeRun id (없으면 None)
     - startup_events:         최근 기동 이력 StartupEvent 리스트 (최신순, task 00162).
-                              일반 기동(startup) vs. UI 재시작(restart_via_ui) 구분.
+                              재기동 완료(startup) vs. 지금 재시작 버튼 트리거(restart_via_ui) 구분.
     - current_user:           네비 분기용.
 
   동작 흐름 (admin_restart.js):
@@ -73,7 +73,7 @@
 {# ── 시스템 기동 이력 (task 00162) ─────────────────────────────
    메일 발송 이력과 유사한 룩앤필로, 최근 30건 기동 이력을 SSR 테이블로
    보여 준다. startup_events 는 system_restart.log(파일 기반 SSOT)에서 읽은
-   StartupEvent 리스트로, 일반 기동(startup)과 UI 재시작(restart_via_ui)을
+   StartupEvent 리스트로, 재기동 완료(startup)와 지금 재시작 버튼 트리거(restart_via_ui)을
    구분한다. 이를 통해 shell 에서 수동으로 기동했는지, 관리자 화면의 재시작
    버튼을 눌렀는지 이력으로 확인할 수 있다. 별도 JS 폴링 없이 페이지 진입/
    재시작 직후 자동 새로고침 시점에 최신화된다(SSR). #}
@@ -81,7 +81,7 @@
     <h3 class="admin-section__heading">시스템 기동 이력</h3>
     <p class="admin-state__muted">
         최근 {{ startup_events | length }}건의 시스템 기동 이력입니다.
-        '일반 기동'은 shell/컨테이너에서 직접 기동된 경우, 'UI 재시작'은 위
+        '재기동 완료'는 shell/컨테이너에서 직접 기동된 경우, '지금 재시작 버튼 트리거'는 위
         재시작 버튼으로 기동된 경우입니다.
     </p>
 
@@ -101,7 +101,7 @@
                    보이도록 fallback 한다. #}
                 <td>{{ event.timestamp_display or '(시각 미상)' }}</td>
                 {# type_label 은 162-1 파서가 event_type 에서 한국어로 매핑해
-                   채워 준다(일반 기동 / UI 재시작 / 기타 기동). #}
+                   채워 준다(재기동 완료 / 지금 재시작 버튼 트리거 / 기타 기동). #}
                 <td>{{ event.type_label }}</td>
                 <td>{{ event.message }}</td>
             </tr>
