@@ -52,9 +52,14 @@
 
 {% block content %}
 <section class="list-filters">
-    {# GET 폼 하나로 모든 필터·정렬·그룹 상태를 동시에 넘긴다. #}
-    <form method="get" action="/" class="filter-form">
-        <label class="filter-label" for="filter-status">접수 상태</label>
+    {# task 00165 — 상단 필터(접수 상태 ~ 적용)를 하나의 박스로 묶고 'Bold 제목'을 단다.
+       기존 .filter-form 구조는 그대로 두고 바깥만 .filter-box 로 감싼다. #}
+    <div class="filter-box">
+        <p class="filter-box__title">공고 목록 필터</p>
+        {# GET 폼 하나로 모든 필터·정렬·그룹 상태를 동시에 넘긴다. #}
+        <form method="get" action="/" class="filter-form">
+            {# task 00165 — '접수 상태' 는 중요 필터이므로 Bold + 파란색으로 강조한다. #}
+            <label class="filter-label filter-label--status" for="filter-status">접수 상태</label>
         <select id="filter-status" name="status" class="filter-input">
             <option value="" {% if not status %}selected{% endif %}>전체</option>
             <option value="접수중" {% if status == "접수중" %}selected{% endif %}>접수중</option>
@@ -135,6 +140,7 @@
             </label>
         </fieldset>
     </form>
+    </div>
 
     <p class="list-summary">
         총 {{ total }}건{% if group_mode %} (그룹 단위){% endif %} · {{ page }} / {{ total_pages }} 페이지

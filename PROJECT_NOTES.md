@@ -364,6 +364,7 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 
 ## 최근 변경 이력
 
+- [00165] 공고 목록 상단 필터 박스 그룹화 및 접수상태 강조 — 필터 전체를 `.filter-box` card 로 묶고 "공고 목록 필터" Bold 라벨 추가; '접수 상태' 라벨에 `.filter-label--status` modifier 클래스 부여해 Bold + 파란색(`#1d4ed8`) 강조; `list.html` + `style.css` 변경만, 기존 `.filter-*` BEM 컨벤션 준수 — 2026-06-09
 - [00164] 공고 목록 '접수 상태' 컬럼 클릭 정렬 추가 — `status_asc`(접수예정→접수중→마감) / `status_desc` 양방향; SQL `case()` 우선순위 매핑 + Python 그룹 경로(`_group_row_sort_key`) 동기 적용; 템플릿 헤더를 기존 날짜 컬럼과 동일한 `sort-link` UI 패턴으로 교체 — 2026-06-09
 - [00162] 시스템 재시작 화면 개선 — 노출 문구를 '정부과제 공고 수집/분석 시스템을 재기동' 으로 변경; system_restart.log 에 구조화 포맷(`event=startup|restart_via_ui`) 도입 + 웹 컨테이너 일반 기동 시에도 기록하는 FastAPI startup 훅 추가; 관리자 재시작 페이지 하단에 최근 30건 기동 이력 SSR 테이블 표시(신규 endpoint·DB 테이블 없음) — 2026-06-09
 - [00161] iris-agent-web 셀프 재시작 기능 추가 — `app/scrape_control/restart.py` 신설(docker.sock A 방식, `_resolve_docker_binary()` 재사용, `os.setsid` detached subprocess, `data/logs/system_restart.log`), `GET /healthz` 경량 health endpoint(무인증, 비로깅 경로 재활용), 관리자 「시스템 관리」 하위 「시스템 재시작」 서브탭(진행중 수집 가드·confirm·'재시작 중…'·health 폴링·자동 새로고침 UX) — 2026-06-08
@@ -373,4 +374,3 @@ httpx (목록·상세 수집), BeautifulSoup4 (상세 HTML 파싱), pyyaml (sour
 - [00157] 스케줄러 SSOT 를 DB `scheduled_jobs` 전용 테이블로 단일화 — 155·156 으로 SSOT 가 system_settings JSON + 외부 OS crontab 파일로 이원화돼 관리자 직관성·백업 편의가 떨어진 문제 해결; `scheduled_jobs` 신규 테이블(ORM+단일 선형 alembic 리비전)+ `scheduled_job_store` 통합 접근 계층 신설, system_settings 스케줄 트리거 무손실·멱등 이관; crontab 생성기·기동 초기화·admin 라우트(스케줄·백업·Daily Report)를 단일 테이블만 읽도록 재배선(endpoint 무증가, 외부 파일 SSOT 제거 → DB 만 백업하면 crontab 완전 복원); 메일/백업의 비-스케줄 설정만 system_settings 유지; SSOT=scheduled_jobs 규칙 문서·에이전트 메모리에 명시 — 2026-06-05
 - [00156] 스케줄러 웹·DB·crontab 정합성 수정 — task 155 전환 때 레거시 `scheduler_jobs` 에만 남은 일반 수집 스케줄(0 1·0 13)이 신규 SSOT 로 마이그레이션되지 않아 '화면에 없는데 DB에 있다'는 혼선 발생; Alembic 데이터 마이그레이션 2단계(멱등 백필 → 고아 테이블 드롭)로 복구·정리; DB=SystemSetting 단일 SSOT 검증 테스트 신설 — 2026-06-05
 - [00155] SW 기반 APScheduler 를 OS system crontab 으로 완전 교체 — SQLite "database is locked" → APScheduler 스레드 사망 → 전체 스케줄 정지 버그 근본 해결; cron(apt)+gosu 설치, entrypoint root→gosu 권한 모델, run_job CLI 진입점, schedule_store(SystemSetting JSON 키), crontab_generator(순수 함수), crontab_installer; apscheduler 의존성 제거 — 2026-06-05
-- [00154] 리치 텍스트 에디터 본문 영역 빈 상태 배경색 흰색 고정 — `.rich-text-editor__content`에 `background-color:#ffffff` + `box-sizing:border-box` 추가; 제목·이메일·댓글 입력칸과 시각 일관성 확보 — 2026-06-02
