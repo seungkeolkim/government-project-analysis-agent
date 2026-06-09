@@ -52,6 +52,7 @@ def _make_ann(
     scraped_at: datetime | None = None,
     received_at: datetime | None = None,
     deadline_at: datetime | None = None,
+    status: AnnouncementStatus | None = None,
 ) -> SimpleNamespace:
     """_group_row_sort_key 테스트용 경량 공고 객체를 생성한다.
 
@@ -65,6 +66,7 @@ def _make_ann(
         scraped_at=scraped_at,
         received_at=received_at,
         deadline_at=deadline_at,
+        status=status,
     )
 
 
@@ -97,6 +99,8 @@ class TestCoerceSortQuery:
             "received_asc",
             "deadline_desc",
             "deadline_asc",
+            "status_asc",
+            "status_desc",
             "title_asc",
         ],
     )
@@ -139,6 +143,11 @@ class TestAllowedSortValuesSync:
         """deadline_desc / deadline_asc 양방향이 모두 포함되어야 한다."""
         assert "deadline_desc" in REPO_ALLOWED_SORT_VALUES
         assert "deadline_asc" in REPO_ALLOWED_SORT_VALUES
+
+    def test_status_bidirectional(self) -> None:
+        """status_asc / status_desc 양방향이 모두 포함되어야 한다."""
+        assert "status_asc" in REPO_ALLOWED_SORT_VALUES
+        assert "status_desc" in REPO_ALLOWED_SORT_VALUES
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +233,40 @@ class TestGroupRowSortKey:
 
         # desc 이므로 멀리 있는(key_far) 이 더 작은 tuple 값 → sorted() 에서 앞에
         assert key_far < key_near
+
+    def test_status_asc_orders_scheduled_receiving_closed(self) -> None:
+        """status_asc: 접수예정 → 접수중 → 마감 우선순위 순으로 정렬되어야 한다."""
+        ann_scheduled = _make_ann(
+            source_id="scheduled", status=AnnouncementStatus.SCHEDULED
+        )
+        ann_receiving = _make_ann(
+            source_id="receiving", status=AnnouncementStatus.RECEIVING
+        )
+        ann_closed = _make_ann(source_id="closed", status=AnnouncementStatus.CLOSED)
+
+        key_scheduled = _group_row_sort_key(ann_scheduled, "status_asc")
+        key_receiving = _group_row_sort_key(ann_receiving, "status_asc")
+        key_closed = _group_row_sort_key(ann_closed, "status_asc")
+
+        # 접수예정 < 접수중 < 마감 (tuple 값이 작을수록 sorted() 에서 앞에 온다)
+        assert key_scheduled < key_receiving < key_closed
+
+    def test_status_desc_reverses_order(self) -> None:
+        """status_desc: 마감 → 접수중 → 접수예정 역순으로 정렬되어야 한다."""
+        ann_scheduled = _make_ann(
+            source_id="scheduled", status=AnnouncementStatus.SCHEDULED
+        )
+        ann_receiving = _make_ann(
+            source_id="receiving", status=AnnouncementStatus.RECEIVING
+        )
+        ann_closed = _make_ann(source_id="closed", status=AnnouncementStatus.CLOSED)
+
+        key_scheduled = _group_row_sort_key(ann_scheduled, "status_desc")
+        key_receiving = _group_row_sort_key(ann_receiving, "status_desc")
+        key_closed = _group_row_sort_key(ann_closed, "status_desc")
+
+        # 마감 < 접수중 < 접수예정 (역순)
+        assert key_closed < key_receiving < key_scheduled
 
 
 # ---------------------------------------------------------------------------
@@ -329,4 +372,81 @@ class TestListAnnouncementsDefaultSort:
 
         assert ids.index(ann_a.id) < ids.index(ann_b.id), (
             "updated_at 최신인 ann_a 가 ann_b 보다 앞에 와야 한다"
+        )
+
+
+# ---------------------------------------------------------------------------
+# list_announcements 접수 상태 정렬 통합 테스트 (SQL ORDER BY 경로)
+# ---------------------------------------------------------------------------
+
+
+class TestListAnnouncementsStatusSort:
+    """list_announcements 의 status_asc / status_desc 정렬을 DB 경로로 검증한다.
+
+    접수예정(1) → 접수중(2) → 마감(3) 우선순위로 SQL case() 정렬이 적용되는지 확인한다.
+    """
+
+    def _insert_announcement(
+        self,
+        session: Session,
+        *,
+        source_id: str,
+        status: AnnouncementStatus,
+    ) -> Announcement:
+        """지정한 접수 상태를 갖는 테스트용 Announcement 를 DB 에 삽입하고 반환한다."""
+        ann = Announcement(
+            source_announcement_id=source_id,
+            source_type="IRIS",
+            title=f"공고 {source_id}",
+            status=status,
+            is_current=True,
+        )
+        ann.updated_at = _BASE_TIME
+        ann.scraped_at = _BASE_TIME
+        session.add(ann)
+        session.flush()
+        return ann
+
+    def test_status_asc_orders_scheduled_first(self, db_session: Session) -> None:
+        """status_asc: 접수예정 → 접수중 → 마감 순으로 정렬되어야 한다."""
+        ann_closed = self._insert_announcement(
+            db_session, source_id="s_closed", status=AnnouncementStatus.CLOSED
+        )
+        ann_scheduled = self._insert_announcement(
+            db_session, source_id="s_scheduled", status=AnnouncementStatus.SCHEDULED
+        )
+        ann_receiving = self._insert_announcement(
+            db_session, source_id="s_receiving", status=AnnouncementStatus.RECEIVING
+        )
+        db_session.commit()
+
+        results = list_announcements(db_session, sort="status_asc", limit=10)
+        ids = [r.id for r in results]
+
+        assert (
+            ids.index(ann_scheduled.id)
+            < ids.index(ann_receiving.id)
+            < ids.index(ann_closed.id)
+        )
+
+    def test_status_desc_orders_closed_first(self, db_session: Session) -> None:
+        """status_desc: 마감 → 접수중 → 접수예정 역순으로 정렬되어야 한다."""
+        ann_scheduled = self._insert_announcement(
+            db_session, source_id="t_scheduled", status=AnnouncementStatus.SCHEDULED
+        )
+        ann_receiving = self._insert_announcement(
+            db_session, source_id="t_receiving", status=AnnouncementStatus.RECEIVING
+        )
+        ann_closed = self._insert_announcement(
+            db_session, source_id="t_closed", status=AnnouncementStatus.CLOSED
+        )
+        db_session.commit()
+
+        results = list_announcements(db_session, sort="status_desc", limit=10)
+        ids = [r.id for r in results]
+
+        assert (
+            ids.index(ann_closed.id)
+            < ids.index(ann_receiving.id)
+            < ids.index(ann_scheduled.id)
         )

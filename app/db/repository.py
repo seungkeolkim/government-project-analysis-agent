@@ -74,7 +74,7 @@ from functools import reduce
 from typing import Any, Literal
 
 from loguru import logger
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.canonical import compute_canonical_key, strip_ntis_business_suffix
@@ -127,6 +127,7 @@ _ANNOUNCEMENT_PROTECTED_FIELDS: frozenset[str] = frozenset({"id", "scraped_at", 
 #   공고 수집일 = collected_desc / collected_asc   (COALESCE(updated_at, scraped_at))
 #   모집 시작일 = received_desc  / received_asc    (received_at)
 #   모집 마감일 = deadline_desc  / deadline_asc    (deadline_at)
+#   접수 상태   = status_asc     / status_desc     (접수예정→접수중→마감 우선순위)
 #   기본값      = collected_desc
 #   title_asc 는 하위 호환을 위해 유지 (UI select 제거 후에도 북마크 URL 지원)
 _ALLOWED_SORT_VALUES: frozenset[str] = frozenset(
@@ -137,9 +138,20 @@ _ALLOWED_SORT_VALUES: frozenset[str] = frozenset(
         "received_asc",
         "deadline_desc",
         "deadline_asc",
+        "status_asc",
+        "status_desc",
         "title_asc",
     }
 )
+
+# 접수 상태 정렬 우선순위 매핑: 접수예정(1) → 접수중(2) → 마감(3).
+# 사용자 원문 "접수 예정 -> 접수중 -> 마감 순" 을 정수 우선순위로 표현한다.
+# 미매핑(이론상 없음) 상태는 99 로 맨 뒤에 둔다.
+_STATUS_SORT_PRIORITY: dict[AnnouncementStatus, int] = {
+    AnnouncementStatus.SCHEDULED: 1,
+    AnnouncementStatus.RECEIVING: 2,
+    AnnouncementStatus.CLOSED: 3,
+}
 
 # 관련성 판정 verdict 허용값.
 RELEVANCE_VERDICT_RELATED: str = "관련"
@@ -551,6 +563,28 @@ def _apply_sort_order(statement: Any, sort: str) -> Any:
             Announcement.deadline_at.desc(),
             Announcement.id.desc(),
         )
+    elif sort in ("status_asc", "status_desc"):
+        # 접수 상태 우선순위 정렬: 접수예정(1) → 접수중(2) → 마감(3).
+        # case() 로 enum 값을 정수 우선순위로 변환한 뒤 정렬한다.
+        # status 는 NOT NULL enum 이라 별도 NULL flag 정렬은 불필요하지만,
+        # 혹시 모를 미매핑 값은 else_=99 로 맨 뒤로 보낸다.
+        status_priority = case(
+            (Announcement.status == AnnouncementStatus.SCHEDULED, 1),
+            (Announcement.status == AnnouncementStatus.RECEIVING, 2),
+            (Announcement.status == AnnouncementStatus.CLOSED, 3),
+            else_=99,
+        )
+        if sort == "status_asc":
+            # 접수예정 → 접수중 → 마감 (기본 방향)
+            return statement.order_by(
+                status_priority.asc(),
+                Announcement.id.desc(),
+            )
+        # status_desc — 마감 → 접수중 → 접수예정 (역순)
+        return statement.order_by(
+            status_priority.desc(),
+            Announcement.id.desc(),
+        )
     elif sort == "title_asc":
         # 공고명 가나다순 (하위 호환)
         return statement.order_by(
@@ -608,6 +642,16 @@ def _group_row_sort_key(ann: Announcement, sort: str) -> tuple:
         if sort == "deadline_asc":
             return (0, ts, -ann.id)
         return (0, -ts, -ann.id)
+    elif sort in ("status_asc", "status_desc"):
+        # 접수 상태 우선순위 정렬: 접수예정(1) → 접수중(2) → 마감(3).
+        # ann.status 는 StrEnum 이므로 dict.get 으로 안전하게 정수 우선순위로 변환한다.
+        # 미매핑(이론상 없음) 상태는 99 로 맨 뒤에 둔다.
+        priority = _STATUS_SORT_PRIORITY.get(ann.status, 99)
+        if sort == "status_asc":
+            # 접수예정 → 접수중 → 마감 (기본 방향)
+            return (0, priority, -ann.id)
+        # status_desc — 우선순위 부호 반전으로 역순 정렬
+        return (0, -priority, -ann.id)
     elif sort == "title_asc":
         # 하위 호환 — 2-tuple (동일 sort 내에서만 비교되므로 형 충돌 없음)
         return (ann.title or "", -ann.id)
