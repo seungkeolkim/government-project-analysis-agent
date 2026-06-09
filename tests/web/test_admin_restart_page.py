@@ -151,6 +151,85 @@ def test_restart_page_button_disabled_when_running_scrape(
     assert f"scrape_run_id={running_id}" in html
 
 
+def test_restart_page_shows_new_wording(admin_client: TestClient) -> None:
+    """설명 문구가 'iris-agent-web 컨테이너' 대신 새 문구를 보인다(task 00162)."""
+    resp = admin_client.get("/admin/system/restart", follow_redirects=False)
+    assert resp.status_code == 200, resp.text
+    html = resp.text
+
+    # 새 문구가 보이고, 옛 컨테이너 표현은 사용자 노출 본문에서 사라진다.
+    assert "정부과제 공고 수집/분석 시스템을 재기동" in html
+    assert "iris-agent-web 컨테이너를 재시작합니다" not in html
+
+
+def test_restart_page_shows_empty_history_state(
+    admin_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """기동 이력이 0건이면 빈 상태 문구를 보인다(task 00162).
+
+    이력 소스를 빈 리스트로 고정해 빈 상태 분기를 결정적으로 검증한다.
+    """
+    from app.web.routes import admin as admin_module
+
+    monkeypatch.setattr(
+        admin_module, "read_recent_startup_events", lambda *, limit=30: []
+    )
+
+    resp = admin_client.get("/admin/system/restart", follow_redirects=False)
+    assert resp.status_code == 200, resp.text
+    html = resp.text
+
+    # 기동 이력 섹션 제목은 항상 렌더되고, 0건이면 빈 상태 문구가 보인다.
+    assert "시스템 기동 이력" in html
+    assert "기동 이력이 없습니다." in html
+
+
+def test_restart_page_renders_history_table(
+    admin_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """기동 이력이 있으면 시각/유형/메시지 컬럼 테이블이 렌더된다(task 00162)."""
+    from app.scrape_control import restart as restart_module
+    from app.web.routes import admin as admin_module
+
+    # 임시 로그에 일반 기동 1건 + UI 재시작 1건을 남기고, 라우트가 임시 data_dir
+    # 를 읽도록 우회한다.
+    restart_module.append_startup_event(
+        restart_module.STARTUP_EVENT_TYPE_STARTUP,
+        data_dir=tmp_path,
+        extra={"pid": 4242},
+    )
+    restart_module.append_startup_event(
+        restart_module.STARTUP_EVENT_TYPE_RESTART_VIA_UI,
+        data_dir=tmp_path,
+        extra={"container": "iris-agent-web", "pid": 4243},
+    )
+
+    original_reader = restart_module.read_recent_startup_events
+
+    def _reader_with_tmp_dir(*, limit: int = 30, data_dir=None):
+        return original_reader(limit=limit, data_dir=tmp_path)
+
+    monkeypatch.setattr(
+        admin_module, "read_recent_startup_events", _reader_with_tmp_dir
+    )
+
+    resp = admin_client.get("/admin/system/restart", follow_redirects=False)
+    assert resp.status_code == 200, resp.text
+    html = resp.text
+
+    # 기동 이력 섹션과 테이블이 렌더되고, 두 유형 라벨이 모두 보인다.
+    assert "시스템 기동 이력" in html
+    assert "admin-table" in html
+    assert "기동 시각(KST)" in html
+    assert "일반 기동" in html
+    assert "UI 재시작" in html
+    # 빈 상태 문구는 이력이 있을 때 보이지 않는다.
+    assert "기동 이력이 없습니다." not in html
+
+
 # ──────────────────────────────────────────────────────────────
 # GET /admin/system/restart — 기동 이력 컨텍스트 (task 00162)
 # ──────────────────────────────────────────────────────────────
